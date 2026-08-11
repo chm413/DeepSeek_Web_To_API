@@ -265,7 +265,7 @@
         "nodeUriPlaceholder": "Paste the {type}:// node URI",
         "nodeUriKeepHint": "Leave blank to keep the currently stored node URI.",
         "typeHelp": "socks5 resolves the target hostname locally before dialing through the proxy; socks5h forwards the hostname to the proxy for remote DNS resolution.",
-        "coreTypeHelp": "The node URI is stored as a protected secret. Xray exposes a private local SOCKS listener for this account route.",
+        "coreTypeHelp": "The node URI is treated as sensitive and is not returned by safe admin APIs. Xray exposes a private local SOCKS listener for this account route.",
         "requiredFields": "Host and port, or a node URI, are required.",
         "saving": "Saving...",
         "testing": "Testing",
