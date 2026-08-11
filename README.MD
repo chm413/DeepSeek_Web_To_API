@@ -4,7 +4,7 @@
 
 DeepSeek Web To API 是一个自托管 Go 网关，将 DeepSeek Web 会话转换为 OpenAI、Anthropic Claude 和 Gemini 兼容接口，并提供账号、会话、缓存、日志和代理路由管理台。
 
-当前版本：**v1.1.0**
+当前版本：**v1.1.1**
 
 ## 主要能力
 

@@ -47,7 +47,11 @@
     },
     "auth": {
         "expired": "Authentication expired. Please sign in again.",
-        "checking": "Checking authentication status..."
+        "checking": "Checking authentication status...",
+        "checkingBackendCompatibility": "Checking backend compatibility...",
+        "backendMismatchTitle": "Backend and WebUI versions do not match",
+        "backendMismatchDescription": "This WebUI requires API contract {required}, but the running backend reports {current}. Restart with the matching server binary before using the admin console.",
+        "reloadAfterUpgrade": "Reload after upgrade"
     },
     "errors": {
         "fetchConfig": "Failed to fetch configuration: {error}"

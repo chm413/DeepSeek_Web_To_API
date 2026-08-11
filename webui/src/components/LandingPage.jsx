@@ -114,7 +114,7 @@ const LandingPage = ({ onEnter }) => {
                         <span>📡</span> {t('landing.apiStatus')}
                     </a>
                     <a
-                        href="https://github.com/Meow-Calculations/DeepSeek_Web_To_API"
+                        href="https://github.com/chm413/DeepSeek_Web_To_API"
                         target="_blank"
                         rel="noreferrer"
                         className="glass-card text-white px-8 py-3 rounded-xl font-semibold transition-all flex items-center gap-2"

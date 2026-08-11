@@ -47,7 +47,11 @@
     },
     "auth": {
         "expired": "认证已过期，请重新登录",
-        "checking": "正在检查登录状态..."
+        "checking": "正在检查登录状态...",
+        "checkingBackendCompatibility": "正在检查后端兼容性...",
+        "backendMismatchTitle": "后端与 WebUI 版本不匹配",
+        "backendMismatchDescription": "当前 WebUI 需要 API 契约 {required}，运行中的后端仅报告 {current}。请使用匹配的服务端二进制重启后再操作管理台。",
+        "reloadAfterUpgrade": "升级后重新加载"
     },
     "errors": {
         "fetchConfig": "获取配置失败: {error}"

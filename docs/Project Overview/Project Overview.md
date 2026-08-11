@@ -39,7 +39,7 @@ DeepSeek_Web_To_API 是一个单进程自托管网关。它把 DeepSeek Web 能�
 - 本地存储：SQLite（5 个独立库）、文件系统 gzip 缓存。
 - 部署：二进制（含 ldflags 版本注入）、Docker Compose、GHCR 镜像、GitHub Release 产物；生产实例通过 `scripts/deploy_107.py` 自动化部署（目标主机由环境变量 `DST_HOST` 提供，不在仓库中硬编码）。
 
-当前版本：**v1.1.0**（自托管部署）。
+当前版本：**v1.1.1**（自托管部署）。
 
 **章节来源**
 - [go.mod](file://go.mod)

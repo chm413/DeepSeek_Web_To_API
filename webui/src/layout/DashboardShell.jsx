@@ -14,8 +14,10 @@ import {
     Menu,
     Network,
     RadioTower,
+    RefreshCw,
     Search,
     Settings as SettingsIcon,
+    ShieldAlert,
     TerminalSquare,
     Upload,
     Users,
@@ -34,12 +36,11 @@ const BatchImport = lazy(() => import('../components/BatchImport'))
 const SettingsContainer = lazy(() => import('../features/settings/SettingsContainer'))
 const ProxyManagerContainer = lazy(() => import('../features/proxy/ProxyManagerContainer'))
 
-const GITHUB_RELEASE_API = 'https://api.github.com/repos/Meow-Calculations/DeepSeek_Web_To_API/releases/latest'
-const GITHUB_TAGS_API = 'https://api.github.com/repos/Meow-Calculations/DeepSeek_Web_To_API/tags?per_page=1'
-const GITHUB_RELEASES_URL = 'https://github.com/Meow-Calculations/DeepSeek_Web_To_API/releases'
+const GITHUB_RELEASE_API = 'https://api.github.com/repos/chm413/DeepSeek_Web_To_API/releases/latest'
+const GITHUB_TAGS_API = 'https://api.github.com/repos/chm413/DeepSeek_Web_To_API/tags?per_page=1'
+const GITHUB_RELEASES_URL = 'https://github.com/chm413/DeepSeek_Web_To_API/releases'
 const ALLOWED_UPDATE_HOST_PREFIXES = [
-    'https://github.com/Meow-Calculations/',
-    'https://github.com/meow-calculations/',
+    'https://github.com/chm413/DeepSeek_Web_To_API/',
 ]
 // 10-minute interval — adopted from CNB PR #15. GitHub's unauthenticated
 // REST API rate-limits to 60 req/h per IP; the previous 30s polling
@@ -48,11 +49,12 @@ const ALLOWED_UPDATE_HOST_PREFIXES = [
 // well under the limit while still surfacing new releases promptly.
 const VERSION_CHECK_INTERVAL_MS = 600_000
 const VERSION_NOTIFY_STORAGE_KEY = 'deepseek-web-to-api_notified_update_tag'
+const WEBUI_API_CONTRACT_VERSION = 2
 
 // safeUpdateURL filters the update-notification href so a compromised /
 // rate-limit-evasion / hostile GitHub API response cannot point the
 // "Update available" link at a `javascript:` URL or a phishing domain.
-// Anything that does not start with the canonical Meow-Calculations
+// Anything that does not start with the canonical project
 // release prefix falls back to the static GITHUB_RELEASES_URL.
 const safeUpdateURL = (url) => {
     if (typeof url !== 'string') {
@@ -142,6 +144,7 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
     const navigate = useNavigate()
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [versionInfo, setVersionInfo] = useState(null)
+    const [versionCheckComplete, setVersionCheckComplete] = useState(false)
     const [availableUpdate, setAvailableUpdate] = useState(null)
 
     const navItems = [
@@ -196,6 +199,10 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
                 if (!disposed) {
                     setVersionInfo(null)
                 }
+            } finally {
+                if (!disposed) {
+                    setVersionCheckComplete(true)
+                }
             }
         }
         loadVersion()
@@ -249,7 +256,37 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
         }
     }, [showMessage, t, versionInfo?.current_tag, versionInfo?.current_version])
 
+    const serverAPIContractVersion = Number(versionInfo?.api_contract_version || 0)
+    const hasAPIContractMismatch = versionCheckComplete
+        && versionInfo !== null
+        && serverAPIContractVersion < WEBUI_API_CONTRACT_VERSION
+
     const renderTab = () => {
+        if (!versionCheckComplete) {
+            return <TabLoadingFallback label={t('auth.checkingBackendCompatibility')} />
+        }
+        if (hasAPIContractMismatch) {
+            return (
+                <section className="ops-panel min-h-[360px] flex items-center justify-center p-6">
+                    <div className="w-full max-w-xl text-center">
+                        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-amber-200 bg-amber-50 text-amber-700">
+                            <ShieldAlert className="h-6 w-6" />
+                        </div>
+                        <h2 className="mt-5 text-lg font-black text-slate-950">{t('auth.backendMismatchTitle')}</h2>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                            {t('auth.backendMismatchDescription', {
+                                current: serverAPIContractVersion,
+                                required: WEBUI_API_CONTRACT_VERSION,
+                            })}
+                        </p>
+                        <button className="btn btn-primary mt-6" onClick={() => window.location.reload()}>
+                            <RefreshCw className="h-4 w-4" />
+                            {t('auth.reloadAfterUpgrade')}
+                        </button>
+                    </div>
+                </section>
+            )
+        }
         switch (activeTab) {
             case 'overview':
                 return <OverviewContainer config={config} onMessage={showMessage} authFetch={authFetch} />

@@ -4,7 +4,7 @@ Language: [中文](README.MD) | [English](README.en.md)
 
 DeepSeek Web To API is a self-hosted Go gateway that exposes DeepSeek Web sessions through OpenAI, Anthropic Claude, and Gemini-compatible APIs. It includes an admin console for accounts, sessions, caches, logs, and proxy routing.
 
-Current version: **v1.1.0**
+Current version: **v1.1.1**
 
 ## Features
 
