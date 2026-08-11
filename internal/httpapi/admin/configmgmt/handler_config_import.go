@@ -169,6 +169,12 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			if hasPayloadKey("proxy_core") {
 				next.ProxyCore = incoming.ProxyCore
 			}
+			if hasPayloadKey("proxy_policy") {
+				next.ProxyPolicy = incoming.ProxyPolicy
+			}
+			if hasPayloadKey("proxy_subscriptions") {
+				next.ProxySubscriptions = incoming.ProxySubscriptions
+			}
 			// Storage paths: when payload provides "storage" we replace the
 			// whole subtree so newly added fields (e.g. token_usage_sqlite_path)
 			// survive a round-trip through export → import. Operators who do
@@ -220,6 +226,10 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	xrayproxy.Default().StopAll()
+	if err := xrayproxy.SyncAssigned(r.Context(), h.Store.Snapshot()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "config imported but xray route sync failed: " + err.Error()})
+		return
+	}
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":           true,

@@ -2,9 +2,13 @@ name: Release Artifacts
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
       - "*.*.*"
+    paths:
+      - VERSION
   release:
     types:
       - published
@@ -26,7 +30,7 @@ concurrency:
 env:
   GO_VERSION: "1.26.x"
   NODE_VERSION: "24"
-  IMAGE_NAME: ghcr.io/meow-calculations/deepseek-web-to-api
+  IMAGE_NAME: ghcr.io/chm413/deepseek-web-to-api
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -50,12 +54,16 @@ jobs:
               tag="${{ github.event.release.tag_name }}"
               ;;
             push)
-              tag="${GITHUB_REF_NAME}"
+              if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+                tag="${GITHUB_REF_NAME}"
+              elif [[ -f VERSION ]]; then
+                tag="v$(tr -d '[:space:]' < VERSION)"
+              fi
               ;;
             workflow_dispatch)
               tag="${{ github.event.inputs.release_tag }}"
               if [[ -z "${tag}" && -f VERSION ]]; then
-                tag="$(tr -d '[:space:]' < VERSION)"
+                tag="v$(tr -d '[:space:]' < VERSION)"
               fi
               ;;
           esac
@@ -66,7 +74,7 @@ jobs:
           fi
 
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "version=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
           echo "Resolved release tag: ${tag}"
 
       - name: Setup Go

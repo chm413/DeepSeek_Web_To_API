@@ -1,11 +1,13 @@
 package client
 
 import (
-	dsprotocol "DeepSeek_Web_To_API/internal/deepseek/protocol"
 	"context"
 	"net/http"
 	"strings"
 	"testing"
+
+	"DeepSeek_Web_To_API/internal/config"
+	dsprotocol "DeepSeek_Web_To_API/internal/deepseek/protocol"
 )
 
 func TestProxyDialAddressUsesLocalResolutionForSocks5(t *testing.T) {
@@ -82,5 +84,20 @@ func TestProxyConnectivityStatus(t *testing.T) {
 				t.Fatalf("expected message to contain %q, got %q", tc.wantText, message)
 			}
 		})
+	}
+}
+
+func TestProxyCacheKeyIncludesXrayDownloadSettings(t *testing.T) {
+	proxyCfg := config.Proxy{ID: "node", Type: "vless", URI: "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none"}
+	base := config.ProxyCoreConfig{DownloadDir: "data/xray", DownloadVersion: "v1"}
+	changed := base
+	changed.DownloadVersion = "v2"
+	if proxyCacheKey(proxyCfg, base) == proxyCacheKey(proxyCfg, changed) {
+		t.Fatal("download version must invalidate cached proxy clients")
+	}
+	changed = base
+	changed.AutoDownloadDisabled = true
+	if proxyCacheKey(proxyCfg, base) == proxyCacheKey(proxyCfg, changed) {
+		t.Fatal("auto-download setting must invalidate cached proxy clients")
 	}
 }

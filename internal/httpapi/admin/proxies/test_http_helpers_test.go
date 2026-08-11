@@ -40,6 +40,14 @@ func newHTTPAdminHarness(t *testing.T, rawConfig string, ds adminshared.DeepSeek
 	t.Helper()
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", rawConfig)
 	store := config.LoadStore()
+	return newHTTPAdminHarnessWithStoreAndDS(store, ds)
+}
+
+func newHTTPAdminHarnessWithStore(store *config.Store) http.Handler {
+	return newHTTPAdminHarnessWithStoreAndDS(store, &testingDSMock{})
+}
+
+func newHTTPAdminHarnessWithStoreAndDS(store *config.Store, ds adminshared.DeepSeekCaller) http.Handler {
 	pool := account.NewPool(store)
 	h := &Handler{Store: store, Pool: pool, DS: ds}
 	configHandler := &adminconfig.Handler{Store: store, Pool: pool, DS: ds}

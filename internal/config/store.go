@@ -11,16 +11,17 @@ import (
 )
 
 type Store struct {
-	mu            sync.RWMutex
-	cfg           Config
-	path          string
-	fromEnv       bool
-	accountsDB    *accountSQLiteStore
-	keyMap        map[string]struct{}          // O(1) API key lookup index
-	accMap        map[string]int               // O(1) account lookup: identifier -> slice index
-	accTest       map[string]string            // runtime-only account test status cache
-	accTestResult map[string]AccountTestResult // runtime-only account test detail cache
-	accSess       map[string]int               // runtime-only account session count cache
+	mu              sync.RWMutex
+	cfg             Config
+	path            string
+	fromEnv         bool
+	accountsDB      *accountSQLiteStore
+	keyMap          map[string]struct{}          // O(1) API key lookup index
+	accMap          map[string]int               // O(1) account lookup: identifier -> slice index
+	accTest         map[string]string            // runtime-only account test status cache
+	accTestResult   map[string]AccountTestResult // runtime-only account test detail cache
+	accSess         map[string]int               // runtime-only account session count cache
+	changeListeners []func(Config)
 }
 
 // AccountTestResult is the latest operator-triggered account check. It is
@@ -255,32 +256,64 @@ func accountIdentifiersMatch(acc Account, identifier string) bool {
 
 func (s *Store) Replace(cfg Config) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	cfg.NormalizeCredentials()
 	if err := s.persistAccountsLocked(&cfg); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.cfg = cfg.Clone()
 	s.rebuildIndexes()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	snapshot := s.cfg.Clone()
+	listeners := append([]func(Config){}, s.changeListeners...)
+	s.mu.Unlock()
+	notifyConfigListeners(listeners, snapshot)
+	return nil
 }
 
 func (s *Store) Update(mutator func(*Config) error) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	base := s.cfg.Clone()
 	cfg := base.Clone()
 	if err := mutator(&cfg); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	cfg.ReconcileCredentials(base)
 	cfg.NormalizeCredentials()
 	if err := s.persistAccountsLocked(&cfg); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.cfg = cfg
 	s.rebuildIndexes()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	snapshot := s.cfg.Clone()
+	listeners := append([]func(Config){}, s.changeListeners...)
+	s.mu.Unlock()
+	notifyConfigListeners(listeners, snapshot)
+	return nil
+}
+
+func (s *Store) OnChange(listener func(Config)) {
+	if s == nil || listener == nil {
+		return
+	}
+	s.mu.Lock()
+	s.changeListeners = append(s.changeListeners, listener)
+	s.mu.Unlock()
+}
+
+func notifyConfigListeners(listeners []func(Config), snapshot Config) {
+	for _, listener := range listeners {
+		listener(snapshot.Clone())
+	}
 }
 
 func (s *Store) Save() error {

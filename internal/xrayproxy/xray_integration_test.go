@@ -59,23 +59,31 @@ func TestManagerStartsAndStopsOfficialXray(t *testing.T) {
 	}
 	manager := NewManager()
 	defer manager.StopAll()
-	address, err := manager.Ensure(context.Background(), Spec{
-		ID:   "lifecycle-test",
-		Type: "vless",
-		URI:  "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com",
+	addresses, err := manager.EnsureMany(context.Background(), []Spec{
+		{ID: "lifecycle-vless", Type: "vless", URI: "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com"},
+		{ID: "lifecycle-vmess", Type: "vmess", URI: "vmess://eyJ2IjoiMiIsInBzIjoiVGVzdCIsImFkZCI6ImV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoiMjIyMjIyMjItMjIyMi0yMjIyLTIyMjItMjIyMjIyMjIyMjIyIiwiYWlkIjoiMCIsInNjeSI6ImF1dG8iLCJuZXQiOiJ3cyIsImhvc3QiOiJleGFtcGxlLmNvbSIsInBhdGgiOiIvd3MiLCJ0bHMiOiJ0bHMifQ"},
 	}, Settings{BinaryPath: binary, RuntimeDir: t.TempDir(), StartupTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("start Xray: %v", err)
 	}
-	conn, err := net.DialTimeout("tcp", address, time.Second)
-	if err != nil {
-		t.Fatalf("dial local SOCKS listener: %v", err)
+	for proxyID, address := range addresses {
+		conn, err := net.DialTimeout("tcp", address, time.Second)
+		if err != nil {
+			t.Fatalf("dial local SOCKS listener for %s: %v", proxyID, err)
+		}
+		_ = conn.Close()
 	}
-	_ = conn.Close()
 	if manager.Count() != 1 {
-		t.Fatalf("expected one running instance, got %d", manager.Count())
+		t.Fatalf("expected one shared running instance, got %d", manager.Count())
 	}
-	manager.Stop("lifecycle-test")
+	if manager.RouteCount() != 2 {
+		t.Fatalf("expected two routes, got %d", manager.RouteCount())
+	}
+	manager.Stop("lifecycle-vless")
+	if manager.Count() != 1 || manager.RouteCount() != 1 {
+		t.Fatalf("expected one process with one remaining route, got process=%d routes=%d", manager.Count(), manager.RouteCount())
+	}
+	manager.Stop("lifecycle-vmess")
 	if manager.Count() != 0 {
 		t.Fatalf("expected stopped manager, got %d instances", manager.Count())
 	}

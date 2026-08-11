@@ -15,6 +15,19 @@ func promptLimitConfigured(p PromptLimitConfig) bool {
 		p.IncrementalRotationKeepRecent > 0
 }
 
+func proxyCoreConfigured(c ProxyCoreConfig) bool {
+	return strings.TrimSpace(c.XrayBinaryPath) != "" || strings.TrimSpace(c.RuntimeDir) != "" ||
+		c.StartupTimeoutSeconds > 0 || c.AutoDownloadDisabled || strings.TrimSpace(c.DownloadDir) != "" ||
+		strings.TrimSpace(c.DownloadVersion) != ""
+}
+
+func proxyPolicyConfigured(p ProxyPolicyConfig) bool {
+	return p.HealthCheckEnabled != nil || p.HealthCheckIntervalMinutes > 0 ||
+		p.AutoDisableAfterFailures > 0 || p.AutoEnableOnRecovery != nil ||
+		strings.TrimSpace(p.FallbackProxyID) != "" || p.SubscriptionUpdateIntervalMinutes > 0 ||
+		p.TestConcurrency > 0
+}
+
 func (c Config) MarshalJSON() ([]byte, error) {
 	m := map[string]any{}
 	for k, v := range c.AdditionalFields {
@@ -32,8 +45,14 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	if len(c.Proxies) > 0 {
 		m["proxies"] = c.Proxies
 	}
-	if strings.TrimSpace(c.ProxyCore.XrayBinaryPath) != "" || strings.TrimSpace(c.ProxyCore.RuntimeDir) != "" || c.ProxyCore.StartupTimeoutSeconds > 0 {
+	if len(c.ProxySubscriptions) > 0 {
+		m["proxy_subscriptions"] = c.ProxySubscriptions
+	}
+	if proxyCoreConfigured(c.ProxyCore) {
 		m["proxy_core"] = c.ProxyCore
+	}
+	if proxyPolicyConfigured(c.ProxyPolicy) {
+		m["proxy_policy"] = c.ProxyPolicy
 	}
 	if len(c.ModelAliases) > 0 {
 		m["model_aliases"] = c.ModelAliases
@@ -109,8 +128,16 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 			if err := json.Unmarshal(v, &c.Proxies); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
+		case "proxy_subscriptions":
+			if err := json.Unmarshal(v, &c.ProxySubscriptions); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
 		case "proxy_core":
 			if err := json.Unmarshal(v, &c.ProxyCore); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
+		case "proxy_policy":
+			if err := json.Unmarshal(v, &c.ProxyPolicy); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
 		case "claude_mapping":
@@ -191,11 +218,21 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 
 func (c Config) Clone() Config {
 	clone := Config{
-		Keys:         slices.Clone(c.Keys),
-		APIKeys:      slices.Clone(c.APIKeys),
-		Accounts:     slices.Clone(c.Accounts),
-		Proxies:      slices.Clone(c.Proxies),
-		ProxyCore:    c.ProxyCore,
+		Keys:               slices.Clone(c.Keys),
+		APIKeys:            slices.Clone(c.APIKeys),
+		Accounts:           slices.Clone(c.Accounts),
+		Proxies:            slices.Clone(c.Proxies),
+		ProxySubscriptions: slices.Clone(c.ProxySubscriptions),
+		ProxyCore:          c.ProxyCore,
+		ProxyPolicy: ProxyPolicyConfig{
+			HealthCheckEnabled:                cloneBoolPtr(c.ProxyPolicy.HealthCheckEnabled),
+			HealthCheckIntervalMinutes:        c.ProxyPolicy.HealthCheckIntervalMinutes,
+			AutoDisableAfterFailures:          c.ProxyPolicy.AutoDisableAfterFailures,
+			AutoEnableOnRecovery:              cloneBoolPtr(c.ProxyPolicy.AutoEnableOnRecovery),
+			FallbackProxyID:                   c.ProxyPolicy.FallbackProxyID,
+			SubscriptionUpdateIntervalMinutes: c.ProxyPolicy.SubscriptionUpdateIntervalMinutes,
+			TestConcurrency:                   c.ProxyPolicy.TestConcurrency,
+		},
 		ModelAliases: cloneStringMap(c.ModelAliases),
 		Admin:        c.Admin,
 		Server: ServerConfig{

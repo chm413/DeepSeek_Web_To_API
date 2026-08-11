@@ -72,6 +72,9 @@ func proxyCacheKey(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) string
 		coreCfg.XrayBinaryPath,
 		coreCfg.RuntimeDir,
 		strconv.Itoa(coreCfg.StartupTimeoutSeconds),
+		strconv.FormatBool(coreCfg.AutoDownloadDisabled),
+		coreCfg.DownloadDir,
+		coreCfg.DownloadVersion,
 	}, "|")
 }
 
@@ -82,11 +85,7 @@ func proxyDialContext(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) (tr
 			return nil, err
 		}
 		spec := xrayproxy.Spec{ID: proxyCfg.ID, Type: proxyCfg.Type, URI: proxyCfg.URI}
-		settings := xrayproxy.Settings{
-			BinaryPath:     coreCfg.XrayBinaryPath,
-			RuntimeDir:     coreCfg.RuntimeDir,
-			StartupTimeout: time.Duration(coreCfg.StartupTimeoutSeconds) * time.Second,
-		}
+		settings := xrayproxy.SettingsFromConfig(coreCfg)
 		return func(ctx context.Context, network, address string) (net.Conn, error) {
 			localAddress, err := xrayproxy.Default().Ensure(ctx, spec, settings)
 			if err != nil {
@@ -139,9 +138,29 @@ func (c *Client) resolveProxyForAccount(acc config.Account) (config.Proxy, confi
 		return config.Proxy{}, config.ProxyCoreConfig{}, false
 	}
 	snap := c.Store.Snapshot()
+	var selected config.Proxy
+	found := false
 	for _, proxyCfg := range snap.Proxies {
 		proxyCfg = config.NormalizeProxy(proxyCfg)
 		if proxyCfg.ID == proxyID {
+			selected = proxyCfg
+			found = true
+			break
+		}
+	}
+	if !found {
+		return config.Proxy{}, snap.ProxyCore, false
+	}
+	if !selected.Disabled {
+		return selected, snap.ProxyCore, true
+	}
+	fallbackID := strings.TrimSpace(snap.ProxyPolicy.FallbackProxyID)
+	if fallbackID == "" || fallbackID == selected.ID {
+		return config.Proxy{}, snap.ProxyCore, false
+	}
+	for _, proxyCfg := range snap.Proxies {
+		proxyCfg = config.NormalizeProxy(proxyCfg)
+		if proxyCfg.ID == fallbackID && !proxyCfg.Disabled {
 			return proxyCfg, snap.ProxyCore, true
 		}
 	}

@@ -58,7 +58,7 @@ end
 subgraph "CI（release-artifacts.yml）"
 REL_GATE["Release Blocking Gates<br/>lint + refactor + run-unit-all"]
 REL_BUILD["Build Multi-Platform Archives<br/>linux/amd64/arm64, macOS, Windows"]
-REL_DOCKER["Build & Push Docker Image<br/>ghcr.io/meow-calculations/deepseek-web-to-api"]
+REL_DOCKER["Build & Push Docker Image<br/>ghcr.io/chm413/deepseek-web-to-api"]
 REL_UPLOAD["Upload Release Assets"]
 end
 GOFMT --> RACE
@@ -207,7 +207,7 @@ git push meow v1.0.12
 产物位置：
 
 - GitHub Releases：多平台 `.tar.gz` / `.zip`、Docker image tar.gz、`sha256sums.txt`。
-- GitHub Packages：`ghcr.io/meow-calculations/deepseek-web-to-api`。
+- GitHub Packages：`ghcr.io/chm413/deepseek-web-to-api`。
 
 ### 管理台版本提醒
 

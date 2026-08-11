@@ -25,8 +25,21 @@
   "proxy_core": {
     "xray_binary_path": "",
     "runtime_dir": "",
-    "startup_timeout_seconds": 10
+    "startup_timeout_seconds": 10,
+    "auto_download_disabled": false,
+    "download_dir": "data/xray",
+    "download_version": ""
   },
+  "proxy_policy": {
+    "health_check_enabled": true,
+    "health_check_interval_minutes": 15,
+    "auto_disable_after_failures": 3,
+    "auto_enable_on_recovery": true,
+    "fallback_proxy_id": "",
+    "subscription_update_interval_minutes": 60,
+    "test_concurrency": 4
+  },
+  "proxy_subscriptions": [],
   "model_aliases": {
     "gpt-4o": "deepseek-v4-flash",
     "gpt-5.5": "deepseek-v4-flash",

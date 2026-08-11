@@ -45,6 +45,7 @@ type App struct {
 	DS                       *dsclient.Client
 	Router                   http.Handler
 	stopAccountHealthMonitor context.CancelFunc
+	stopProxyMonitor         context.CancelFunc
 }
 
 func NewApp() (*App, error) {
@@ -209,6 +210,9 @@ func NewApp() (*App, error) {
 	})
 
 	app := &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}
+	proxyMonitorCtx, stopProxyMonitor := context.WithCancel(context.Background())
+	app.stopProxyMonitor = stopProxyMonitor
+	startProxyMonitor(proxyMonitorCtx, store, pool)
 	if intervalMinutes := store.RuntimeAccountHealthCheckIntervalMinutes(); intervalMinutes > 0 {
 		monitorCtx, cancel := context.WithCancel(context.Background())
 		app.stopAccountHealthMonitor = cancel
@@ -218,10 +222,15 @@ func NewApp() (*App, error) {
 }
 
 func (a *App) Close() {
-	if a == nil || a.stopAccountHealthMonitor == nil {
+	if a == nil {
 		return
 	}
-	a.stopAccountHealthMonitor()
+	if a.stopAccountHealthMonitor != nil {
+		a.stopAccountHealthMonitor()
+	}
+	if a.stopProxyMonitor != nil {
+		a.stopProxyMonitor()
+	}
 }
 
 func adminBrowserNavigationFallback(webuiHandler *webui.Handler) func(http.Handler) http.Handler {

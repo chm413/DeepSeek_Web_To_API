@@ -12,27 +12,29 @@ import (
 )
 
 type Config struct {
-	Keys              []string                `json:"keys,omitempty"`
-	APIKeys           []APIKey                `json:"api_keys,omitempty"`
-	Accounts          []Account               `json:"accounts,omitempty"`
-	Proxies           []Proxy                 `json:"proxies,omitempty"`
-	ProxyCore         ProxyCoreConfig         `json:"proxy_core,omitempty"`
-	ModelAliases      map[string]string       `json:"model_aliases,omitempty"`
-	Admin             AdminConfig             `json:"admin,omitempty"`
-	Server            ServerConfig            `json:"server,omitempty"`
-	Storage           StorageConfig           `json:"storage,omitempty"`
-	Cache             CacheConfig             `json:"cache,omitempty"`
-	Safety            SafetyConfig            `json:"safety,omitempty"`
-	Runtime           RuntimeConfig           `json:"runtime,omitempty"`
-	Compat            CompatConfig            `json:"compat,omitempty"`
-	Responses         ResponsesConfig         `json:"responses,omitempty"`
-	Embeddings        EmbeddingsConfig        `json:"embeddings,omitempty"`
-	AutoDelete        AutoDeleteConfig        `json:"auto_delete"`
-	HistorySplit      HistorySplitConfig      `json:"history_split"`
-	CurrentInputFile  CurrentInputFileConfig  `json:"current_input_file,omitempty"`
-	ThinkingInjection ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
-	PromptLimit       PromptLimitConfig       `json:"prompt_limit,omitempty"`
-	AdditionalFields  map[string]any          `json:"-"`
+	Keys               []string                `json:"keys,omitempty"`
+	APIKeys            []APIKey                `json:"api_keys,omitempty"`
+	Accounts           []Account               `json:"accounts,omitempty"`
+	Proxies            []Proxy                 `json:"proxies,omitempty"`
+	ProxySubscriptions []ProxySubscription     `json:"proxy_subscriptions,omitempty"`
+	ProxyCore          ProxyCoreConfig         `json:"proxy_core,omitempty"`
+	ProxyPolicy        ProxyPolicyConfig       `json:"proxy_policy,omitempty"`
+	ModelAliases       map[string]string       `json:"model_aliases,omitempty"`
+	Admin              AdminConfig             `json:"admin,omitempty"`
+	Server             ServerConfig            `json:"server,omitempty"`
+	Storage            StorageConfig           `json:"storage,omitempty"`
+	Cache              CacheConfig             `json:"cache,omitempty"`
+	Safety             SafetyConfig            `json:"safety,omitempty"`
+	Runtime            RuntimeConfig           `json:"runtime,omitempty"`
+	Compat             CompatConfig            `json:"compat,omitempty"`
+	Responses          ResponsesConfig         `json:"responses,omitempty"`
+	Embeddings         EmbeddingsConfig        `json:"embeddings,omitempty"`
+	AutoDelete         AutoDeleteConfig        `json:"auto_delete"`
+	HistorySplit       HistorySplitConfig      `json:"history_split"`
+	CurrentInputFile   CurrentInputFileConfig  `json:"current_input_file,omitempty"`
+	ThinkingInjection  ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
+	PromptLimit        PromptLimitConfig       `json:"prompt_limit,omitempty"`
+	AdditionalFields   map[string]any          `json:"-"`
 }
 
 type Account struct {
@@ -61,21 +63,64 @@ type APIKey struct {
 }
 
 type Proxy struct {
-	ID       string `json:"id,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Host     string `json:"host,omitempty"`
-	Port     int    `json:"port,omitempty"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	URI      string `json:"uri,omitempty"`
+	ID                  string `json:"id,omitempty"`
+	Name                string `json:"name,omitempty"`
+	Type                string `json:"type,omitempty"`
+	Host                string `json:"host,omitempty"`
+	Port                int    `json:"port,omitempty"`
+	Username            string `json:"username,omitempty"`
+	Password            string `json:"password,omitempty"`
+	URI                 string `json:"uri,omitempty"`
+	SubscriptionID      string `json:"subscription_id,omitempty"`
+	Disabled            bool   `json:"disabled,omitempty"`
+	DisabledReason      string `json:"disabled_reason,omitempty"`
+	DisabledAtUnix      int64  `json:"disabled_at_unix,omitempty"`
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
+	LastTestAtUnix      int64  `json:"last_test_at_unix,omitempty"`
+	LastTestSuccess     bool   `json:"last_test_success,omitempty"`
+	LastLatencyMS       int    `json:"last_latency_ms,omitempty"`
+	LastHTTPStatus      int    `json:"last_http_status,omitempty"`
+	LastTestError       string `json:"last_test_error,omitempty"`
 }
 
 type ProxyCoreConfig struct {
 	XrayBinaryPath        string `json:"xray_binary_path,omitempty"`
 	RuntimeDir            string `json:"runtime_dir,omitempty"`
 	StartupTimeoutSeconds int    `json:"startup_timeout_seconds,omitempty"`
+	AutoDownloadDisabled  bool   `json:"auto_download_disabled,omitempty"`
+	DownloadDir           string `json:"download_dir,omitempty"`
+	DownloadVersion       string `json:"download_version,omitempty"`
 }
+
+type ProxyPolicyConfig struct {
+	HealthCheckEnabled                *bool  `json:"health_check_enabled,omitempty"`
+	HealthCheckIntervalMinutes        int    `json:"health_check_interval_minutes,omitempty"`
+	AutoDisableAfterFailures          int    `json:"auto_disable_after_failures,omitempty"`
+	AutoEnableOnRecovery              *bool  `json:"auto_enable_on_recovery,omitempty"`
+	FallbackProxyID                   string `json:"fallback_proxy_id,omitempty"`
+	SubscriptionUpdateIntervalMinutes int    `json:"subscription_update_interval_minutes,omitempty"`
+	TestConcurrency                   int    `json:"test_concurrency,omitempty"`
+}
+
+type ProxySubscription struct {
+	ID                    string `json:"id,omitempty"`
+	Name                  string `json:"name,omitempty"`
+	URL                   string `json:"url,omitempty"`
+	Disabled              bool   `json:"disabled,omitempty"`
+	AutoUpdateDisabled    bool   `json:"auto_update_disabled,omitempty"`
+	AutoTestDisabled      bool   `json:"auto_test_disabled,omitempty"`
+	UpdateIntervalMinutes int    `json:"update_interval_minutes,omitempty"`
+	LastUpdatedAtUnix     int64  `json:"last_updated_at_unix,omitempty"`
+	LastAttemptAtUnix     int64  `json:"last_attempt_at_unix,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
+	NodeCount             int    `json:"node_count,omitempty"`
+}
+
+const (
+	ProxyDisabledManual              = "manual"
+	ProxyDisabledHealth              = "health_check_failed"
+	ProxyDisabledSubscriptionRemoved = "subscription_removed"
+)
 
 func NormalizeProxy(p Proxy) Proxy {
 	p.ID = strings.TrimSpace(p.ID)
@@ -85,6 +130,15 @@ func NormalizeProxy(p Proxy) Proxy {
 	p.Username = strings.TrimSpace(p.Username)
 	p.Password = strings.TrimSpace(p.Password)
 	p.URI = strings.TrimSpace(p.URI)
+	p.SubscriptionID = strings.TrimSpace(p.SubscriptionID)
+	p.DisabledReason = strings.TrimSpace(p.DisabledReason)
+	p.LastTestError = strings.TrimSpace(p.LastTestError)
+	if len([]rune(p.LastTestError)) > 600 {
+		p.LastTestError = string([]rune(p.LastTestError)[:600]) + "..."
+	}
+	if p.ConsecutiveFailures < 0 {
+		p.ConsecutiveFailures = 0
+	}
 	if proxyuri.IsCoreType(p.Type) {
 		p.Host = ""
 		p.Port = 0
@@ -150,8 +204,17 @@ func (c *Config) NormalizeCredentials() {
 	for i := range c.Proxies {
 		c.Proxies[i] = NormalizeProxy(c.Proxies[i])
 	}
+	for i := range c.ProxySubscriptions {
+		c.ProxySubscriptions[i].ID = strings.TrimSpace(c.ProxySubscriptions[i].ID)
+		c.ProxySubscriptions[i].Name = strings.TrimSpace(c.ProxySubscriptions[i].Name)
+		c.ProxySubscriptions[i].URL = strings.TrimSpace(c.ProxySubscriptions[i].URL)
+		c.ProxySubscriptions[i].LastError = strings.TrimSpace(c.ProxySubscriptions[i].LastError)
+	}
 	c.ProxyCore.XrayBinaryPath = strings.TrimSpace(c.ProxyCore.XrayBinaryPath)
 	c.ProxyCore.RuntimeDir = strings.TrimSpace(c.ProxyCore.RuntimeDir)
+	c.ProxyCore.DownloadDir = strings.TrimSpace(c.ProxyCore.DownloadDir)
+	c.ProxyCore.DownloadVersion = strings.TrimSpace(c.ProxyCore.DownloadVersion)
+	c.ProxyPolicy.FallbackProxyID = strings.TrimSpace(c.ProxyPolicy.FallbackProxyID)
 
 	c.normalizeModelAliases()
 }

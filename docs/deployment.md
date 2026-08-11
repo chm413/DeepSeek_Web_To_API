@@ -58,7 +58,7 @@ DEPLOYPY["scripts/deploy_107.py<br/>linux/amd64 + 版本注入"]
 end
 subgraph "Runtime"
 BINARY["deepseek-web-to-api<br/>二进制"]
-DOCKER["ghcr.io/meow-calculations/deepseek-web-to-api<br/>容器镜像"]
+DOCKER["ghcr.io/chm413/deepseek-web-to-api<br/>容器镜像"]
 CONFIG["data/config.json<br/>可选回写文件"]
 ENV[".env<br/>主配置入口"]
 DATA["data<br/>配置回写、SQLite 与缓存"]
@@ -91,7 +91,7 @@ DEPLOYPY --> SYSTEMD
 ## 核心组件
 
 - Docker 镜像：多阶段构建，前端用 Node 构建，后端用 Go 1.26 构建，运行层使用 Debian slim 非 root 用户。
-- Compose 模板：镜像来源为 `ghcr.io/meow-calculations/deepseek-web-to-api:latest`，`.env` 注入初始结构化配置，`./data` 保存回写配置、账号 SQLite、历史记录与缓存。
+- Compose 模板：镜像来源为 `ghcr.io/chm413/deepseek-web-to-api:latest`，`.env` 注入初始结构化配置，`./data` 保存回写配置、账号 SQLite、历史记录、缓存与自动下载的 Xray 核心。
 - Release 脚本：构建 Linux、macOS、Windows 多架构压缩包，并复制 `config.example.json`、`.env.example`、README 与静态管理台。
 - HTTP Server：默认端口 `5001`，包含读写超时、请求头超时、空闲超时和优雅退出。
 - CNB CI（v1.0.3 新增 PR 阶段）：`.cnb.yml` 配置主分支 push 时构建并推送镜像；PR 阶段运行 `docker build --no-cache` 验证可构建性，不推送。

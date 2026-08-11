@@ -33,6 +33,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=busybox-tools /bin/busybox /usr/local/bin/busybox
 EXPOSE 5001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/usr/local/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5001/healthz"]
 CMD ["/usr/local/bin/deepseek-web-to-api"]
 
 FROM runtime-base AS runtime-from-source

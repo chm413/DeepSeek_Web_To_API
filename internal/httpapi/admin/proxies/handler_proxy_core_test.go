@@ -26,6 +26,7 @@ func TestUpdateProxyCoreReturnsConfiguredPathFailure(t *testing.T) {
 		"xray_binary_path":        missing,
 		"runtime_dir":             t.TempDir(),
 		"startup_timeout_seconds": 10,
+		"auto_download":           false,
 	})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)

@@ -1,76 +1,134 @@
-# Xray 代理协议
+# Xray 代理、订阅与健康检测
 
-应用可以把 VLESS、VMess 和 Hysteria2/HY2 节点转换为临时 Xray 配置，并通过仅监听 `127.0.0.1` 的本地 SOCKS 入口供账号请求使用。SOCKS5/SOCKS5H 仍由应用直接连接，不依赖 Xray。
+应用支持 SOCKS5/SOCKS5H，以及由 Xray 承载的 VLESS、VMess、Hysteria2/HY2 节点。节点可手动添加，也可从机场订阅导入。
 
-## Windows 安装
+## 共享进程模型
 
-1. 从 XTLS/Xray-core 官方 release 下载 Windows 压缩包。
-2. 将 `xray.exe`、`geoip.dat` 和 `geosite.dat` 放到应用可执行文件同目录；也可以在代理管理页填写完整的 `xray.exe` 路径。
-3. 打开 `/admin` 的代理管理页，确认核心状态显示可用及版本号，再添加节点链接并执行连通性测试。
+所有启用账号实际引用的 Xray 节点共用一个 Xray 进程：
 
-核心查找顺序如下：
+- 一个应用实例最多维护一个常驻 Xray 进程。
+- 每个活动节点对应一个仅监听 `127.0.0.1` 的 SOCKS 入站和一条精确路由规则。
+- 多个账号引用同一节点时不会重复创建入站。
+- 未被启用账号引用的节点不会进入常驻配置。
+- 单节点或批量测试可临时加入共享配置；完成后恢复账号路由集合。
+- 节点、账号路由、核心设置或兜底策略变化时，应用原子重建共享配置并重启该进程。
 
-1. `proxy_core.xray_binary_path`；已配置但文件不存在时直接报告该路径错误。
-2. 环境变量 `XRAY_BINARY_PATH`；已配置但文件不存在时直接报告该路径错误。
-3. 应用可执行文件同目录的 `xray.exe`，或其 `bin/xray.exe`。
-4. 系统 `PATH` 中的 `xray.exe`。
+SOCKS5/SOCKS5H 由 Go HTTP 客户端直接使用，不进入 Xray 配置。
 
-Linux 使用同样的查找顺序，文件名为 `xray`。当前实现已使用官方 Xray `v26.3.27` 的 Windows amd64 二进制执行配置校验和进程生命周期集成测试。
+## 自动下载
 
-## 配置
+默认启用 Xray 自动下载。应用从官方 `XTLS/Xray-core` GitHub Releases 获取当前平台的压缩包，提取 Xray 可执行文件、`geoip.dat` 和 `geosite.dat`，默认保存到 `data/xray`。
+
+查找顺序：
+
+1. `proxy_core.xray_binary_path`。
+2. `XRAY_BINARY_PATH` 环境变量。
+3. 应用目录和 `bin` 子目录。
+4. 系统 `PATH`。
+5. 自动下载目录。
+
+Docker 容器以非 root 用户运行，`/app/data` 可写；Compose 将其映射到宿主机 `./data`，因此下载结果位于 `/app/data/xray` 并跨重启保留。
 
 ```json
 {
   "proxy_core": {
-    "xray_binary_path": "C:\\tools\\xray\\xray.exe",
-    "runtime_dir": "data\\xray-runtime",
-    "startup_timeout_seconds": 10
-  },
-  "proxies": [
-    {
-      "name": "VLESS node",
-      "type": "vless",
-      "uri": "vless://UUID@example.com:443?encryption=none&security=tls&sni=example.com"
-    }
-  ]
+    "xray_binary_path": "",
+    "runtime_dir": "",
+    "startup_timeout_seconds": 10,
+    "auto_download_disabled": false,
+    "download_dir": "data/xray",
+    "download_version": ""
+  }
 }
 ```
 
-`xray_binary_path` 和 `runtime_dir` 留空时使用自动发现与系统临时目录。启动超时允许 `1-60` 秒，`0` 表示使用内部默认值 10 秒。
+`download_version` 留空表示最新稳定版；也可固定为 `v26.3.27` 等明确版本。管理台可手动触发重新下载。
 
-管理 API：
+## 机场订阅
 
-- `GET /admin/proxies/core`：返回核心是否可用、版本、实际路径、运行实例数和错误原因。
-- `PUT /admin/proxies/core`：更新核心路径、运行目录和启动超时，并停止旧实例。
-- `POST /admin/proxies`：`type` 可为 `vless`、`vmess`、`hysteria2` 或 `hy2`，节点链接放在 `uri`。
-- `POST /admin/proxies/test`：使用已保存的 `proxy_id` 测试完整代理链路。
+支持以下订阅内容：
 
-节点 `uri` 可能包含 UUID、认证字符串等秘密。新增、编辑、列表和安全配置读取接口只返回 `has_uri`，不回显原始链接；编辑时 URI 留空会保留已有值。完整配置导出仍包含秘密，只应保存到可信位置。
+- 一行一个 `vless://`、`vmess://`、`hysteria2://` 或 `hy2://` 链接。
+- 上述 URI 列表的 base64 编码。
+- Clash YAML 或 JSON 的 `proxies` 列表。
+
+订阅 URL 可能包含认证信息，按敏感字段处理。列表、读取和更新响应仅返回 `has_url`，不会回显 URL；编辑时 URL 留空保留已有值。
+
+订阅更新会按稳定节点 ID 合并状态：
+
+- 已存在节点保留健康检测和禁用状态。
+- 新节点自动加入节点列表。
+- 已从订阅删除且未被账号引用的节点会删除。
+- 已从订阅删除但仍被账号引用的节点会保留并以 `subscription_removed` 原因禁用，避免账号路由静默指向未知节点。
+
+## 定时更新和健康策略
+
+```json
+{
+  "proxy_policy": {
+    "health_check_enabled": true,
+    "health_check_interval_minutes": 15,
+    "auto_disable_after_failures": 3,
+    "auto_enable_on_recovery": true,
+    "fallback_proxy_id": "",
+    "subscription_update_interval_minutes": 60,
+    "test_concurrency": 4
+  }
+}
+```
+
+- 后台监控器每分钟检查到期任务。
+- 节点连续失败达到阈值后以 `health_check_failed` 原因自动禁用。
+- 健康检测禁用的节点恢复后可自动重新启用；手动禁用的节点不会被检测结果自动启用。
+- 账号分配节点不可用时优先使用启用状态的 `fallback_proxy_id`；无可用兜底时使用直连。
+- 每个订阅可以覆盖全局更新间隔，也可以分别关闭自动更新和更新后测试。
+
+## 管理 API
+
+核心：
+
+- `GET /admin/proxies/core`
+- `PUT /admin/proxies/core`
+- `POST /admin/proxies/core/download`
+
+策略：
+
+- `GET /admin/proxies/policy`
+- `PUT /admin/proxies/policy`
+
+订阅：
+
+- `GET /admin/proxies/subscriptions`
+- `POST /admin/proxies/subscriptions`
+- `PUT /admin/proxies/subscriptions/{subscriptionID}`
+- `DELETE /admin/proxies/subscriptions/{subscriptionID}`
+- `POST /admin/proxies/subscriptions/{subscriptionID}/refresh`
+- `POST /admin/proxies/subscriptions/refresh-all`
+
+节点：
+
+- `GET /admin/proxies`
+- `POST /admin/proxies`
+- `PUT /admin/proxies/{proxyID}`
+- `DELETE /admin/proxies/{proxyID}`
+- `POST /admin/proxies/test`
+- `POST /admin/proxies/test-batch`
+- `POST /admin/proxies/actions`
+
+所有接口需要管理员认证。安全响应不会返回代理密码、节点 URI 或订阅 URL。
 
 ## 支持范围
 
-| 类型 | 输入格式 | 当前支持 |
-| --- | --- | --- |
-| VLESS | `vless://...` | TCP/RAW、WebSocket、gRPC、XHTTP/SplitHTTP、HTTPUpgrade；TLS、REALITY |
-| VMess | 标准 base64 JSON `vmess://...` | `alterId=0`；TCP、WebSocket、gRPC、XHTTP/SplitHTTP、HTTPUpgrade；TLS |
-| Hysteria2 | `hysteria2://...` 或 `hy2://...` | Xray Hysteria version 2、TLS、auth |
+| 类型 | 当前支持 |
+| --- | --- |
+| VLESS | TCP/RAW、WebSocket、gRPC、XHTTP/SplitHTTP、HTTPUpgrade；TLS、REALITY |
+| VMess | 标准 base64 JSON、`alterId=0`；TCP、WebSocket、gRPC、XHTTP/SplitHTTP、HTTPUpgrade；TLS |
+| Hysteria2 | `hysteria2://` 和 `hy2://`、TLS、auth |
 
-为避免静默降级，以下配置会在保存阶段直接拒绝：
+为避免静默降级，当前会拒绝 `insecure=1`、`allowInsecure=1`、Hysteria2 `obfs`/`obfs-password`、`pinSHA256` 和非零 VMess `alterId`。
 
-- `insecure=1` 或 `allowInsecure=1`：Xray v26.3.27 已移除 `allowInsecure`，请使用有效证书。
-- Hysteria2 `obfs` / `obfs-password`：当前 Xray Hysteria 集成不支持该分享链接能力。
-- Hysteria2 `pinSHA256`：当前转换层尚未实现对应字段。
-- VMess `alterId` 非 0。
+## 日志
 
-## 运行与日志
+应用日志记录共享 Xray PID、活动路由数、代理 ID、协议、本地端口、启动/停止和失败原因，但不记录节点 URI 或订阅 URL。Xray 运行日志保存在配置的 runtime 目录中，用于诊断核心配置和拨号错误。
 
-核心代理第一次真正建立连接时按需启动。每个代理 ID 对应一个 Xray 进程，后续连接复用其本地 SOCKS 入口；节点或核心设置改变、节点删除、配置导入、应用退出时会停止对应实例。
-
-默认运行目录为 `%TEMP%\DeepSeek_Web_To_API-xray\process-<pid>`（Windows）或系统临时目录下的同名路径。Xray 配置文件权限设为仅当前用户可读，并在进程退出后删除；运行日志保留为 `*.log` 供排查。应用主日志会记录代理 ID、协议、本地端口、Xray PID、启动/停止和失败原因，但不会记录节点 URI。
-
-建议通过管理页的“测试”按钮验证节点。若失败，先查看 `/admin/proxies/core` 的 `status.error`，再查看返回错误中指向的 Xray runtime log。
-
-## 官方来源
-
-- [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
-- [Xray-core releases](https://github.com/XTLS/Xray-core/releases)
+官方来源：[XTLS/Xray-core](https://github.com/XTLS/Xray-core) 和 [Xray-core Releases](https://github.com/XTLS/Xray-core/releases)。

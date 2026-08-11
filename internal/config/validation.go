@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -13,6 +14,12 @@ func ValidateConfig(c Config) error {
 		return err
 	}
 	if err := ValidateProxyCoreConfig(c.ProxyCore); err != nil {
+		return err
+	}
+	if err := ValidateProxyPolicyConfig(c.ProxyPolicy, c.Proxies); err != nil {
+		return err
+	}
+	if err := ValidateProxySubscriptions(c.ProxySubscriptions); err != nil {
 		return err
 	}
 	if err := ValidateAdminConfig(c.Admin); err != nil {
@@ -81,6 +88,54 @@ func ValidateProxyConfig(proxies []Proxy) error {
 func ValidateProxyCoreConfig(core ProxyCoreConfig) error {
 	if core.StartupTimeoutSeconds != 0 {
 		return ValidateIntRange("proxy_core.startup_timeout_seconds", core.StartupTimeoutSeconds, 1, 60, true)
+	}
+	return nil
+}
+
+func ValidateProxyPolicyConfig(policy ProxyPolicyConfig, proxies []Proxy) error {
+	if err := ValidateIntRange("proxy_policy.health_check_interval_minutes", policy.HealthCheckIntervalMinutes, 1, 1440, false); err != nil {
+		return err
+	}
+	if err := ValidateIntRange("proxy_policy.auto_disable_after_failures", policy.AutoDisableAfterFailures, 1, 100, false); err != nil {
+		return err
+	}
+	if err := ValidateIntRange("proxy_policy.subscription_update_interval_minutes", policy.SubscriptionUpdateIntervalMinutes, 5, 10080, false); err != nil {
+		return err
+	}
+	if err := ValidateIntRange("proxy_policy.test_concurrency", policy.TestConcurrency, 1, 32, false); err != nil {
+		return err
+	}
+	fallbackID := strings.TrimSpace(policy.FallbackProxyID)
+	if fallbackID == "" {
+		return nil
+	}
+	for _, proxy := range proxies {
+		if NormalizeProxy(proxy).ID == fallbackID {
+			return nil
+		}
+	}
+	return fmt.Errorf("proxy_policy.fallback_proxy_id references unknown proxy: %s", fallbackID)
+}
+
+func ValidateProxySubscriptions(subscriptions []ProxySubscription) error {
+	seen := make(map[string]struct{}, len(subscriptions))
+	for _, subscription := range subscriptions {
+		id := strings.TrimSpace(subscription.ID)
+		if id == "" {
+			return fmt.Errorf("proxy_subscriptions.id is required")
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("duplicate proxy subscription id: %s", id)
+		}
+		seen[id] = struct{}{}
+		rawURL := strings.TrimSpace(subscription.URL)
+		parsed, err := url.Parse(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("proxy subscription %s must use a valid http or https URL", id)
+		}
+		if err := ValidateIntRange("proxy_subscriptions.update_interval_minutes", subscription.UpdateIntervalMinutes, 5, 10080, false); err != nil {
+			return err
+		}
 	}
 	return nil
 }

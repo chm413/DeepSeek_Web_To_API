@@ -24,7 +24,20 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 			"xray_binary_path":        snap.ProxyCore.XrayBinaryPath,
 			"runtime_dir":             snap.ProxyCore.RuntimeDir,
 			"startup_timeout_seconds": snap.ProxyCore.StartupTimeoutSeconds,
+			"auto_download":           !snap.ProxyCore.AutoDownloadDisabled,
+			"download_dir":            snap.ProxyCore.DownloadDir,
+			"download_version":        snap.ProxyCore.DownloadVersion,
 		},
+		"proxy_policy": map[string]any{
+			"health_check_enabled":                 snap.ProxyPolicy.HealthChecksEnabled(),
+			"health_check_interval_minutes":        snap.ProxyPolicy.HealthIntervalMinutes(),
+			"auto_disable_after_failures":          snap.ProxyPolicy.DisableAfterFailures(),
+			"auto_enable_on_recovery":              snap.ProxyPolicy.EnableOnRecovery(),
+			"fallback_proxy_id":                    snap.ProxyPolicy.FallbackProxyID,
+			"subscription_update_interval_minutes": snap.ProxyPolicy.SubscriptionIntervalMinutes(),
+			"test_concurrency":                     snap.ProxyPolicy.Concurrency(),
+		},
+		"proxy_subscriptions": []map[string]any{},
 	}
 	accounts := make([]map[string]any, 0, len(snap.Accounts))
 	for _, acc := range snap.Accounts {
@@ -46,18 +59,45 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 	for _, proxy := range snap.Proxies {
 		proxy = config.NormalizeProxy(proxy)
 		proxies = append(proxies, map[string]any{
-			"id":           proxy.ID,
-			"name":         proxy.Name,
-			"type":         proxy.Type,
-			"host":         proxy.Host,
-			"port":         proxy.Port,
-			"username":     proxy.Username,
-			"has_password": strings.TrimSpace(proxy.Password) != "",
-			"has_uri":      strings.TrimSpace(proxy.URI) != "",
-			"core_managed": proxyuri.IsCoreType(proxy.Type),
+			"id":                   proxy.ID,
+			"name":                 proxy.Name,
+			"type":                 proxy.Type,
+			"host":                 proxy.Host,
+			"port":                 proxy.Port,
+			"username":             proxy.Username,
+			"has_password":         strings.TrimSpace(proxy.Password) != "",
+			"has_uri":              strings.TrimSpace(proxy.URI) != "",
+			"core_managed":         proxyuri.IsCoreType(proxy.Type),
+			"subscription_id":      proxy.SubscriptionID,
+			"disabled":             proxy.Disabled,
+			"disabled_reason":      proxy.DisabledReason,
+			"disabled_at_unix":     proxy.DisabledAtUnix,
+			"consecutive_failures": proxy.ConsecutiveFailures,
+			"last_test_at_unix":    proxy.LastTestAtUnix,
+			"last_test_success":    proxy.LastTestSuccess,
+			"last_latency_ms":      proxy.LastLatencyMS,
+			"last_http_status":     proxy.LastHTTPStatus,
+			"last_test_error":      proxy.LastTestError,
 		})
 	}
 	safe["proxies"] = proxies
+	subscriptions := make([]map[string]any, 0, len(snap.ProxySubscriptions))
+	for _, subscription := range snap.ProxySubscriptions {
+		subscriptions = append(subscriptions, map[string]any{
+			"id":                      subscription.ID,
+			"name":                    subscription.Name,
+			"has_url":                 strings.TrimSpace(subscription.URL) != "",
+			"disabled":                subscription.Disabled,
+			"auto_update":             !subscription.AutoUpdateDisabled,
+			"auto_test":               !subscription.AutoTestDisabled,
+			"update_interval_minutes": subscription.UpdateIntervalMinutes,
+			"last_updated_at_unix":    subscription.LastUpdatedAtUnix,
+			"last_attempt_at_unix":    subscription.LastAttemptAtUnix,
+			"last_error":              subscription.LastError,
+			"node_count":              subscription.NodeCount,
+		})
+	}
+	safe["proxy_subscriptions"] = subscriptions
 	writeJSON(w, http.StatusOK, safe)
 }
 

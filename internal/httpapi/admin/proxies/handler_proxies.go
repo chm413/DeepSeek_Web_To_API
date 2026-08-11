@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"DeepSeek_Web_To_API/internal/config"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
+	"DeepSeek_Web_To_API/internal/proxyservice"
 	"DeepSeek_Web_To_API/internal/proxyuri"
 	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
@@ -26,21 +28,34 @@ func validateProxyMutation(cfg *config.Config) error {
 	if err := config.ValidateProxyConfig(cfg.Proxies); err != nil {
 		return err
 	}
+	if err := config.ValidateProxyPolicyConfig(cfg.ProxyPolicy, cfg.Proxies); err != nil {
+		return err
+	}
 	return config.ValidateAccountProxyReferences(cfg.Accounts, cfg.Proxies)
 }
 
 func proxyResponse(proxy config.Proxy) map[string]any {
 	proxy = config.NormalizeProxy(proxy)
 	return map[string]any{
-		"id":           proxy.ID,
-		"name":         proxy.Name,
-		"type":         proxy.Type,
-		"host":         proxy.Host,
-		"port":         proxy.Port,
-		"username":     proxy.Username,
-		"has_password": strings.TrimSpace(proxy.Password) != "",
-		"has_uri":      strings.TrimSpace(proxy.URI) != "",
-		"core_managed": proxyuri.IsCoreType(proxy.Type),
+		"id":                   proxy.ID,
+		"name":                 proxy.Name,
+		"type":                 proxy.Type,
+		"host":                 proxy.Host,
+		"port":                 proxy.Port,
+		"username":             proxy.Username,
+		"has_password":         strings.TrimSpace(proxy.Password) != "",
+		"has_uri":              strings.TrimSpace(proxy.URI) != "",
+		"core_managed":         proxyuri.IsCoreType(proxy.Type),
+		"subscription_id":      proxy.SubscriptionID,
+		"disabled":             proxy.Disabled,
+		"disabled_reason":      proxy.DisabledReason,
+		"disabled_at_unix":     proxy.DisabledAtUnix,
+		"consecutive_failures": proxy.ConsecutiveFailures,
+		"last_test_at_unix":    proxy.LastTestAtUnix,
+		"last_test_success":    proxy.LastTestSuccess,
+		"last_latency_ms":      proxy.LastLatencyMS,
+		"last_http_status":     proxy.LastHTTPStatus,
+		"last_test_error":      proxy.LastTestError,
 	}
 }
 
@@ -63,6 +78,10 @@ func (h *Handler) addProxy(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "proxy": proxyResponse(proxy)})
@@ -90,6 +109,16 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 			if proxy.URI == "" && proxyuri.IsCoreType(proxy.Type) && proxy.Type == existing.Type {
 				proxy.URI = existing.URI
 			}
+			proxy.SubscriptionID = existing.SubscriptionID
+			proxy.Disabled = existing.Disabled
+			proxy.DisabledReason = existing.DisabledReason
+			proxy.DisabledAtUnix = existing.DisabledAtUnix
+			proxy.ConsecutiveFailures = existing.ConsecutiveFailures
+			proxy.LastTestAtUnix = existing.LastTestAtUnix
+			proxy.LastTestSuccess = existing.LastTestSuccess
+			proxy.LastLatencyMS = existing.LastLatencyMS
+			proxy.LastHTTPStatus = existing.LastHTTPStatus
+			proxy.LastTestError = existing.LastTestError
 			proxy = config.NormalizeProxy(proxy)
 			c.Proxies[i] = proxy
 			return validateProxyMutation(c)
@@ -104,7 +133,10 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	xrayproxy.Default().Stop(proxyID)
+	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "proxy": proxyResponse(proxy)})
 }
@@ -127,6 +159,9 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 			return newRequestError("代理不存在")
 		}
 		c.Proxies = append(c.Proxies[:idx], c.Proxies[idx+1:]...)
+		if strings.TrimSpace(c.ProxyPolicy.FallbackProxyID) == strings.TrimSpace(proxyID) {
+			c.ProxyPolicy.FallbackProxyID = ""
+		}
 		for i := range c.Accounts {
 			if strings.TrimSpace(c.Accounts[i].ProxyID) == strings.TrimSpace(proxyID) {
 				c.Accounts[i].ProxyID = ""
@@ -142,7 +177,10 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	xrayproxy.Default().Stop(proxyID)
+	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
@@ -164,8 +202,16 @@ func (h *Handler) testProxy(w http.ResponseWriter, r *http.Request) {
 		proxy = toProxy(req)
 	}
 
-	result := proxyConnectivityTester(r.Context(), proxy, h.Store.Snapshot().ProxyCore)
-	writeJSON(w, http.StatusOK, result)
+	results, err := proxyservice.TestProxies(r.Context(), h.Store, []string{proxy.ID}, 1, proxyConnectivityTester)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
+	if len(results) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "代理不存在"})
+		return
+	}
+	writeJSON(w, http.StatusOK, results[0])
 }
 
 func (h *Handler) updateAccountProxy(w http.ResponseWriter, r *http.Request) {
@@ -201,5 +247,15 @@ func (h *Handler) updateAccountProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Pool.Reset()
+	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "proxy_id": proxyID})
+}
+
+func syncProxyRoutes(ctx context.Context, cfg config.Config) error {
+	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return xrayproxy.SyncAssigned(syncCtx, cfg)
 }
