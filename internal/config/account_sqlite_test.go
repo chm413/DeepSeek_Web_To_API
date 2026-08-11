@@ -15,7 +15,7 @@ func TestAccountSQLiteMigratesFileBackedAccountsAndKeepsConfigClean(t *testing.T
 		"keys":["k1"],
 		"accounts":[
 			{"email":"user@example.com","password":"p1","token":"persisted-token"},
-			{"mobile":"13800000000","password":"p2"}
+			{"mobile":"13800000000","password":"p2","disabled":true,"disabled_reason":"manual","disabled_at_unix":1700000000}
 		],
 		"storage":{"accounts_sqlite_path":` + quoteJSON(accountsPath) + `}
 	}`
@@ -59,6 +59,10 @@ func TestAccountSQLiteMigratesFileBackedAccountsAndKeepsConfigClean(t *testing.T
 	}
 	if acc.Token != "runtime-token" {
 		t.Fatalf("expected token from accounts sqlite, got %q", acc.Token)
+	}
+	disabled, ok := reloaded.FindAccount("13800000000")
+	if !ok || !disabled.Disabled || disabled.DisabledReason != AccountDisabledManual || disabled.DisabledAtUnix != 1700000000 {
+		t.Fatalf("expected disabled state from accounts sqlite, got %#v, %v", disabled, ok)
 	}
 }
 

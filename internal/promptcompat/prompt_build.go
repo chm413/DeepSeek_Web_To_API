@@ -2,6 +2,7 @@ package promptcompat
 
 import (
 	"DeepSeek_Web_To_API/internal/prompt"
+	"strings"
 )
 
 func buildOpenAIFinalPrompt(messagesRaw []any, toolsRaw any, traceID string, thinkingEnabled bool) (string, []string) {
@@ -22,4 +23,14 @@ func BuildOpenAIPrompt(messagesRaw []any, toolsRaw any, traceID string, toolPoli
 // normalization logic and remain behavior-compatible with chat/completions.
 func BuildOpenAIPromptForAdapter(messagesRaw []any, toolsRaw any, traceID string, thinkingEnabled bool) (string, []string) {
 	return buildOpenAIFinalPrompt(messagesRaw, toolsRaw, traceID, thinkingEnabled)
+}
+
+func BuildIncrementalPrompt(messagesRaw []any, formatPrompt string, thinkingEnabled bool) string {
+	messages := NormalizeOpenAIMessagesForPrompt(messagesRaw, "")
+	formatPrompt = strings.TrimSpace(formatPrompt)
+	if formatPrompt == "" {
+		formatPrompt = BuildOpenAIIncrementalFormatPrompt(nil, DefaultToolChoicePolicy())
+	}
+	messages = append([]map[string]any{{"role": "system", "content": formatPrompt}}, messages...)
+	return prompt.MessagesPrepareWithThinking(messages, thinkingEnabled)
 }

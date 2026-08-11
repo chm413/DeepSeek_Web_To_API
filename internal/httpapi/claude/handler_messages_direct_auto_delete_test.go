@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"DeepSeek_Web_To_API/internal/auth"
+	"DeepSeek_Web_To_API/internal/config"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
 )
 
@@ -22,6 +23,9 @@ func (claudeAutoDeleteStoreStub) ModelAliases() map[string]string   { return nil
 func (claudeAutoDeleteStoreStub) CompatStripReferenceMarkers() bool { return true }
 func (s claudeAutoDeleteStoreStub) AutoDeleteMode() string          { return s.mode }
 func (claudeAutoDeleteStoreStub) SafetyBlockMessage() string        { return "" }
+func (claudeAutoDeleteStoreStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	return config.DefaultPromptLimitSettings()
+}
 
 // claudeAutoDeleteDSStub mirrors directClaudeDSStub but counts the delete
 // invocations so the test can assert the auto-delete defer fired once.

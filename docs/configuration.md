@@ -164,7 +164,7 @@ STORE --> ALIASES
 | --- | --- | --- |
 | `safety.*` | `banned_content[]`、`banned_regex[]`、`jailbreak.{enabled,patterns[]}`、`auto_ban.{enabled,threshold,window_seconds}`、`blocked_ips[]`、`allowed_ips[]`、`blocked_conversation_ids[]` | requestguard policyCache、safety SQLite 镜像写入 |
 | `cache.response.*` | `memory_ttl_seconds`、`disk_ttl_seconds`、`memory_max_bytes`、`disk_max_bytes`、`max_body_bytes`、`semantic_key`、`dir` | ResponseCache（`ApplyOptions`） |
-| `runtime.*` | `account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours` | Account Pool（`ApplyRuntimeLimits`） |
+| `runtime.*` | `account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`account_health_check_interval_minutes` | Account Pool；账号健康巡检间隔为 `0` 时关闭，启用或修改后需重启服务 |
 | `current_input_file.*` | `enabled`、`min_chars` | 请求预处理 |
 | `thinking_injection.*` | `enabled`、`prompt` | 请求预处理 |
 | `auto_delete.*` | `mode`、`sessions` | 历史自动清理 |
@@ -180,7 +180,7 @@ STORE --> ALIASES
 - 账号不再需要写入 JSON；在管理台"批量导入"中粘贴 `账号:密码` 文本即可写入 `accounts.sqlite`。
 - 若旧 JSON 中仍有 `accounts`，账号 SQLite 为空时会自动迁移，随后保存配置时会剥离 `accounts` 字段；兼容旧导入格式中把邮箱误写到 `mobile` 字段的账号，加载和导入时会自动归一到 `email`。
 - 账号 token 不写回结构化配置文件；运行态 token 保存在账号 SQLite 中。
-- 代理只支持 `socks5` 与 `socks5h`，账号的 `proxy_id` 必须引用已存在代理。
+- 代理支持 `socks5`、`socks5h`，以及由本机 Xray core 托管的 `vless`、`vmess`、`hysteria2`（`hy2` 会归一为 `hysteria2`）。账号的 `proxy_id` 必须引用已存在代理；Xray 节点使用分享链接保存，管理接口只返回 `has_uri`，不会回显链接中的凭据。详见 [Xray 代理协议](xray-proxy.md)。
 
 ### 缓存配置（完整热重载）
 
@@ -263,7 +263,8 @@ DEEPSEEK_WEB_TO_API_CONFIG_PATH=data/config.json
 - 启动失败并提示 `admin.jwt_secret is required`：配置足够随机的 `admin.jwt_secret`。
 - Docker 容器内无法保存配置：确认挂载了 `./data:/app/data`，并设置 `DEEPSEEK_WEB_TO_API_CONFIG_PATH=/app/data/config.json`。
 - 批量导入账号失败：优先使用一行一个 `账号:密码`；邮箱账号包含 `@`，手机号账号会归一化为带国家码格式。旧 JSON 里的 `mobile:"user@example.com"` 会被兼容成邮箱账号。
-- 代理配置报错：检查 `type` 是否为 `socks5` 或 `socks5h`，端口是否在 `1-65535`。
+- SOCKS 代理配置报错：检查 `type` 是否为 `socks5` 或 `socks5h`，端口是否在 `1-65535`。
+- Xray 代理不可用：访问 `GET /admin/proxies/core` 查看核心路径、版本和具体错误；Windows 可把 `xray.exe`、`geoip.dat`、`geosite.dat` 放到应用可执行文件同目录。当前 Xray 已移除 `allowInsecure`，带 `insecure=1` 或 `allowInsecure=1` 的链接会被明确拒绝。
 - WebUI Settings 修改无效（缓存 TTL 未生效）：确认 `PUT /admin/settings` 返回 `{"success":true}`。若仍无效，检查 `/admin/metrics/overview.cache` 中 TTL 字段是否已更新；v1.0.7 之前存在路径级硬编码 TTL bug，升级到 v1.0.7+ 即可修复。
 - model id 返回 4xx（v1.0.10+）：客户端传入的 model id 未在 `DefaultModelAliases` 或 `model_aliases` 中。通过 WebUI Settings 添加对应别名，或让客户端使用标准模型 id。
 

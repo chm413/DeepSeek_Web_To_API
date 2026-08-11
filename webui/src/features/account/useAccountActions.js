@@ -1,15 +1,32 @@
 import { useState } from 'react'
 
+const accountTestPhaseTranslationKey = {
+    token_refresh: 'accountManager.testPhaseTokenRefresh',
+    token_refresh_retry: 'accountManager.testPhaseTokenRefreshRetry',
+    session_create: 'accountManager.testPhaseSessionCreate',
+    session_create_retry: 'accountManager.testPhaseSessionCreateRetry',
+    model_validation: 'accountManager.testPhaseModelValidation',
+    pow: 'accountManager.testPhasePow',
+    completion: 'accountManager.testPhaseCompletion',
+}
+
+function accountTestFailureMessage(accountID, data, t) {
+    const phase = t(accountTestPhaseTranslationKey[data?.phase] || 'accountManager.testPhaseUnknown')
+    const reason = String(data?.failure_reason || data?.message || data?.detail || t('messages.requestFailed')).trim()
+    return t('accountManager.testFailureDetail', { account: accountID, phase, reason })
+}
+
 export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, totalAccounts, fetchAccounts, resolveAccountIdentifier }) {
     const [showAddKey, setShowAddKey] = useState(false)
     const [editingKey, setEditingKey] = useState(null)
     const [showAddAccount, setShowAddAccount] = useState(false)
+    const [showBatchUpload, setShowBatchUpload] = useState(false)
     const [showEditAccount, setShowEditAccount] = useState(false)
     const [editingAccount, setEditingAccount] = useState(null)
     const [newKey, setNewKey] = useState({ key: '', name: '', remark: '' })
     const [copiedKey, setCopiedKey] = useState(null)
-    const [newAccount, setNewAccount] = useState({ name: '', remark: '', email: '', mobile: '', password: '' })
-    const [editAccount, setEditAccount] = useState({ name: '', remark: '' })
+    const [newAccount, setNewAccount] = useState({ name: '', remark: '', email: '', mobile: '', password: '', enabled: true })
+    const [editAccount, setEditAccount] = useState({ name: '', remark: '', enabled: true })
     const [loading, setLoading] = useState(false)
     const [testing, setTesting] = useState({})
     const [testingAll, setTestingAll] = useState(false)
@@ -17,6 +34,8 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
     const [sessionCounts, setSessionCounts] = useState({})
     const [deletingSessions, setDeletingSessions] = useState({})
     const [updatingProxy, setUpdatingProxy] = useState({})
+    const [updatingEnabled, setUpdatingEnabled] = useState({})
+    const [batchUploading, setBatchUploading] = useState(false)
 
     const readJSONResponse = async (res) => {
         const text = await res.text()
@@ -75,14 +94,14 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
     const openAddAccount = () => {
         setShowEditAccount(false)
         setEditingAccount(null)
-        setEditAccount({ name: '', remark: '' })
-        setNewAccount({ name: '', remark: '', email: '', mobile: '', password: '' })
+        setEditAccount({ name: '', remark: '', enabled: true })
+        setNewAccount({ name: '', remark: '', email: '', mobile: '', password: '', enabled: true })
         setShowAddAccount(true)
     }
 
     const closeAddAccount = () => {
         setShowAddAccount(false)
-        setNewAccount({ name: '', remark: '', email: '', mobile: '', password: '' })
+        setNewAccount({ name: '', remark: '', email: '', mobile: '', password: '', enabled: true })
     }
 
     const openEditAccount = (account) => {
@@ -98,6 +117,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         setEditAccount({
             name: account?.name || '',
             remark: account?.remark || '',
+            enabled: account?.enabled !== false,
         })
         setShowEditAccount(true)
     }
@@ -105,7 +125,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
     const closeEditAccount = () => {
         setShowEditAccount(false)
         setEditingAccount(null)
-        setEditAccount({ name: '', remark: '' })
+        setEditAccount({ name: '', remark: '', enabled: true })
     }
 
     const addKey = async () => {
@@ -251,17 +271,18 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ identifier: accountID }),
             })
-            const data = await res.json()
+            const data = await readJSONResponse(res)
             
             // 更新会话数
             if (data.session_count !== undefined) {
                 setSessionCounts(prev => ({ ...prev, [accountID]: data.session_count }))
             }
             
-            const statusMessage = data.success
+            const succeeded = res.ok && Boolean(data.success)
+            const statusMessage = succeeded
                 ? t('apiTester.testSuccess', { account: accountID, time: data.response_time })
-                : `${accountID}: ${data.message}`
-            onMessage(data.success ? 'success' : 'error', statusMessage)
+                : accountTestFailureMessage(accountID, data, t)
+            onMessage(succeeded ? 'success' : 'error', statusMessage)
             fetchAccounts()
             onRefresh()
         } catch (e) {
@@ -327,7 +348,9 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                     return {
                         id,
                         success: res.ok && Boolean(data.success),
-                        message: data.message || data.detail || '',
+                        message: data.success
+                            ? (data.message || '')
+                            : accountTestFailureMessage(id, data, t),
                         time: data.response_time,
                         sessionCount: data.session_count,
                     }
@@ -417,6 +440,65 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         }
     }
 
+    const openBatchUpload = () => setShowBatchUpload(true)
+    const closeBatchUpload = () => setShowBatchUpload(false)
+
+    const uploadBatchAccounts = async (payload) => {
+        setBatchUploading(true)
+        try {
+            const res = await apiFetch('/admin/accounts/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+            const data = await readJSONResponse(res)
+            if (!res.ok) {
+                throw new Error(data.detail || t('messages.requestFailed'))
+            }
+            if (!payload.dry_run) {
+                await fetchAccounts(1)
+                await onRefresh()
+                onMessage(data.invalid > 0 ? 'error' : 'success', t('accountManager.batchUploadResult', {
+                    created: data.created || 0,
+                    updated: data.updated || 0,
+                    skipped: data.skipped || 0,
+                    invalid: data.invalid || 0,
+                }))
+            }
+            return data
+        } finally {
+            setBatchUploading(false)
+        }
+    }
+
+    const updateAccountEnabled = async (identifier, enabled) => {
+        const accountID = String(identifier || '').trim()
+        if (!accountID) {
+            onMessage('error', t('accountManager.invalidIdentifier'))
+            return
+        }
+        setUpdatingEnabled(prev => ({ ...prev, [accountID]: true }))
+        try {
+            const res = await apiFetch(`/admin/accounts/${encodeURIComponent(accountID)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled }),
+            })
+            const data = await readJSONResponse(res)
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return
+            }
+            onMessage('success', enabled ? t('accountManager.accountEnabled') : t('accountManager.accountDisabled'))
+            fetchAccounts()
+            onRefresh()
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+        } finally {
+            setUpdatingEnabled(prev => ({ ...prev, [accountID]: false }))
+        }
+    }
+
     return {
         showAddKey,
         openAddKey,
@@ -426,6 +508,11 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         showAddAccount,
         openAddAccount,
         closeAddAccount,
+        showBatchUpload,
+        openBatchUpload,
+        closeBatchUpload,
+        batchUploading,
+        uploadBatchAccounts,
         showEditAccount,
         editingAccount,
         editAccount,
@@ -445,6 +532,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         sessionCounts,
         deletingSessions,
         updatingProxy,
+        updatingEnabled,
         addKey,
         deleteKey,
         addAccount,
@@ -454,5 +542,6 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         testAllAccounts,
         deleteAllSessions,
         updateAccountProxy,
+        updateAccountEnabled,
     }
 }

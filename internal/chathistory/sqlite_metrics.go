@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -87,6 +88,57 @@ func (s *sqliteStore) TokenUsageStats(window time.Duration) (TokenUsageStats, er
 		return TokenUsageStats{}, fmt.Errorf("scan chat history sqlite token stat rows: %w", err)
 	}
 	return stats, nil
+}
+
+func (s *sqliteStore) AccountTokenUsageByAccount(window time.Duration) (map[string]AccountTokenUsage, error) {
+	if s == nil {
+		return nil, errors.New("chat history sqlite store is nil")
+	}
+	if window <= 0 {
+		window = time.Minute
+	}
+	windowStart := time.Now().UnixMilli() - window.Milliseconds()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	rows, err := s.db.Query(`
+		SELECT account_id, model, usage_json
+		FROM chat_history
+		WHERE TRIM(account_id) <> ''
+		  AND ((completed_at > 0 AND completed_at >= ?) OR (completed_at <= 0 AND created_at >= ?))
+	`, windowStart, windowStart)
+	if err != nil {
+		return nil, fmt.Errorf("read chat history sqlite account token stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := map[string]AccountTokenUsage{}
+	for rows.Next() {
+		var accountID, model, usageJSON string
+		if err := rows.Scan(&accountID, &model, &usageJSON); err != nil {
+			return nil, fmt.Errorf("scan chat history sqlite account token stats: %w", err)
+		}
+		accountID = strings.ToLower(strings.TrimSpace(accountID))
+		if accountID == "" {
+			continue
+		}
+		usage := tokenUsageFromMap(decodeUsageJSON(usageJSON))
+		usage.Requests = 1
+		current := result[accountID]
+		if current.ByModel == nil {
+			current.ByModel = map[string]TokenUsageTotals{}
+		}
+		current.add(usage)
+		addModelTotals(current.ByModel, normalizedMetricModel(model), usage)
+		result[accountID] = current
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan chat history sqlite account token stat rows: %w", err)
+	}
+	return result, nil
 }
 
 func (s *sqliteStore) OutcomeStats() (OutcomeStats, error) {

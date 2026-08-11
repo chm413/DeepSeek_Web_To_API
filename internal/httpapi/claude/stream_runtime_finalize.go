@@ -50,6 +50,13 @@ func (s *claudeStreamRuntime) finalize(stopReason string) {
 
 	finalThinking := s.thinking.String()
 	finalText := cleanVisibleOutput(s.text.String(), s.stripReferenceMarkers)
+	s.finalContent = nil
+	if finalThinking != "" {
+		s.finalContent = append(s.finalContent, map[string]any{"type": "thinking", "thinking": finalThinking})
+	}
+	if finalText != "" {
+		s.finalContent = append(s.finalContent, map[string]any{"type": "text", "text": finalText})
+	}
 	toolParseText := cleanVisibleOutputPreservingToolMarkup(s.rawText.String(), s.stripReferenceMarkers)
 	if s.bufferToolContent {
 		detected := s.toolCalls
@@ -76,6 +83,7 @@ func (s *claudeStreamRuntime) finalize(stopReason string) {
 		},
 	})
 	s.send("message_stop", map[string]any{"type": "message_stop"})
+	s.completed = true
 }
 
 func (s *claudeStreamRuntime) emitToolUseBlocks(calls []toolcall.ParsedToolCall, stopReason *string) {
@@ -89,12 +97,19 @@ func (s *claudeStreamRuntime) emitToolUseBlocks(calls []toolcall.ParsedToolCall,
 	idSeed := time.Now().UnixNano()
 	for i, tc := range detected {
 		idx := s.nextBlockIndex + i
+		toolID := fmt.Sprintf("toolu_%d_%d", idSeed, idx)
+		s.finalContent = append(s.finalContent, map[string]any{
+			"type":  "tool_use",
+			"id":    toolID,
+			"name":  tc.Name,
+			"input": tc.Input,
+		})
 		s.send("content_block_start", map[string]any{
 			"type":  "content_block_start",
 			"index": idx,
 			"content_block": map[string]any{
 				"type":  "tool_use",
-				"id":    fmt.Sprintf("toolu_%d_%d", idSeed, idx),
+				"id":    toolID,
 				"name":  tc.Name,
 				"input": map[string]any{},
 			},

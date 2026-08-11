@@ -3,6 +3,7 @@ package config
 // rebuildIndexes must be called with the lock already held (or during init).
 func (s *Store) rebuildIndexes() {
 	prevStatus := s.accTest
+	prevResult := s.accTestResult
 	prevSession := s.accSess
 	s.keyMap = make(map[string]struct{}, len(s.cfg.Keys))
 	for _, k := range s.cfg.Keys {
@@ -10,6 +11,7 @@ func (s *Store) rebuildIndexes() {
 	}
 	s.accMap = make(map[string]int, len(s.cfg.Accounts))
 	s.accTest = make(map[string]string, len(s.cfg.Accounts))
+	s.accTestResult = make(map[string]AccountTestResult, len(s.cfg.Accounts))
 	s.accSess = make(map[string]int, len(s.cfg.Accounts))
 	for i, acc := range s.cfg.Accounts {
 		id := acc.Identifier()
@@ -17,6 +19,9 @@ func (s *Store) rebuildIndexes() {
 			s.accMap[id] = i
 			if status, ok := prevStatus[id]; ok {
 				s.setAccountTestStatusLocked(acc, status, "")
+			}
+			if result, ok := prevResult[id]; ok {
+				s.setAccountTestResultLocked(acc, result, "")
 			}
 			if count, ok := prevSession[id]; ok {
 				s.setAccountSessionCountLocked(acc, count, "")
@@ -65,6 +70,21 @@ func (s *Store) setAccountTestStatusLocked(acc Account, status, hintedIdentifier
 	}
 	if hintedIdentifier = lower(hintedIdentifier); hintedIdentifier != "" {
 		s.accTest[hintedIdentifier] = status
+	}
+}
+
+func (s *Store) setAccountTestResultLocked(acc Account, result AccountTestResult, hintedIdentifier string) {
+	if id := acc.Identifier(); id != "" {
+		s.accTestResult[id] = result
+	}
+	if email := acc.Email; email != "" {
+		s.accTestResult[email] = result
+	}
+	if mobile := CanonicalMobileKey(acc.Mobile); mobile != "" {
+		s.accTestResult[mobile] = result
+	}
+	if hintedIdentifier = lower(hintedIdentifier); hintedIdentifier != "" {
+		s.accTestResult[hintedIdentifier] = result
 	}
 }
 

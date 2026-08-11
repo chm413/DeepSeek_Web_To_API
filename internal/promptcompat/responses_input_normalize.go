@@ -46,6 +46,12 @@ func NormalizeResponsesInputAsMessages(input any) []any {
 		if msg := normalizeResponsesInputItem(v); msg != nil {
 			return []any{msg}
 		}
+		if isOpaqueResponsesStateItem(v) {
+			// A top-level state item must be treated the same way as an item
+			// inside an input array. In particular, never let encrypted state
+			// reach the generic text/content fallback below.
+			return nil
+		}
 		if txt, _ := v["text"].(string); strings.TrimSpace(txt) != "" {
 			return []any{map[string]any{"role": "user", "content": txt}}
 		}
@@ -81,6 +87,10 @@ func normalizeResponsesInputArray(items []any) []any {
 				out = append(out, msg)
 				continue
 			}
+			if isOpaqueResponsesStateItem(x) {
+				// Do not let the generic fallback stringify encrypted_content.
+				continue
+			}
 			if s := normalizeResponsesFallbackPart(x); s != "" {
 				fallbackParts = append(fallbackParts, s)
 			}
@@ -95,4 +105,14 @@ func normalizeResponsesInputArray(items []any) []any {
 		return nil
 	}
 	return out
+}
+
+func isOpaqueResponsesStateItem(m map[string]any) bool {
+	typ := strings.ToLower(strings.TrimSpace(asString(m["type"])))
+	switch typ {
+	case "compaction", "compaction_summary", "context_compaction", "compaction_trigger", "reasoning":
+		return true
+	default:
+		return false
+	}
 }

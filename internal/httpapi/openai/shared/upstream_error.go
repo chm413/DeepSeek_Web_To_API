@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"DeepSeek_Web_To_API/internal/account"
+	"DeepSeek_Web_To_API/internal/auth"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
 )
 
@@ -33,6 +35,25 @@ func PowErrorDetail(err error) UpstreamErrorDetail {
 }
 
 func upstreamRequestErrorDetail(err error, op string) UpstreamErrorDetail {
+	var healthErr *auth.AccountHealthError
+	if errors.As(err, &healthErr) {
+		if healthErr.State == account.HealthTemporarilyMuted {
+			return UpstreamErrorDetail{
+				Status:       http.StatusTooManyRequests,
+				Message:      "Upstream account is temporarily muted; the account was skipped until the upstream mute expires.",
+				Code:         "account_temporarily_muted",
+				FinishReason: "account_temporarily_muted",
+			}
+		}
+		if healthErr.State == account.HealthPermanentlyBanned {
+			return UpstreamErrorDetail{
+				Status:       http.StatusForbidden,
+				Message:      "Upstream account is permanently banned and has been removed from rotation.",
+				Code:         "account_permanently_banned",
+				FinishReason: "account_permanently_banned",
+			}
+		}
+	}
 	var failure *dsclient.RequestFailure
 	if errors.As(err, &failure) {
 		switch failure.Kind {

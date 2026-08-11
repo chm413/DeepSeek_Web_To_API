@@ -8,11 +8,20 @@ import (
 	"net/http"
 	"strings"
 
+	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 )
 
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
+	if strings.TrimSpace(acc.Password) == "" {
+		healthErr := &auth.AccountHealthError{
+			State:   account.HealthInvalidCredentials,
+			Message: "password is required to obtain a new upstream token",
+		}
+		c.markLoginAccountHealth(acc, healthErr)
+		return "", healthErr
+	}
 	clients := c.requestClientsForAccount(acc)
 	payload := map[string]any{
 		"password":  strings.TrimSpace(acc.Password),
@@ -33,20 +42,89 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 		return "", err
 	}
 	code := intFrom(resp["code"])
+	data, _ := resp["data"].(map[string]any)
+	bizCode := intFrom(data["biz_code"])
+	bizMsg, _ := data["biz_msg"].(string)
+	msg, _ := resp["msg"].(string)
+	if healthErr := loginAccountHealthErrorFromResponse(code, bizCode, msg, bizMsg); healthErr != nil {
+		c.markLoginAccountHealth(acc, healthErr)
+		return "", healthErr
+	}
 	if code != 0 {
 		return "", fmt.Errorf("login failed: %v", resp["msg"])
 	}
-	data, _ := resp["data"].(map[string]any)
-	if intFrom(data["biz_code"]) != 0 {
-		return "", fmt.Errorf("login failed: %v", data["biz_msg"])
+	if bizCode != 0 {
+		return "", fmt.Errorf("login failed: %v", bizMsg)
 	}
 	bizData, _ := data["biz_data"].(map[string]any)
 	user, _ := bizData["user"].(map[string]any)
+	if healthErr := accountHealthErrorFromUser(user); healthErr != nil {
+		c.markLoginAccountHealth(acc, healthErr)
+		return "", healthErr
+	}
 	token, _ := user["token"].(string)
 	if strings.TrimSpace(token) == "" {
 		return "", errors.New("missing login token")
 	}
 	return token, nil
+}
+
+func (c *Client) CheckAccountHealth(ctx context.Context, acc config.Account) (string, error) {
+	token := strings.TrimSpace(acc.Token)
+	if token == "" {
+		return c.Login(ctx, acc)
+	}
+	authCtx := &auth.RequestAuth{
+		DeepSeekToken: token,
+		AccountID:     acc.Identifier(),
+		Account:       acc,
+	}
+	ctx = auth.WithAuth(ctx, authCtx)
+	clients := c.requestClientsForAccount(acc)
+	resp, status, err := c.getJSONWithStatus(ctx, clients.regular, dsprotocol.DeepSeekCurrentUserURL, c.authHeaders(token))
+	if err != nil {
+		return token, err
+	}
+	code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+	if rateErr := accountRateLimitError(status, code, bizCode, msg, bizMsg, ""); rateErr != nil {
+		c.markLoginAccountHealth(acc, rateErr)
+		return token, rateErr
+	}
+	if healthErr := accountHealthErrorFromResponse(code, bizCode, msg, bizMsg); healthErr != nil {
+		c.markLoginAccountHealth(acc, healthErr)
+		return token, healthErr
+	}
+	if status == http.StatusOK && code == 0 && bizCode == 0 {
+		if healthErr := accountHealthErrorFromUser(extractResponseUser(resp)); healthErr != nil {
+			c.markLoginAccountHealth(acc, healthErr)
+			return token, healthErr
+		}
+		return token, nil
+	}
+	if shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
+		if strings.TrimSpace(acc.Password) != "" {
+			return c.Login(ctx, acc)
+		}
+		healthErr := &auth.AccountHealthError{
+			State:   account.HealthInvalidCredentials,
+			Code:    firstNonZero(bizCode, code),
+			Message: "stored token rejected and no password is available for refresh",
+		}
+		c.markLoginAccountHealth(acc, healthErr)
+		return token, healthErr
+	}
+	return token, fmt.Errorf("account health check failed: status=%d code=%d biz_code=%d message=%s", status, code, bizCode, failureMessage(msg, bizMsg, "unknown"))
+}
+
+func extractResponseUser(resp map[string]any) map[string]any {
+	data, _ := resp["data"].(map[string]any)
+	bizData, _ := data["biz_data"].(map[string]any)
+	user, _ := bizData["user"].(map[string]any)
+	if user != nil {
+		return user
+	}
+	user, _ = data["user"].(map[string]any)
+	return user
 }
 
 func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (string, error) {
@@ -68,11 +146,21 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 			continue
 		}
 		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
 		if status == http.StatusOK && code == 0 && bizCode == 0 {
 			sessionID := extractCreateSessionID(resp)
 			if sessionID != "" {
 				return sessionID, nil
 			}
+		}
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			if a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
+				clients = c.requestClientsForAuth(ctx, a)
+				refreshed = false
+				attempts++
+				continue
+			}
+			return "", healthErr
 		}
 		config.Logger.Warn("[create_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID)
 		if a.UseConfigToken {
@@ -124,6 +212,7 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 			continue
 		}
 		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
 		if status == http.StatusOK && code == 0 && bizCode == 0 {
 			data, _ := resp["data"].(map[string]any)
 			bizData, _ := data["biz_data"].(map[string]any)
@@ -134,6 +223,15 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 				continue
 			}
 			return BuildPowHeader(challenge, answer)
+		}
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			if a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
+				clients = c.requestClientsForAuth(ctx, a)
+				refreshed = false
+				attempts++
+				continue
+			}
+			return "", healthErr
 		}
 		config.Logger.Warn("[get_pow] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID, "target_path", targetPath)
 		lastFailureMessage = failureMessage(msg, bizMsg, "get pow failed")

@@ -180,6 +180,15 @@ func (s *Store) RuntimeTokenRefreshIntervalHours() int {
 	return 6
 }
 
+func (s *Store) RuntimeAccountHealthCheckIntervalMinutes() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.AccountHealthCheckIntervalMinutes > 0 {
+		return s.cfg.Runtime.AccountHealthCheckIntervalMinutes
+	}
+	return 0
+}
+
 func (s *Store) AutoDeleteSessions() bool {
 	return s.AutoDeleteMode() != "none"
 }
@@ -240,4 +249,124 @@ func (s *Store) RemoteFileUploadEnabled() bool {
 		return *s.cfg.Server.RemoteFileUploadEnabled
 	}
 	return false
+}
+
+// Default prompt-size ceilings, calibrated from production chat_history
+// (deduped by conversation to strip the ~8:1 cross-account retry inflation):
+//
+//   - expert (deepseek-v4-pro / -pro-search): every deduped request <150k chars
+//     succeeded (15/15); above 150k the pass rate fell to ~37% (3/8). This is a
+//     soft reliability cliff, NOT a hard rejection — failures surface as
+//     upstream_empty_output (retry exhaustion), and one 223k request did
+//     succeed. 150k is where reliability was still 100%.
+//   - default (deepseek-v4-flash): no observed ceiling — the largest deduped
+//     success was 380k with no size-correlated degradation, so the default is
+//     set at that observed max.
+//
+// Sample sizes in the high buckets are small (n=3..5), so treat these as tuned
+// defaults, not physical limits; operators override via prompt_limit.max_chars_*.
+// See docs/prompt-compatibility.md for the calibration method.
+const (
+	defaultPromptMaxCharsDefault = 380000
+	defaultPromptMaxCharsExpert  = 150000
+	defaultPromptKeepRecentTurns = 6
+)
+
+// promptLimitLocked resolves the prompt_limit block against its defaults.
+// Caller must already hold s.mu (read or write).
+func (s *Store) promptLimitLocked() PromptLimitSettings {
+	out := DefaultPromptLimitSettings()
+	pl := s.cfg.PromptLimit
+	if pl.Enabled != nil {
+		out.Enabled = *pl.Enabled
+	}
+	if pl.MaxCharsDefault > 0 {
+		out.MaxCharsDefault = pl.MaxCharsDefault
+		out.MaxCharsDefaultConfigured = true
+	}
+	if pl.MaxCharsExpert > 0 {
+		out.MaxCharsExpert = pl.MaxCharsExpert
+		out.MaxCharsExpertConfigured = true
+	}
+	if pl.AutoCompressEnabled != nil {
+		out.AutoCompressEnable = *pl.AutoCompressEnabled
+	}
+	if pl.CompressKeepRecent > 0 {
+		out.KeepRecentTurns = pl.CompressKeepRecent
+	}
+	if pl.CompressKeepSystem != nil {
+		out.KeepSystemMessage = *pl.CompressKeepSystem
+	}
+	if pl.ProFlashCompressionEnabled != nil {
+		out.ProFlashCompressionEnable = *pl.ProFlashCompressionEnabled
+	}
+	if pl.ProFlashCompressionTargetChars > 0 {
+		out.ProFlashCompressionTarget = pl.ProFlashCompressionTargetChars
+	}
+	if pl.IncrementalMaxTurns != nil && *pl.IncrementalMaxTurns >= 0 {
+		out.IncrementalMaxTurns = *pl.IncrementalMaxTurns
+	}
+	if pl.IncrementalRotationKeepRecent > 0 {
+		out.IncrementalRotationKeepRecent = pl.IncrementalRotationKeepRecent
+	}
+	return out
+}
+
+// PromptLimitSnapshot reads every prompt_limit knob under a SINGLE read lock.
+//
+// Callers must use this rather than the per-field accessors below when more
+// than one field is needed. Reading fields one at a time takes six separate
+// locks, so a concurrent Store.Update (hot reload, or a future admin PUT) can
+// land between them and yield a torn mix of old and new values. Worse, the
+// compress and enforce phases of one request would each re-read: compression
+// could see a high ceiling and decline to trim, then enforcement could see a
+// freshly-lowered ceiling and reject with 413 a request that was never given
+// the chance to shrink. One snapshot per request makes the whole request
+// observe one coherent config.
+func (s *Store) PromptLimitSnapshot() PromptLimitSettings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked()
+}
+
+// PromptLimitEnabled returns whether prompt size checking is enabled.
+func (s *Store) PromptLimitEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked().Enabled
+}
+
+// PromptLimitMaxCharsDefault returns the max prompt chars for flash/default models.
+func (s *Store) PromptLimitMaxCharsDefault() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked().MaxCharsDefault
+}
+
+// PromptLimitMaxCharsExpert returns the max prompt chars for pro/expert models.
+func (s *Store) PromptLimitMaxCharsExpert() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked().MaxCharsExpert
+}
+
+// PromptLimitAutoCompressEnabled returns whether auto-compression is enabled.
+func (s *Store) PromptLimitAutoCompressEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked().AutoCompressEnable
+}
+
+// PromptLimitCompressKeepRecent returns number of recent turns to preserve.
+func (s *Store) PromptLimitCompressKeepRecent() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked().KeepRecentTurns
+}
+
+// PromptLimitCompressKeepSystem returns whether to keep the system message.
+func (s *Store) PromptLimitCompressKeepSystem() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.promptLimitLocked().KeepSystemMessage
 }

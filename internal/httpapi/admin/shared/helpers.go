@@ -28,6 +28,9 @@ func ToStringSlice(v any) ([]string, bool) { return toStringSlice(v) }
 func ToAccount(m map[string]any) config.Account {
 	return toAccount(m)
 }
+func FieldBoolOptional(m map[string]any, key string) (bool, bool) {
+	return fieldBoolOptional(m, key)
+}
 func ToAPIKeys(v any) ([]config.APIKey, bool) {
 	return toAPIKeys(v)
 }
@@ -126,7 +129,7 @@ func toStringSlice(v any) ([]string, bool) {
 }
 
 func toAccount(m map[string]any) config.Account {
-	return normalizeAccountForStorage(config.Account{
+	acc := normalizeAccountForStorage(config.Account{
 		Name:     fieldString(m, "name"),
 		Remark:   fieldString(m, "remark"),
 		Email:    fieldString(m, "email"),
@@ -134,6 +137,15 @@ func toAccount(m map[string]any) config.Account {
 		Password: fieldString(m, "password"),
 		ProxyID:  fieldString(m, "proxy_id"),
 	})
+	if enabled, ok := fieldBoolOptional(m, "enabled"); ok {
+		acc.Disabled = !enabled
+	} else if disabled, ok := fieldBoolOptional(m, "disabled"); ok {
+		acc.Disabled = disabled
+	}
+	if acc.Disabled {
+		acc.DisabledReason = config.AccountDisabledManual
+	}
+	return acc
 }
 
 func toAPIKeys(v any) ([]config.APIKey, bool) {
@@ -269,6 +281,22 @@ func fieldStringOptional(m map[string]any, key string) (string, bool) {
 	return strings.TrimSpace(fmt.Sprintf("%v", v)), true
 }
 
+func fieldBoolOptional(m map[string]any, key string) (bool, bool) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return false, false
+	}
+	switch value := v.(type) {
+	case bool:
+		return value, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		return parsed, err == nil
+	default:
+		return false, false
+	}
+}
+
 func statusOr(v int, d int) int {
 	if v == 0 {
 		return d
@@ -307,6 +335,7 @@ func toProxy(m map[string]any) config.Proxy {
 		Port:     intFrom(m["port"]),
 		Username: fieldString(m, "username"),
 		Password: fieldString(m, "password"),
+		URI:      fieldString(m, "uri"),
 	})
 }
 

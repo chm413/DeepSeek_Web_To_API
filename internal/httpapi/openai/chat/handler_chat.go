@@ -96,6 +96,39 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stdReq = shared.ApplyThinkingInjection(h.Store, stdReq)
+	shared.LogIncrementalRequestContext("chat.completions", a, stdReq, len(rawBody))
+	incrementalBaseReq := stdReq
+	promptLimit := h.Store.PromptLimitSnapshot()
+	if h.tryIncrementalChat(w, r, a, &stdReq, promptLimit, historySession, &sessionID) {
+		return
+	}
+	// Trim the oldest turns before CIF runs. CIF collapses Messages into a
+	// single synthetic user message, so once it has run there are no turn
+	// boundaries left to drop — compressing afterwards would silently no-op.
+	dynamicLimitApplied := false
+	promptLimit, dynamicLimitApplied, err = shared.ResolveDynamicPromptLimits(r.Context(), h.DS, a, promptLimit)
+	if err != nil {
+		config.Logger.Warn("[prompt_limit] dynamic upstream limit lookup failed; using static settings", "surface", "chat.completions", "error", err)
+	}
+	if !stdReq.IncrementalSessionRotated {
+		if dropped, ok := shared.CompressPromptBeforeCIF(promptLimit, &stdReq); ok {
+			limit, expert := shared.PromptLimitForModel(promptLimit, stdReq.ResolvedModel)
+			config.Logger.Info("[prompt_limit] compressed history before CIF",
+				"surface", "chat.completions", "model", stdReq.ResolvedModel,
+				"expert", expert, "limit_chars", limit,
+				"dropped_messages", dropped, "prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "dynamic_upstream_limit", dynamicLimitApplied)
+		}
+	}
+	if errMsg := shared.EnforcePromptLimitBeforeCIF(promptLimit, stdReq, h.Store.RemoteFileUploadEnabled()); errMsg != "" {
+		config.Logger.Info("[prompt_limit] rejected before CIF",
+			"surface", "chat.completions", "model", stdReq.ResolvedModel,
+			"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "auto_compress_enabled", promptLimit.AutoCompressEnable)
+		if historySession != nil {
+			historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+		}
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
+		return
+	}
 	cifStartedAt := time.Now()
 	stdReq, err = h.applyCurrentInputFile(r.Context(), a, stdReq)
 	cifDuration := time.Since(cifStartedAt)
@@ -122,6 +155,30 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			historySession.error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
 		}
 	}) {
+		return
+	}
+
+	// Final gate. Expert/Pro models take a smaller upstream context than the
+	// flash tier, and CIF inlines the whole transcript into one message, so the
+	// assembled prompt can still exceed the ceiling even after compression.
+	// Reject here rather than letting upstream return an opaque empty output.
+	if shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.ProFlashCompressionEnable {
+		compressed, ok, compressErr := shared.TryFlashCompressPrompt(r.Context(), h.DS, a, stdReq, promptLimit, h.Store.AutoDeleteMode())
+		if compressErr != nil {
+			config.Logger.Warn("[prompt_limit] Flash compression failed; returning original overflow",
+				"surface", "chat.completions", "model", stdReq.ResolvedModel, "error", compressErr)
+		} else if ok {
+			stdReq = compressed
+			config.Logger.Info("[prompt_limit] compressed Pro history with Flash",
+				"surface", "chat.completions", "model", stdReq.ResolvedModel,
+				"thinking", stdReq.Thinking, "prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt))
+		}
+	}
+	if errMsg := shared.EnforcePromptLimit(promptLimit, stdReq); errMsg != "" {
+		if historySession != nil {
+			historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+		}
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
 		return
 	}
 
@@ -175,11 +232,134 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	refFileTokens := stdReq.RefFileTokens
+	var outcome chatCompletionOutcome
 	if stdReq.Stream {
-		h.handleStreamWithRetry(w, r, a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+		outcome = h.handleStreamWithRetry(w, r, a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+	} else {
+		outcome = h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+	}
+	h.recordFullChatIncrementalState(a, incrementalBaseReq, sessionID, outcome)
+}
+
+func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, stdReq *promptcompat.StandardRequest, promptLimit config.PromptLimitSettings, historySession *chatHistorySession, activeSessionID *string) bool {
+	if stdReq == nil {
+		return false
+	}
+	autoDeleteMode := h.Store.AutoDeleteMode()
+	lease, incrementalPrompt, ok := shared.PrepareIncrementalRequestWithSettings(h.Incremental, h.DS, autoDeleteMode, a, *stdReq, stdReq.Messages, promptLimit)
+	if !ok {
+		return false
+	}
+	defer func() {
+		if lease != nil {
+			lease.Invalidate()
+		}
+	}()
+	if lease.Rotate {
+		dropped, applied := shared.ApplyIncrementalSessionRotation(stdReq, lease, promptLimit)
+		if !applied {
+			return false
+		}
+		config.Logger.Info("[incremental] rotating upstream session",
+			"surface", "chat.completions", "session_key", a.SessionKey,
+			"previous_session_id", lease.SessionID, "completed_turns", lease.TurnCount,
+			"configured_max_turns", promptLimit.IncrementalMaxTurns,
+			"dropped_messages", dropped, "rotation_prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt),
+			"format_prompt_units", promptcompat.PromptUnits(stdReq.IncrementalFormatPrompt))
+		lease.Invalidate()
+		lease = nil
+		if activeSessionID != nil {
+			*activeSessionID = ""
+		}
+		return false
+	}
+	fullPrompt := stdReq.FinalPrompt
+	stdReq.FinalPrompt = incrementalPrompt
+	if activeSessionID != nil {
+		*activeSessionID = lease.SessionID
+	}
+	config.Logger.Info("[incremental] reused upstream session",
+		"surface", "chat.completions", "session_key", a.SessionKey,
+		"parent_message_id", lease.ParentMessageID,
+		"retained_messages", len(stdReq.Messages)-len(lease.DeltaMessages),
+		"delta_messages", len(lease.DeltaMessages),
+		"full_prompt_units", promptcompat.PromptUnits(fullPrompt),
+		"format_prompt_units", promptcompat.PromptUnits(stdReq.IncrementalFormatPrompt),
+		"incremental_prompt_units", promptcompat.PromptUnits(incrementalPrompt))
+
+	var err error
+	promptLimit, _, err = shared.ResolveDynamicPromptLimits(r.Context(), h.DS, a, promptLimit)
+	if err != nil {
+		config.Logger.Warn("[prompt_limit] dynamic upstream limit lookup failed; using static settings", "surface", "chat.completions.incremental", "error", err)
+	}
+	if shared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, shared.PickAuditText(stdReq.LatestUserText, stdReq.FinalPrompt), w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
+		if historySession != nil {
+			historySession.error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
+		}
+	}) {
+		return true
+	}
+	if errMsg := shared.EnforcePromptLimit(promptLimit, *stdReq); errMsg != "" {
+		if historySession != nil {
+			historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+		}
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
+		return true
+	}
+	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	if err != nil {
+		powDetail := shared.PowErrorDetail(err)
+		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
+			writePowCallError(w, historySession, err)
+			return true
+		}
+		if !a.UseConfigToken {
+			a.MarkDirectTokenInvalid()
+		}
+		if historySession != nil {
+			historySession.error(http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).", "error", "", "")
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).")
+		return true
+	}
+	payload := stdReq.CompletionPayload(lease.SessionID)
+	payload["parent_message_id"] = lease.ParentMessageID
+	resp, err := shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+	if err != nil {
+		config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",
+			"surface", "chat.completions", "session_key", a.SessionKey, "error", err)
+		if activeSessionID != nil {
+			*activeSessionID = ""
+		}
+		stdReq.FinalPrompt = fullPrompt
+		return false
+	}
+	var outcome chatCompletionOutcome
+	if stdReq.Stream {
+		outcome = h.handleStreamWithRetry(w, r, a, resp, payload, pow, lease.SessionID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, activeSessionID)
+	} else {
+		outcome = h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, lease.SessionID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, activeSessionID)
+	}
+	if outcome.success {
+		lease.Complete(shared.IncrementalScope(a, *stdReq), stdReq.Messages, outcome.responseMessages, lease.SessionID, outcome.responseMessageID)
+		lease = nil
+	}
+	return true
+}
+
+func (h *Handler) recordFullChatIncrementalState(a *auth.RequestAuth, stdReq promptcompat.StandardRequest, sessionID string, outcome chatCompletionOutcome) {
+	if h == nil || h.Incremental == nil || h.Store == nil || !outcome.success || !strings.EqualFold(strings.TrimSpace(h.Store.AutoDeleteMode()), "none") {
 		return
 	}
-	h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+	scope := shared.IncrementalScope(a, stdReq)
+	h.Incremental.Record(scope, stdReq.Messages, outcome.responseMessages, sessionID, outcome.responseMessageID)
+	config.Logger.Info("[incremental] recorded upstream branch",
+		"surface", "chat.completions", "session_key", scope.SessionKey,
+		"variant", scope.Variant,
+		"parent_message_id", outcome.responseMessageID,
+		"request_messages", len(stdReq.Messages), "response_messages", len(outcome.responseMessages),
+		"full_prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt),
+		"format_prompt_units", promptcompat.PromptUnits(stdReq.IncrementalFormatPrompt))
 }
 
 func (h *Handler) handleNonStream(w http.ResponseWriter, resp *http.Response, completionID, model, finalPrompt string, refFileTokens int, thinkingEnabled, exposeReasoning, searchEnabled bool, toolNames []string, toolsRaw any, historySession *chatHistorySession) {

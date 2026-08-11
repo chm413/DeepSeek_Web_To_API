@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +28,54 @@ func (s stubResolver) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error
 	return &auth.RequestAuth{CallerID: s.caller}, nil
 }
 
+// fakeClock is a manually-advanced clock for the lease tests below. It is
+// anchored at the real time.Now() on construction so that code comparing the
+// injected clock against real filesystem mtimes (enforceDiskLimit /
+// maybeSweepDisk walk the cache dir and diff ModTime against now) still sees
+// sane, near-zero ages.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Now()} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// Lease offsets for the sliding-window / session-stickiness tests. Each test
+// observes the cache at 65% of stickyTTL (must still be live) and again at
+// 130% (only live because the earlier observation slid the lease).
+//
+// These tests used to sleep for real: a 200ms TTL with 130ms sleeps, i.e. 70ms
+// of slack. That passed when the package ran alone but failed reproducibly
+// under tests/scripts/run-unit-all.sh. The cause is not merely scheduling
+// noise — setWithPolicySession fixes an entry's memory deadline from `now` and
+// only *then* does gzip + temp-file write + rename, a full WalkDir in
+// enforceDiskLimit, and another full WalkDir in maybeSweepDisk (which always
+// runs on the first store, since lastDiskSweep is zero). All of that I/O burns
+// wall time against a deadline that is already set, so the usable slack is
+// unbounded from the test's point of view and no sleep constant is safe. The
+// session test primes two entries and pays it twice, which is why it failed
+// even after the margin was widened 5x.
+//
+// Driving the cache from an injected clock removes the race entirely: the
+// assertions below are exact rather than probabilistic, and the tests no
+// longer sleep at all.
+const (
+	stickyTTL  = 100 * time.Second
+	stickyStep = 65 * time.Second
+)
+
 // TestSessionWideStickyTTLRefreshesSiblingsOnHit pins the session-level
 // stickiness contract: when ANY entry in a logical conversation is hit,
 // every sibling entry of that session also gets its lease refreshed. This
@@ -38,13 +87,15 @@ func (s stubResolver) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error
 func TestSessionWideStickyTTLRefreshesSiblingsOnHit(t *testing.T) {
 	t.Parallel()
 
-	// 200ms memoryTTL so the test runs fast; 1h diskTTL so the cap is far.
-	cache := New(Options{Dir: t.TempDir(), MemoryTTL: 200 * time.Millisecond, DiskTTL: time.Hour})
+	// Injected clock: the test advances it explicitly, so no assertion can
+	// race the store's own disk I/O. 1h diskTTL keeps the extension cap far.
+	clk := newFakeClock()
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: stickyTTL, DiskTTL: time.Hour, Now: clk.Now})
 	resolver := stubResolver{caller: "caller-a"}
 
 	// Turn 1: distinct body, but same first user message ("hi") — keeps
 	// the SessionKey stable across turns. Turn 2 appends an assistant +
-	// user message and arrives 130ms later.
+	// user message and arrives stickyStep later.
 	turn1 := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
 	turn2 := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"continue"}]}`
 
@@ -72,27 +123,30 @@ func TestSessionWideStickyTTLRefreshesSiblingsOnHit(t *testing.T) {
 		t.Fatalf("turn1 prime status=%d", rec1.Code)
 	}
 
-	// 130ms later, prime turn 2 (different body, but same session).
-	time.Sleep(130 * time.Millisecond)
+	// One step later, prime turn 2 (different body, but same session).
+	// Storing it is session activity, so turn1's lease is bumped to
+	// t0+stickyStep+stickyTTL as a side effect.
+	clk.advance(stickyStep)
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, mkReq(turn2))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("turn2 prime status=%d", rec2.Code)
 	}
 
-	// 130ms later (260ms after turn1 prime; turn1's plain TTL would have
-	// expired at 200ms). Hitting turn2 should refresh turn1's lease via
-	// session linkage.
-	time.Sleep(130 * time.Millisecond)
+	// Another step later: now at t0+2*stickyStep, which is strictly past
+	// turn1's original t0+stickyTTL deadline. Hitting turn2 must serve from
+	// memory and refresh turn1's lease again via session linkage.
+	clk.advance(stickyStep)
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, mkReq(turn2))
 	if got := rec3.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
 		t.Fatalf("turn2 second hit must serve from memory, got %q", got)
 	}
 
-	// Now retry turn 1 (390ms after its original prime — well beyond plain
-	// TTL of 200ms). It must still hit because the previous session-wide
-	// bump extended its lease.
+	// Retry turn 1 at the same instant — 2*stickyStep past its original
+	// prime, i.e. well beyond a plain stickyTTL. Without the session-wide
+	// bump it would already have been swept, so a memory hit here is what
+	// actually proves the sibling refresh happened.
 	rec4 := httptest.NewRecorder()
 	handler.ServeHTTP(rec4, mkReq(turn1))
 	if got := rec4.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
@@ -121,9 +175,10 @@ func TestSessionWideStickyTTLRefreshesSiblingsOnHit(t *testing.T) {
 func TestSlidingWindowKeepsActiveEntryHot(t *testing.T) {
 	t.Parallel()
 
-	// Memory TTL = 200ms so the test runs fast. Disk TTL = 1h so the
-	// extension cap is far away and never engages.
-	cache := New(Options{Dir: t.TempDir(), MemoryTTL: 200 * time.Millisecond, DiskTTL: time.Hour})
+	// Controllable clock (see stickyTTL). Disk TTL = 1h so the extension
+	// cap is far away and never engages.
+	clk := newFakeClock()
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: stickyTTL, DiskTTL: time.Hour, Now: clk.Now})
 	var upstream int32
 	handler := cache.Wrap(stubResolver{caller: "caller-a"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&upstream, 1)
@@ -146,23 +201,23 @@ func TestSlidingWindowKeepsActiveEntryHot(t *testing.T) {
 		t.Fatalf("prime status=%d", rec.Code)
 	}
 
-	// Hit just before the original 200ms TTL would expire (130ms in). The
-	// hit must succeed AND must bump the expiration to now+200ms.
-	time.Sleep(130 * time.Millisecond)
+	// Advance to 65% of the TTL — before the original deadline. The hit must
+	// succeed AND must slide the deadline out to now+stickyTTL (= 1.65 TTL).
+	clk.advance(stickyStep)
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, mkReq())
 	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
-		t.Fatalf("expected memory hit at 130ms, got %q", got)
+		t.Fatalf("expected memory hit before original deadline, got %q", got)
 	}
 
-	// Wait another 130ms (260ms total). Without sliding window, the entry
-	// would have expired at 200ms. With sliding window, the previous hit
-	// at 130ms reset expiration to 330ms, so this request must still hit.
-	time.Sleep(130 * time.Millisecond)
+	// Advance to 130% of the TTL. Without the sliding window the entry would
+	// have expired at 1.0 TTL; because the previous hit slid the deadline to
+	// 1.65 TTL, this must still be a memory hit.
+	clk.advance(stickyStep)
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, mkReq())
 	if got := rec3.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
-		t.Fatalf("expected sliding-window memory hit at 260ms, got %q", got)
+		t.Fatalf("expected sliding-window memory hit past original deadline, got %q", got)
 	}
 
 	// Three requests, one upstream call — the prime.

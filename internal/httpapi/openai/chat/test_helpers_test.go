@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"DeepSeek_Web_To_API/internal/config"
 	"context"
 	"io"
 	"net/http"
@@ -24,6 +25,7 @@ type mockOpenAIConfig struct {
 	currentInputMin     int
 	thinkingInjection   *bool
 	thinkingPrompt      string
+	promptLimit         *config.PromptLimitSettings
 }
 
 func (m mockOpenAIConfig) ModelAliases() map[string]string { return m.aliases }
@@ -55,6 +57,14 @@ func (m mockOpenAIConfig) RemoteFileUploadEnabled() bool { return true }
 func (m mockOpenAIConfig) CurrentInputFileMinChars() int {
 	return m.currentInputMin
 }
+func (m mockOpenAIConfig) PromptLimitSnapshot() config.PromptLimitSettings {
+	if m.promptLimit != nil {
+		return *m.promptLimit
+	}
+	s := config.DefaultPromptLimitSettings()
+	s.Enabled = true
+	return s
+}
 func (m mockOpenAIConfig) ThinkingInjectionEnabled() bool {
 	if m.thinkingInjection == nil {
 		return false
@@ -62,6 +72,9 @@ func (m mockOpenAIConfig) ThinkingInjectionEnabled() bool {
 	return *m.thinkingInjection
 }
 func (m mockOpenAIConfig) ThinkingInjectionPrompt() string { return m.thinkingPrompt }
+
+// Prompt-limit knobs default to the production defaults so existing tests
+// exercise the same path as a stock deployment.
 
 type streamStatusAuthStub struct{}
 

@@ -159,6 +159,22 @@ func TestCallCompletionReturnsUpstreamStatusFailure(t *testing.T) {
 	}
 }
 
+func TestCompletionStatusFailureClassifiesManagedUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{}
+	a := &auth.RequestAuth{UseConfigToken: true, DeepSeekToken: "expired-token"}
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"code":40001,"msg":"token expired"}`)),
+	}
+	err := client.completionStatusFailure(a, resp)
+	if !IsManagedUnauthorizedError(err) {
+		t.Fatalf("expected managed unauthorized classification, got %T: %v", err, err)
+	}
+}
+
 // rateLimitFailoverDoer returns 429 for the first `failuresBeforeSuccess`
 // requests, then 200 OK with a minimal SSE stream. It records every call so
 // the test can inspect which token was used at each attempt.

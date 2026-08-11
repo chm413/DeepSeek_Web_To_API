@@ -18,6 +18,7 @@ type ConfigStore interface {
 	Accounts() []config.Account
 	FindAccount(identifier string) (config.Account, bool)
 	UpdateAccountToken(identifier, token string) error
+	SetAccountDisabled(identifier string, disabled bool, reason string) error
 	UpdateAccountTestStatus(identifier, status string) error
 	AccountTestStatus(identifier string) (string, bool)
 	UpdateAccountSessionCount(identifier string, count int) error
@@ -37,6 +38,7 @@ type ConfigStore interface {
 	RuntimeAccountMaxQueue(defaultSize int) int
 	RuntimeGlobalMaxInflight(defaultSize int) int
 	RuntimeTokenRefreshIntervalHours() int
+	RuntimeAccountHealthCheckIntervalMinutes() int
 	AutoDeleteMode() string
 	HistorySplitEnabled() bool
 	HistorySplitTriggerAfterTurns() int
@@ -44,6 +46,7 @@ type ConfigStore interface {
 	CurrentInputFileMinChars() int
 	ThinkingInjectionEnabled() bool
 	ThinkingInjectionPrompt() string
+	PromptLimitSnapshot() config.PromptLimitSettings
 	CompatStripReferenceMarkers() bool
 	CompatWideInputStrictOutput() bool
 	ResponsesStoreTTLSeconds() int

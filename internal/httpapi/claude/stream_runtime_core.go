@@ -44,6 +44,9 @@ type claudeStreamRuntime struct {
 	textBlockIndex     int
 	ended              bool
 	upstreamErr        string
+	responseMessageID  int
+	finalContent       []any
+	completed          bool
 }
 
 func newClaudeStreamRuntime(
@@ -81,6 +84,9 @@ func newClaudeStreamRuntime(
 func (s *claudeStreamRuntime) onParsed(parsed sse.LineResult) streamengine.ParsedDecision {
 	if !parsed.Parsed {
 		return streamengine.ParsedDecision{}
+	}
+	if parsed.ResponseMessageID > 0 {
+		s.responseMessageID = parsed.ResponseMessageID
 	}
 	if parsed.ErrorMessage != "" {
 		s.upstreamErr = parsed.ErrorMessage

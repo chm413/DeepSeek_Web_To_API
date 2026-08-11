@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export function useAccountsData({ apiFetch }) {
     const [queueStatus, setQueueStatus] = useState(null)
+    const [metrics, setMetrics] = useState(null)
     const [keysExpanded, setKeysExpanded] = useState(false)
 
     const [accounts, setAccounts] = useState([])
@@ -10,6 +11,7 @@ export function useAccountsData({ apiFetch }) {
     const [totalPages, setTotalPages] = useState(1)
     const [totalAccounts, setTotalAccounts] = useState(0)
     const [loadingAccounts, setLoadingAccounts] = useState(false)
+    const accountsRequestSequence = useRef(0)
 
     const resolveAccountIdentifier = (acc) => {
         if (!acc || typeof acc !== 'object') return ''
@@ -18,13 +20,19 @@ export function useAccountsData({ apiFetch }) {
 
     const [searchQuery, setSearchQuery] = useState('')
 
-    const fetchAccounts = async (targetPage = page, targetPageSize = pageSize, targetQuery = searchQuery) => {
-        setLoadingAccounts(true)
+    const fetchAccounts = async (
+        targetPage = page,
+        targetPageSize = pageSize,
+        targetQuery = searchQuery,
+        { background = false } = {},
+    ) => {
+        const requestSequence = ++accountsRequestSequence.current
+        if (!background) setLoadingAccounts(true)
         try {
             let url = `/admin/accounts?page=${targetPage}&page_size=${targetPageSize}`
             if (targetQuery.trim()) url += `&q=${encodeURIComponent(targetQuery.trim())}`
             const res = await apiFetch(url)
-            if (res.ok) {
+            if (res.ok && requestSequence === accountsRequestSequence.current) {
                 const data = await res.json()
                 setAccounts(data.items || [])
                 setTotalPages(data.total_pages || 1)
@@ -34,18 +42,24 @@ export function useAccountsData({ apiFetch }) {
         } catch (e) {
             console.error('Failed to fetch accounts:', e)
         } finally {
-            setLoadingAccounts(false)
+            if (requestSequence === accountsRequestSequence.current) {
+                setLoadingAccounts(false)
+            }
         }
     }
 
+    const changePage = (newPage) => {
+        setPage(Math.max(1, newPage))
+    }
+
     const changePageSize = (newSize) => {
+        setPage(1)
         setPageSize(newSize)
-        fetchAccounts(1, newSize)
     }
 
     const handleSearchChange = (query) => {
+        setPage(1)
         setSearchQuery(query)
-        fetchAccounts(1, pageSize, query)
     }
 
     const fetchQueueStatus = async () => {
@@ -60,15 +74,32 @@ export function useAccountsData({ apiFetch }) {
         }
     }
 
+    const fetchMetrics = async () => {
+        try {
+            const res = await apiFetch('/admin/metrics/overview')
+            if (res.ok) {
+                setMetrics(await res.json())
+            }
+        } catch (e) {
+            console.error('Failed to fetch account metrics:', e)
+        }
+    }
+
     useEffect(() => {
-        fetchAccounts()
+        fetchAccounts(page, pageSize, searchQuery)
         fetchQueueStatus()
-        const interval = setInterval(fetchQueueStatus, 5000)
+        fetchMetrics()
+        const interval = setInterval(() => {
+            fetchAccounts(page, pageSize, searchQuery, { background: true })
+            fetchQueueStatus()
+            fetchMetrics()
+        }, 5000)
         return () => clearInterval(interval)
-    }, [])
+    }, [page, pageSize, searchQuery])
 
     return {
         queueStatus,
+        metrics,
         keysExpanded,
         setKeysExpanded,
         accounts,
@@ -78,6 +109,7 @@ export function useAccountsData({ apiFetch }) {
         totalAccounts,
         loadingAccounts,
         fetchAccounts,
+        changePage,
         changePageSize,
         resolveAccountIdentifier,
         searchQuery,

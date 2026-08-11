@@ -34,15 +34,17 @@ import (
 	"DeepSeek_Web_To_API/internal/responsecache"
 	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/safetystore"
+	"DeepSeek_Web_To_API/internal/upstreamsession"
 	"DeepSeek_Web_To_API/internal/webui"
 )
 
 type App struct {
-	Store    *config.Store
-	Pool     *account.Pool
-	Resolver *auth.Resolver
-	DS       *dsclient.Client
-	Router   http.Handler
+	Store                    *config.Store
+	Pool                     *account.Pool
+	Resolver                 *auth.Resolver
+	DS                       *dsclient.Client
+	Router                   http.Handler
+	stopAccountHealthMonitor context.CancelFunc
 }
 
 func NewApp() (*App, error) {
@@ -105,11 +107,12 @@ func NewApp() (*App, error) {
 	// from the bootstrap snapshot (those back finite-size objects).
 	safetyLLMSource := safetyLLMConfigSource{store: store}
 	safetyLLMChecker := safetyllm.NewLLMCheckerWithSource(safetyLLMSource, safetyllm.NewDeepSeekDoer(dsClient))
-	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
-	responsesHandler := &responses.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
+	incrementalSessions := upstreamsession.NewStore(0, 0)
+	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker, Incremental: incrementalSessions}
+	responsesHandler := &responses.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker, Incremental: incrementalSessions}
 	filesHandler := &files.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
 	embeddingsHandler := &embeddings.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
-	claudeHandler := &claude.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
+	claudeHandler := &claude.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker, Incremental: incrementalSessions}
 	geminiHandler := &gemini.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler}
 	protocolResponseCache := responsecache.New(responsecache.Options{
 		Dir:            store.ResponseCacheDir(),
@@ -166,15 +169,11 @@ func NewApp() (*App, error) {
 	r.Post("/v1/chat/completions", chatHandler.ChatCompletions)
 	r.Post("/v1/responses", responsesHandler.Responses)
 	r.Get("/v1/responses/{response_id}", responsesHandler.GetResponseByID)
-	// Codex CLI may attempt server-side context compaction via this endpoint
-	// when context_management.compact_threshold is configured. We do not
-	// own the upstream Responses store and cannot honour the request, so we
-	// answer 501 (with the OpenAI-style error envelope) instead of 404 — the
-	// CLI then falls back to client-side context truncation rather than
-	// retrying indefinitely against a non-existent route.
-	r.Post("/v1/responses/compact", responsesCompactNotImplemented)
-	r.Post("/v1/v1/responses/compact", responsesCompactNotImplemented)
-	r.Post("/responses/compact", responsesCompactNotImplemented)
+	// Local compact state is an opaque, per-caller handle held by this process
+	// for the normal Responses TTL; it is not provider-owned encrypted state.
+	r.Post("/v1/responses/compact", responsesHandler.Compact)
+	r.Post("/v1/v1/responses/compact", responsesHandler.Compact)
+	r.Post("/responses/compact", responsesHandler.Compact)
 	r.Post("/v1/files", filesHandler.UploadFile)
 	r.Post("/v1/embeddings", embeddingsHandler.Embeddings)
 	// Some SDK wrappers append their own /v1 prefix even when users configure
@@ -209,7 +208,20 @@ func NewApp() (*App, error) {
 		http.NotFound(w, req)
 	})
 
-	return &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}, nil
+	app := &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}
+	if intervalMinutes := store.RuntimeAccountHealthCheckIntervalMinutes(); intervalMinutes > 0 {
+		monitorCtx, cancel := context.WithCancel(context.Background())
+		app.stopAccountHealthMonitor = cancel
+		startAccountHealthMonitor(monitorCtx, store, pool, resolver, dsClient, time.Duration(intervalMinutes)*time.Minute)
+	}
+	return app, nil
+}
+
+func (a *App) Close() {
+	if a == nil || a.stopAccountHealthMonitor == nil {
+		return
+	}
+	a.stopAccountHealthMonitor()
 }
 
 func adminBrowserNavigationFallback(webuiHandler *webui.Handler) func(http.Handler) http.Handler {
@@ -251,16 +263,6 @@ func timeout(d time.Duration) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return middleware.Timeout(d)
-}
-
-// responsesCompactNotImplemented answers Codex CLI's optional
-// /v1/responses/compact requests with a structured 501 instead of a default
-// 404, so the CLI falls back to client-side truncation rather than treating
-// the route as missing infrastructure.
-func responsesCompactNotImplemented(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	_, _ = w.Write([]byte(`{"error":{"message":"Server-side context compaction is not supported by this proxy. Please rely on client-side context management.","type":"not_implemented","code":"compact_not_supported","param":null}}`))
 }
 
 func filteredLogger() func(http.Handler) http.Handler {

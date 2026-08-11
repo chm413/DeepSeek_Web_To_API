@@ -7,6 +7,14 @@ import (
 	"strings"
 )
 
+func promptLimitConfigured(p PromptLimitConfig) bool {
+	return p.Enabled != nil || p.MaxCharsDefault > 0 || p.MaxCharsExpert > 0 ||
+		p.AutoCompressEnabled != nil || p.CompressKeepRecent > 0 ||
+		p.CompressKeepSystem != nil || p.ProFlashCompressionEnabled != nil ||
+		p.ProFlashCompressionTargetChars > 0 || p.IncrementalMaxTurns != nil ||
+		p.IncrementalRotationKeepRecent > 0
+}
+
 func (c Config) MarshalJSON() ([]byte, error) {
 	m := map[string]any{}
 	for k, v := range c.AdditionalFields {
@@ -23,6 +31,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	}
 	if len(c.Proxies) > 0 {
 		m["proxies"] = c.Proxies
+	}
+	if strings.TrimSpace(c.ProxyCore.XrayBinaryPath) != "" || strings.TrimSpace(c.ProxyCore.RuntimeDir) != "" || c.ProxyCore.StartupTimeoutSeconds > 0 {
+		m["proxy_core"] = c.ProxyCore
 	}
 	if len(c.ModelAliases) > 0 {
 		m["model_aliases"] = c.ModelAliases
@@ -68,6 +79,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	if c.ThinkingInjection.Enabled != nil || strings.TrimSpace(c.ThinkingInjection.Prompt) != "" {
 		m["thinking_injection"] = c.ThinkingInjection
 	}
+	if promptLimitConfigured(c.PromptLimit) {
+		m["prompt_limit"] = c.PromptLimit
+	}
 	return json.Marshal(m)
 }
 
@@ -93,6 +107,10 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 			}
 		case "proxies":
 			if err := json.Unmarshal(v, &c.Proxies); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
+		case "proxy_core":
+			if err := json.Unmarshal(v, &c.ProxyCore); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
 		case "claude_mapping":
@@ -156,6 +174,10 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 			if err := json.Unmarshal(v, &c.ThinkingInjection); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
+		case "prompt_limit":
+			if err := json.Unmarshal(v, &c.PromptLimit); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
 		default:
 			var anyVal any
 			if err := json.Unmarshal(v, &anyVal); err == nil {
@@ -173,6 +195,7 @@ func (c Config) Clone() Config {
 		APIKeys:      slices.Clone(c.APIKeys),
 		Accounts:     slices.Clone(c.Accounts),
 		Proxies:      slices.Clone(c.Proxies),
+		ProxyCore:    c.ProxyCore,
 		ModelAliases: cloneStringMap(c.ModelAliases),
 		Admin:        c.Admin,
 		Server: ServerConfig{
@@ -244,6 +267,18 @@ func (c Config) Clone() Config {
 		ThinkingInjection: ThinkingInjectionConfig{
 			Enabled: cloneBoolPtr(c.ThinkingInjection.Enabled),
 			Prompt:  c.ThinkingInjection.Prompt,
+		},
+		PromptLimit: PromptLimitConfig{
+			Enabled:                        cloneBoolPtr(c.PromptLimit.Enabled),
+			MaxCharsDefault:                c.PromptLimit.MaxCharsDefault,
+			MaxCharsExpert:                 c.PromptLimit.MaxCharsExpert,
+			AutoCompressEnabled:            cloneBoolPtr(c.PromptLimit.AutoCompressEnabled),
+			CompressKeepRecent:             c.PromptLimit.CompressKeepRecent,
+			CompressKeepSystem:             cloneBoolPtr(c.PromptLimit.CompressKeepSystem),
+			ProFlashCompressionEnabled:     cloneBoolPtr(c.PromptLimit.ProFlashCompressionEnabled),
+			ProFlashCompressionTargetChars: c.PromptLimit.ProFlashCompressionTargetChars,
+			IncrementalMaxTurns:            cloneIntPtr(c.PromptLimit.IncrementalMaxTurns),
+			IncrementalRotationKeepRecent:  c.PromptLimit.IncrementalRotationKeepRecent,
 		},
 		AdditionalFields: map[string]any{},
 	}

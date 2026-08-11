@@ -353,6 +353,22 @@ func TestRuntimeTokenRefreshIntervalHoursUsesConfigValue(t *testing.T) {
 	}
 }
 
+func TestRuntimeAccountHealthCheckIntervalDefaultsDisabled(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{}`)
+	store := LoadStore()
+	if got := store.RuntimeAccountHealthCheckIntervalMinutes(); got != 0 {
+		t.Fatalf("expected health monitor disabled by default, got %d", got)
+	}
+}
+
+func TestRuntimeAccountHealthCheckIntervalUsesConfigValue(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"runtime":{"account_health_check_interval_minutes":15}}`)
+	store := LoadStore()
+	if got := store.RuntimeAccountHealthCheckIntervalMinutes(); got != 15 {
+		t.Fatalf("expected 15 minute health interval, got %d", got)
+	}
+}
+
 func TestStoreUpdateAccountTokenKeepsIdentifierResolvable(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
 		"accounts":[{"email":"user@example.com","password":"p"}]
@@ -527,6 +543,30 @@ func TestAccountTestStatusIsRuntimeOnlyAndNotPersisted(t *testing.T) {
 	}
 	if strings.Contains(string(content), "test_status") {
 		t.Fatalf("expected test_status to stay out of persisted config, got: %s", content)
+	}
+}
+
+func TestAccountTestResultIsRuntimeOnlyAndKeepsFailureDetails(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"accounts":[{"email":"u@example.com","password":"p"}]
+	}`)
+	store := LoadStore()
+	want := AccountTestResult{
+		Status:        "failed",
+		Phase:         "token_refresh",
+		FailureReason: "upstream login rejected",
+		ErrorCode:     40012,
+		AccountState:  "permanently_banned",
+	}
+	if err := store.UpdateAccountTestResult("u@example.com", want); err != nil {
+		t.Fatalf("update runtime test result: %v", err)
+	}
+	got, ok := store.AccountTestResult("u@example.com")
+	if !ok || got.Status != want.Status || got.Phase != want.Phase || got.FailureReason != want.FailureReason || got.ErrorCode != want.ErrorCode || got.UpdatedAtUnix <= 0 {
+		t.Fatalf("unexpected runtime test result: %#v (ok=%v)", got, ok)
+	}
+	if status, ok := store.AccountTestStatus("u@example.com"); !ok || status != "failed" {
+		t.Fatalf("expected status mirror from result, got %q (ok=%v)", status, ok)
 	}
 }
 

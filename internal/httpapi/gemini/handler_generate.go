@@ -2,6 +2,8 @@ package gemini
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +15,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 
 	"DeepSeek_Web_To_API/internal/auth"
+	"DeepSeek_Web_To_API/internal/config"
 	openaishared "DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/httpapi/requestbody"
 	"DeepSeek_Web_To_API/internal/sse"
@@ -53,7 +56,19 @@ func (h *Handler) proxyViaOpenAI(w http.ResponseWriter, r *http.Request, stream 
 		writeGeminiError(w, http.StatusBadRequest, "invalid json")
 		return true
 	}
-	translatedReq := translatorcliproxy.ToOpenAI(sdktranslator.FormatGemini, routeModel, raw, stream)
+	// Gemini clients commonly replay candidates with thought parts intact.
+	// Those parts are provider-private reasoning state and the retained DeepSeek
+	// branch already owns them. The generic translator otherwise concatenates
+	// thought text into an OpenAI assistant content string, which changes the
+	// canonical prefix and defeats incremental reuse on the next turn.
+	droppedThoughtParts := stripGeminiThoughtParts(req)
+	translatedSource := raw
+	if droppedThoughtParts > 0 {
+		if sanitized, marshalErr := json.Marshal(req); marshalErr == nil {
+			translatedSource = sanitized
+		}
+	}
+	translatedReq := translatorcliproxy.ToOpenAI(sdktranslator.FormatGemini, routeModel, translatedSource, stream)
 	if !strings.Contains(string(translatedReq), `"stream"`) {
 		var reqMap map[string]any
 		if json.Unmarshal(translatedReq, &reqMap) == nil {
@@ -64,6 +79,13 @@ func (h *Handler) proxyViaOpenAI(w http.ResponseWriter, r *http.Request, stream 
 		}
 	}
 	translatedReq = applyGeminiThinkingPolicyToOpenAIRequest(translatedReq, req)
+	requestSum := sha256.Sum256(raw)
+	config.Logger.Info("[incremental] adapter request context",
+		"surface", "gemini.generate_content", "model", routeModel,
+		"stream", stream, "wire_request_bytes", len(raw),
+		"wire_request_sha256", hex.EncodeToString(requestSum[:8]),
+		"translated_request_bytes", len(translatedReq),
+		"dropped_thought_parts", droppedThoughtParts)
 
 	proxyReq := r.Clone(openaishared.WithCurrentInputFileSkipped(r.Context()))
 	proxyReq.URL.Path = "/v1/chat/completions"
@@ -100,12 +122,84 @@ func (h *Handler) proxyViaOpenAI(w http.ResponseWriter, r *http.Request, stream 
 		writeGeminiError(w, http.StatusBadGateway, "invalid translated Gemini response")
 		return true
 	}
-	w.Header().Set("Content-Type", "application/json")
+	// Some HTTP clients, notably Windows PowerShell 5.1, decode a bare
+	// application/json response using a legacy code page. Gemini responses are
+	// routinely replayed as conversation history, so declare UTF-8 explicitly
+	// to preserve the exact assistant prefix required by incremental reuse.
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	// #nosec G705 -- converted is validated JSON and served as application/json with nosniff.
 	_, _ = w.Write(converted)
 	return true
+}
+
+// stripGeminiThoughtParts removes text that is explicitly marked as Gemini
+// thought/reasoning from replayed conversation turns. A mixed tool-call part
+// is retained with only its private text removed, so tool continuation data is
+// not discarded.
+func stripGeminiThoughtParts(req map[string]any) int {
+	if req == nil {
+		return 0
+	}
+	contents, ok := req["contents"].([]any)
+	if !ok {
+		return 0
+	}
+	dropped := 0
+	for _, rawContent := range contents {
+		content, ok := rawContent.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, ok := content["parts"].([]any)
+		if !ok || len(parts) == 0 {
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok || !geminiThoughtPart(part) {
+				kept = append(kept, rawPart)
+				continue
+			}
+			dropped++
+			copyPart := cloneGeminiMap(part)
+			delete(copyPart, "thought")
+			delete(copyPart, "isThought")
+			delete(copyPart, "is_thought")
+			delete(copyPart, "text")
+			if len(copyPart) > 0 {
+				kept = append(kept, copyPart)
+			}
+		}
+		content["parts"] = kept
+	}
+	return dropped
+}
+
+func geminiThoughtPart(part map[string]any) bool {
+	for _, key := range []string{"thought", "isThought", "is_thought"} {
+		switch value := part[key].(type) {
+		case bool:
+			if value {
+				return true
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(value), "true") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cloneGeminiMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func applyGeminiThinkingPolicyToOpenAIRequest(translated []byte, original map[string]any) []byte {

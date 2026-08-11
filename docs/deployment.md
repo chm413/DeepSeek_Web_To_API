@@ -39,7 +39,7 @@ v1.0.11 起提供 `scripts/deploy_107.py` 一键部署脚本，自动注入版�
 > - **v1.0.9 文件上传速率限制已根除**：`server.remote_file_upload_enabled = false`（默认），inline file 与 history transcript 都内联到对话上下文，不再调上游 `upload_file`。生产抽样显示之前 2 小时 4116 次 `upload_file failed` → 升级后 0 次。如有账号配额冗余想恢复上传，设置 `DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED=true`。
 > - **v1.0.11 5 套独立 SQLite 布局**：`data/{accounts,chat_history,token_usage,safety_words,safety_ips}.sqlite` 各自独立，可单独备份/轮转。
 > - **v1.0.11 一键部署脚本**：`scripts/deploy_107.py` 自动编译注入版本，确保 `/admin/version` 报告 `source: build-ldflags`。
-> - **v1.0.12 缓存 TTL 调长**：内存 5 min → 30 min，磁盘 4 h → 24 h。客户端兼容增强：`/api/messages` 路由别名、`/v1/responses/compact` 501 stub、Codex `compaction` input 容忍。
+> - **v1.0.12 缓存 TTL 调长**：内存 5 min → 30 min，磁盘 4 h → 24 h。客户端兼容增强：`/api/messages` 路由别名、Codex `compaction` input 容忍。当前 `/v1/responses/compact` 已返回同调用方 TTL 内有效的本地 opaque handle。
 > - **v1.0.12 429 弹性故障转移**：上游单账号 429 静默切换到下一空闲账号，`/admin/metrics/overview` 失败率更准确。
 
 **章节来源**
@@ -227,6 +227,7 @@ go build -trimpath \
 生产目录建议包含：
 
 - `deepseek-web-to-api`
+- 可选的 `xray` / `xray.exe`、`geoip.dat`、`geosite.dat`（使用 VLESS、VMess 或 Hysteria2 时）
 - `.env`
 - `static/admin`
 - `data/`
@@ -290,6 +291,7 @@ PR 阶段使用 `--no-cache` 确保每次都是全量构建，避免层缓存掩
 - 部署后服务未启动：查看 `systemctl status deepseek-web-to-api` 和 `journalctl -u deepseek-web-to-api -n 50`。使用备份文件回滚：`mv /opt/deepseek-web-to-api/deepseek-web-to-api.bak.<ts> /opt/deepseek-web-to-api/deepseek-web-to-api && systemctl restart deepseek-web-to-api`。
 - `scripts/deploy_107.py` 失败（sha256 不匹配）：SCP 可能传输截断，脚本自动清理 `.new` 文件。检查网络或目标磁盘空间后重试。
 - `scripts/deploy_107.py` 失败（`DST_PASSWORD` 未设置）：脚本启动时检查此环境变量，未设置直接退出。
+- Xray 节点测试提示核心不可用：在代理管理页检查核心状态；Windows 默认自动查找应用同目录的 `xray.exe`，也可设置 `proxy_core.xray_binary_path` 或 `XRAY_BINARY_PATH`。完整说明见 [Xray 代理协议](xray-proxy.md)。
 
 **章节来源**
 - [internal/webui/build.go](file://internal/webui/build.go)

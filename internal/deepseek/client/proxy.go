@@ -1,7 +1,6 @@
 package client
 
 import (
-	dsprotocol "DeepSeek_Web_To_API/internal/deepseek/protocol"
 	"context"
 	"fmt"
 	"net"
@@ -14,7 +13,10 @@ import (
 
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
+	dsprotocol "DeepSeek_Web_To_API/internal/deepseek/protocol"
 	trans "DeepSeek_Web_To_API/internal/deepseek/transport"
+	"DeepSeek_Web_To_API/internal/proxyuri"
+	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
 type requestClients struct {
@@ -57,7 +59,7 @@ func proxyDialAddress(ctx context.Context, proxyType, address string, lookup hos
 	return net.JoinHostPort(addrs[0], port), nil
 }
 
-func proxyCacheKey(proxyCfg config.Proxy) string {
+func proxyCacheKey(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) string {
 	proxyCfg = config.NormalizeProxy(proxyCfg)
 	return strings.Join([]string{
 		proxyCfg.ID,
@@ -66,30 +68,57 @@ func proxyCacheKey(proxyCfg config.Proxy) string {
 		strconv.Itoa(proxyCfg.Port),
 		proxyCfg.Username,
 		proxyCfg.Password,
+		proxyCfg.URI,
+		coreCfg.XrayBinaryPath,
+		coreCfg.RuntimeDir,
+		strconv.Itoa(coreCfg.StartupTimeoutSeconds),
 	}, "|")
 }
 
-func proxyDialContext(proxyCfg config.Proxy) (trans.DialContextFunc, error) {
+func proxyDialContext(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) (trans.DialContextFunc, error) {
 	proxyCfg = config.NormalizeProxy(proxyCfg)
+	if proxyuri.IsCoreType(proxyCfg.Type) {
+		if _, err := proxyuri.Parse(proxyCfg.Type, proxyCfg.URI); err != nil {
+			return nil, err
+		}
+		spec := xrayproxy.Spec{ID: proxyCfg.ID, Type: proxyCfg.Type, URI: proxyCfg.URI}
+		settings := xrayproxy.Settings{
+			BinaryPath:     coreCfg.XrayBinaryPath,
+			RuntimeDir:     coreCfg.RuntimeDir,
+			StartupTimeout: time.Duration(coreCfg.StartupTimeoutSeconds) * time.Second,
+		}
+		return func(ctx context.Context, network, address string) (net.Conn, error) {
+			localAddress, err := xrayproxy.Default().Ensure(ctx, spec, settings)
+			if err != nil {
+				return nil, err
+			}
+			return dialSOCKS(ctx, "socks5h", localAddress, nil, network, address)
+		}, nil
+	}
 	var authCfg *proxy.Auth
 	if proxyCfg.Username != "" || proxyCfg.Password != "" {
 		authCfg = &proxy.Auth{User: proxyCfg.Username, Password: proxyCfg.Password}
 	}
+	proxyAddress := net.JoinHostPort(proxyCfg.Host, strconv.Itoa(proxyCfg.Port))
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialSOCKS(ctx, proxyCfg.Type, proxyAddress, authCfg, network, address)
+	}, nil
+}
+
+func dialSOCKS(ctx context.Context, proxyType, proxyAddress string, authCfg *proxy.Auth, network, address string) (net.Conn, error) {
 	forward := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
-	dialer, err := proxy.SOCKS5("tcp", net.JoinHostPort(proxyCfg.Host, strconv.Itoa(proxyCfg.Port)), authCfg, forward)
+	dialer, err := proxy.SOCKS5("tcp", proxyAddress, authCfg, forward)
 	if err != nil {
 		return nil, err
 	}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		target, err := proxyDialAddress(ctx, proxyCfg.Type, address, defaultHostLookup)
-		if err != nil {
-			return nil, err
-		}
-		if ctxDialer, ok := dialer.(proxy.ContextDialer); ok {
-			return ctxDialer.DialContext(ctx, network, target)
-		}
-		return dialer.Dial(network, target)
-	}, nil
+	target, err := proxyDialAddress(ctx, proxyType, address, defaultHostLookup)
+	if err != nil {
+		return nil, err
+	}
+	if ctxDialer, ok := dialer.(proxy.ContextDialer); ok {
+		return ctxDialer.DialContext(ctx, network, target)
+	}
+	return dialer.Dial(network, target)
 }
 
 func (c *Client) defaultRequestClients() requestClients {
@@ -101,22 +130,22 @@ func (c *Client) defaultRequestClients() requestClients {
 	}
 }
 
-func (c *Client) resolveProxyForAccount(acc config.Account) (config.Proxy, bool) {
+func (c *Client) resolveProxyForAccount(acc config.Account) (config.Proxy, config.ProxyCoreConfig, bool) {
 	if c == nil || c.Store == nil {
-		return config.Proxy{}, false
+		return config.Proxy{}, config.ProxyCoreConfig{}, false
 	}
 	proxyID := strings.TrimSpace(acc.ProxyID)
 	if proxyID == "" {
-		return config.Proxy{}, false
+		return config.Proxy{}, config.ProxyCoreConfig{}, false
 	}
 	snap := c.Store.Snapshot()
 	for _, proxyCfg := range snap.Proxies {
 		proxyCfg = config.NormalizeProxy(proxyCfg)
 		if proxyCfg.ID == proxyID {
-			return proxyCfg, true
+			return proxyCfg, snap.ProxyCore, true
 		}
 	}
-	return config.Proxy{}, false
+	return config.Proxy{}, snap.ProxyCore, false
 }
 
 func (c *Client) requestClientsFromContext(ctx context.Context) requestClients {
@@ -134,12 +163,12 @@ func (c *Client) requestClientsForAuth(ctx context.Context, a *auth.RequestAuth)
 }
 
 func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
-	proxyCfg, ok := c.resolveProxyForAccount(acc)
+	proxyCfg, coreCfg, ok := c.resolveProxyForAccount(acc)
 	if !ok {
 		return c.defaultRequestClients()
 	}
 
-	key := proxyCacheKey(proxyCfg)
+	key := proxyCacheKey(proxyCfg, coreCfg)
 	c.proxyClientsMu.RLock()
 	cached, ok := c.proxyClients[key]
 	c.proxyClientsMu.RUnlock()
@@ -147,10 +176,12 @@ func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
 		return cached
 	}
 
-	dialContext, err := proxyDialContext(proxyCfg)
+	dialContext, err := proxyDialContext(proxyCfg, coreCfg)
 	if err != nil {
 		config.Logger.Warn("[proxy] build dialer failed", "proxy_id", proxyCfg.ID, "error", err)
-		return c.defaultRequestClients()
+		dialContext = func(context.Context, string, string) (net.Conn, error) {
+			return nil, fmt.Errorf("proxy %s is unavailable: %w", proxyCfg.ID, err)
+		}
 	}
 	totalTimeout := config.HTTPTotalTimeout()
 	if c.Store != nil {
@@ -199,6 +230,10 @@ func proxyConnectivityStatus(statusCode int) (bool, string) {
 }
 
 func TestProxyConnectivity(ctx context.Context, proxyCfg config.Proxy) map[string]any {
+	return TestProxyConnectivityWithCore(ctx, proxyCfg, config.ProxyCoreConfig{})
+}
+
+func TestProxyConnectivityWithCore(ctx context.Context, proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) map[string]any {
 	start := time.Now()
 	proxyCfg = config.NormalizeProxy(proxyCfg)
 	result := map[string]any{
@@ -212,7 +247,7 @@ func TestProxyConnectivity(ctx context.Context, proxyCfg config.Proxy) map[strin
 		result["message"] = "代理配置无效: " + err.Error()
 		return result
 	}
-	dialContext, err := proxyDialContext(proxyCfg)
+	dialContext, err := proxyDialContext(proxyCfg, coreCfg)
 	if err != nil {
 		result["message"] = "代理拨号器初始化失败: " + err.Error()
 		return result

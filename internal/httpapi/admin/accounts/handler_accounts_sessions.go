@@ -22,11 +22,13 @@ func (h *Handler) deleteAllSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authCtx := &authn.RequestAuth{UseConfigToken: false, AccountID: acc.Identifier(), Account: acc}
+	authCtx := &authn.RequestAuth{UseConfigToken: true, AccountID: acc.Identifier(), Account: acc}
 	proxyCtx := authn.WithAuth(r.Context(), authCtx)
 	token, err := h.DS.Login(proxyCtx, acc)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"success": false, "message": "登录失败: " + err.Error()})
+		result := map[string]any{"success": false, "message": "登录失败: " + err.Error()}
+		h.recordAccountHealth(identifier, err, result)
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 	_ = h.Store.UpdateAccountToken(acc.Identifier(), token)
@@ -36,7 +38,9 @@ func (h *Handler) deleteAllSessions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		newToken, loginErr := h.DS.Login(proxyCtx, acc)
 		if loginErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"success": false, "message": "删除失败: " + err.Error()})
+			result := map[string]any{"success": false, "message": "Token 重试刷新失败: " + loginErr.Error(), "delete_error": err.Error()}
+			h.recordAccountHealth(identifier, loginErr, result)
+			writeJSON(w, http.StatusOK, result)
 			return
 		}
 		token = newToken

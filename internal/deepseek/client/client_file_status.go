@@ -72,30 +72,39 @@ func (c *Client) fetchUploadedFile(ctx context.Context, a *auth.RequestAuth, fil
 	}
 	clients := c.requestClientsForAuth(ctx, a)
 	reqURL := dsprotocol.DeepSeekFetchFilesURL + "?file_ids=" + url.QueryEscape(fileID)
-	headers := c.authHeaders(a.DeepSeekToken)
-
-	resp, status, err := c.getJSONWithStatus(ctx, clients.regular, reqURL, headers)
-	if err != nil {
-		return nil, err
-	}
-
-	code, bizCode, msg, bizMsg := extractResponseStatus(resp)
-	if status != http.StatusOK || code != 0 || bizCode != 0 {
-		if strings.TrimSpace(bizMsg) != "" {
-			msg = bizMsg
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := c.authHeaders(a.DeepSeekToken)
+		resp, status, err := c.getJSONWithStatus(ctx, clients.regular, reqURL, headers)
+		if err != nil {
+			return nil, err
 		}
-		if msg == "" {
-			msg = http.StatusText(status)
-		}
-		return nil, fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
-	}
 
-	result := extractFetchedUploadFileResult(resp, fileID)
-	if result == nil || strings.TrimSpace(result.ID) == "" {
-		return nil, errors.New("fetch files succeeded without matching file data")
+		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			return nil, healthErr
+		}
+		if status != http.StatusOK || code != 0 || bizCode != 0 {
+			if attempt == 0 && c.refreshManagedToken(ctx, a, status, code, bizCode, msg, bizMsg) {
+				continue
+			}
+			if strings.TrimSpace(bizMsg) != "" {
+				msg = bizMsg
+			}
+			if msg == "" {
+				msg = http.StatusText(status)
+			}
+			return nil, fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
+		}
+
+		result := extractFetchedUploadFileResult(resp, fileID)
+		if result == nil || strings.TrimSpace(result.ID) == "" {
+			return nil, errors.New("fetch files succeeded without matching file data")
+		}
+		result.Raw = resp
+		return result, nil
 	}
-	result.Raw = resp
-	return result, nil
+	return nil, errors.New("request failed after token refresh")
 }
 
 func extractFetchedUploadFileResult(resp map[string]any, targetID string) *UploadFileResult {

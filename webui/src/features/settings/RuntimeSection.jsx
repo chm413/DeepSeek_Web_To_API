@@ -57,6 +57,21 @@ export default function RuntimeSection({ t, form, setForm }) {
                         className="w-full bg-background border border-border rounded-lg px-3 py-2"
                     />
                 </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.accountHealthCheckIntervalMinutes')}</span>
+                    <input
+                        type="number"
+                        min={0}
+                        max={1440}
+                        step={1}
+                        value={form.runtime.account_health_check_interval_minutes}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            runtime: { ...prev.runtime, account_health_check_interval_minutes: Number(e.target.value || 0) },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2"
+                    />
+                </label>
             </div>
         </div>
     )

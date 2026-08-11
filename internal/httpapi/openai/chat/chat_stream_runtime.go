@@ -45,6 +45,7 @@ type chatStreamRuntime struct {
 	rawText               strings.Builder
 	text                  strings.Builder
 	responseMessageID     int
+	finalToolCalls        []map[string]any
 
 	finalThinking     string
 	finalText         string
@@ -205,8 +206,10 @@ func (s *chatStreamRuntime) finalize(finishReason string, deferEmptyOutput bool)
 	detected := detectAssistantToolCalls(s.rawText.String(), finalText, s.rawThinking.String(), finalToolDetectionThinking, s.toolNames)
 	if len(detected.Calls) > 0 && !s.toolCallsDoneEmitted {
 		finishReason = "tool_calls"
+		formattedCalls := formatFinalStreamToolCallsWithStableIDs(detected.Calls, s.streamToolCallIDs, s.toolsRaw)
+		s.finalToolCalls = append(s.finalToolCalls, formattedCalls...)
 		delta := map[string]any{
-			"tool_calls": formatFinalStreamToolCallsWithStableIDs(detected.Calls, s.streamToolCallIDs, s.toolsRaw),
+			"tool_calls": formattedCalls,
 		}
 		if !s.firstChunkSent {
 			delta["role"] = "assistant"
@@ -229,9 +232,9 @@ func (s *chatStreamRuntime) finalize(finishReason string, deferEmptyOutput bool)
 				finishReason = "tool_calls"
 				s.toolCallsEmitted = true
 				s.toolCallsDoneEmitted = true
-				tcDelta := map[string]any{
-					"tool_calls": formatFinalStreamToolCallsWithStableIDs(evt.ToolCalls, s.streamToolCallIDs, s.toolsRaw),
-				}
+				formattedCalls := formatFinalStreamToolCallsWithStableIDs(evt.ToolCalls, s.streamToolCallIDs, s.toolsRaw)
+				s.finalToolCalls = append(s.finalToolCalls, formattedCalls...)
+				tcDelta := map[string]any{"tool_calls": formattedCalls}
 				if !s.firstChunkSent {
 					tcDelta["role"] = "assistant"
 					s.firstChunkSent = true
@@ -386,9 +389,9 @@ func (s *chatStreamRuntime) onParsed(parsed sse.LineResult) streamengine.ParsedD
 						batch.flush()
 						s.toolCallsEmitted = true
 						s.toolCallsDoneEmitted = true
-						tcDelta := map[string]any{
-							"tool_calls": formatFinalStreamToolCallsWithStableIDs(evt.ToolCalls, s.streamToolCallIDs, s.toolsRaw),
-						}
+						formattedCalls := formatFinalStreamToolCallsWithStableIDs(evt.ToolCalls, s.streamToolCallIDs, s.toolsRaw)
+						s.finalToolCalls = append(s.finalToolCalls, formattedCalls...)
+						tcDelta := map[string]any{"tool_calls": formattedCalls}
 						s.sendDelta(tcDelta)
 						s.resetStreamToolCallState()
 						toolCallJustCompleted = true
@@ -417,4 +420,19 @@ func (s *chatStreamRuntime) onParsed(parsed sse.LineResult) streamengine.ParsedD
 		return streamengine.ParsedDecision{ContentSeen: contentSeen, Stop: true, StopReason: streamengine.StopReasonHandlerRequested}
 	}
 	return streamengine.ParsedDecision{ContentSeen: contentSeen}
+}
+
+func (s *chatStreamRuntime) responseMessages() []any {
+	if s == nil || s.finalErrorMessage != "" || s.responseMessageID <= 0 {
+		return nil
+	}
+	message := map[string]any{"role": "assistant", "content": s.finalText}
+	if s.exposeReasoning && strings.TrimSpace(s.finalThinking) != "" {
+		message["reasoning_content"] = s.finalThinking
+	}
+	if len(s.finalToolCalls) > 0 {
+		message["content"] = nil
+		message["tool_calls"] = s.finalToolCalls
+	}
+	return []any{message}
 }

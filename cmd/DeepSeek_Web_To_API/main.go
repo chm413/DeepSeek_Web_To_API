@@ -14,6 +14,7 @@ import (
 	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/server"
 	"DeepSeek_Web_To_API/internal/webui"
+	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
 func main() {
@@ -28,6 +29,8 @@ func main() {
 		config.Logger.Error("server initialization failed", "error", err)
 		os.Exit(1)
 	}
+	defer app.Close()
+	defer xrayproxy.Default().StopAll()
 	defer func() {
 		if err := app.Store.Close(); err != nil {
 			config.Logger.Warn("config store close failed", "error", err)

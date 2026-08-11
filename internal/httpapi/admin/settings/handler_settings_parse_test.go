@@ -1,6 +1,24 @@
 package settings
 
-import "testing"
+import (
+	"testing"
+
+	"DeepSeek_Web_To_API/internal/config"
+)
+
+func TestPromptLimitResponseReportsOperatorCeilings(t *testing.T) {
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.MaxCharsDefaultConfigured = false
+	cfg.MaxCharsExpertConfigured = true
+	response := promptLimitResponse(cfg)
+
+	if response["max_chars_default_configured"] != false {
+		t.Fatalf("default configured flag = %#v", response["max_chars_default_configured"])
+	}
+	if response["max_chars_expert_configured"] != true {
+		t.Fatalf("expert configured flag = %#v", response["max_chars_expert_configured"])
+	}
+}
 
 func TestParseSettingsUpdateRequestSafetyConfig(t *testing.T) {
 	enabled := true
@@ -104,5 +122,44 @@ func TestParseSettingsUpdateRequestRejectsInvalidResponseCacheLimit(t *testing.T
 	_, _, _, _, _, _, _, _, _, _, _, err := parseSettingsUpdateRequest(req)
 	if err == nil {
 		t.Fatal("expected invalid cache limit error")
+	}
+}
+
+func TestParsePromptLimitUpdateSupportsProFlashCompression(t *testing.T) {
+	req := map[string]any{
+		"prompt_limit": map[string]any{
+			"enabled":                            true,
+			"max_chars_expert":                   float64(163840),
+			"pro_flash_compression_enabled":      true,
+			"pro_flash_compression_target_chars": float64(150000),
+		},
+	}
+
+	cfg, err := parsePromptLimitUpdate(req)
+	if err != nil {
+		t.Fatalf("parse prompt limit: %v", err)
+	}
+	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled {
+		t.Fatalf("expected enabled prompt limit, got %#v", cfg)
+	}
+	if cfg.MaxCharsExpert != 163840 {
+		t.Fatalf("max_chars_expert=%d", cfg.MaxCharsExpert)
+	}
+	if cfg.ProFlashCompressionEnabled == nil || !*cfg.ProFlashCompressionEnabled {
+		t.Fatalf("pro flash switch=%#v", cfg.ProFlashCompressionEnabled)
+	}
+	if cfg.ProFlashCompressionTargetChars != 150000 {
+		t.Fatalf("pro flash target=%d", cfg.ProFlashCompressionTargetChars)
+	}
+}
+
+func TestParsePromptLimitUpdateRejectsInvalidProFlashTarget(t *testing.T) {
+	_, err := parsePromptLimitUpdate(map[string]any{
+		"prompt_limit": map[string]any{
+			"pro_flash_compression_target_chars": float64(0),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid Pro Flash target error")
 	}
 }

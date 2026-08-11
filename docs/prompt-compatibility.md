@@ -41,6 +41,107 @@
 
 **章节来源**
 - [AGENTS.md](file://AGENTS.md)
+
+## Live boundary and protocol notes
+
+The live DeepSeek Web frontend was tested through the normal browser login
+flow. Its model settings reported `input_character_limit=163840` for the Pro
+(`expert`) tier and `input_character_limit=2621440` for Flash (`default`). The
+frontend gate is strict: 163840 ASCII units completed successfully, while
+163841 units were rejected locally and no completion request was sent. The
+counter is JavaScript `String.length`, therefore it is UTF-16 code units. For
+example, 81920 emoji characters occupy exactly 163840 units but 327680 UTF-8
+bytes. The Flash value was observed in live configuration; its exact server
+hard boundary was not probed, so the lower operational default remains
+380000 units.
+
+`prompt_limit` now reports the exact measured size and overflow amount in 413
+responses. The optional `pro_flash_compression_enabled` switch is off by
+default. When enabled for an oversized Pro request, the service makes one real
+Flash completion to summarize older turns, rebuilds the Pro prompt, and only
+retries Pro if the result is within the configured target. A failed or still
+oversized summary returns the original 413; no local fake completion is
+created.
+
+OpenAI Responses compaction is handled locally and conservatively.
+`previous_response_id` is reconstructed from a per-caller in-process input
+snapshot with the stored visible output appended. `POST /v1/responses/compact`
+and the current Responses `compaction_trigger` both return a single
+`type: "compaction"` item whose `encrypted_content` is a random, opaque local
+handle. The handle resolves only for the same caller, is held only for the
+normal Responses-store TTL, and becomes unavailable after expiry or a process
+restart; it is not OpenAI/provider-owned ciphertext and cannot be transferred
+to another proxy. A v2 trigger stream emits exactly one completed compaction
+output item before `response.completed`.
+
+On a later request, a recognized local handle expands back to its canonical
+locally compacted message window before prompt normalization. Unknown provider
+state, `context_compaction`, `compaction_trigger`, and reasoning state are
+never stringified into the DeepSeek prompt. Visible client-provided
+`compaction` summaries remain prompt text. Anthropic `context_management.edits`
+supports the real `clear_thinking*` operation and its `keep` policy (`all`,
+`none`, or a numeric count); unknown edits are ignored without inventing state.
+Thinking and non-thinking requests continue to use separate upstream flags
+throughout these paths.
+
+For ordinary Responses requests, a numeric
+`context_management.compact_threshold` strictly between 0 and 1 lowers that
+request's local history-compression budget to the corresponding fraction of
+the dynamically resolved model limit when local automatic compression is
+enabled. Triggered compaction stores that locally reduced window behind the
+opaque handle; it does not mint provider-owned encrypted state.
+
+## Incremental upstream session continuation
+
+The gateway also has a separate process-local incremental lane for Chat
+Completions, Responses, Claude Messages, and Gemini (Gemini is translated into
+the Chat handler). It is enabled only when `auto_delete.mode` is `none`, since
+the retained DeepSeek session is the state being reused. A successful full
+turn records the canonical request messages, the exact visible assistant/tool
+response messages, the DeepSeek `chat_session_id`, and the response message ID.
+
+On a later request, the cache accepts only an exact extension of that recorded
+prefix. The request must contain the same prior user/assistant/tool messages in
+the same order and then at least one new message. Edited history, a changed
+model/thinking/search/tool contract, a different caller/account/session key,
+or a concurrent use of the same branch is a cache miss. The cache keeps at
+most eight branch lanes per scope and expires them after six hours of process
+uptime; it is intentionally not persisted across restart.
+
+Every incremental completion sends both parts, in this order:
+
+1. A fresh forced-output-format system prompt. It requires the model to
+   continue from the supplied parent, emit only the newest assistant response,
+   and obey the current tool/output contract. Tool schemas and tool-call
+   instructions are repeated on every incremental turn.
+2. Only the new role blocks after the cached prefix. Prior transcript text is
+   never copied into the incremental prompt.
+
+The request uses the cached DeepSeek session and parent message ID through a
+pinned completion call. Account failover and empty-output account switching
+are disabled for that call, because changing account would invalidate the
+parent. If the pinned call fails, the lease is discarded and the same request
+falls back to the existing full-history path with a new session; the client
+does not receive a partial or protocol-invalid response.
+
+This is the practical 1M-context strategy: each new turn can be small while
+DeepSeek retains the accumulated history in its own session. It does **not**
+raise the upstream model's single-request input ceiling, survive process
+restart, or make an edited/branched transcript reusable. Dynamic upstream
+input limits and the existing compact/CIF compression gates still apply to a
+full replay and to the incremental delta itself.
+
+The operational `max_chars_*` names are retained for configuration
+compatibility, but their values are UTF-16 code-unit budgets, matching the
+live web client rather than UTF-8 byte counts.
+
+At runtime the authenticated DeepSeek client now reads
+`GET /api/v0/client/settings?scope=model` through the account's configured
+proxy transport and caches the parsed default/expert limits per credential for
+10 minutes. The effective request budget is always
+`min(operator max_chars_*, upstream input_character_limit)`. A settings lookup
+failure logs a warning and falls back to the atomic operator snapshot, so a
+temporary settings outage does not block completions.
 - [internal/promptcompat/standard_request.go](file://internal/promptcompat/standard_request.go)
 
 ## 项目结构
@@ -294,6 +395,74 @@ func currentInputPrefixKeyForMode(a *auth.RequestAuth, stdReq, modelType, mode) 
 - [internal/httpapi/openai/history/current_input_prefix.go](file://internal/httpapi/openai/history/current_input_prefix.go)
 - [internal/promptcompat/history_transcript.go](file://internal/promptcompat/history_transcript.go)
 
+### Prompt 体积上限与历史自压缩（prompt_limit）
+
+拼接完成的 prompt（system + playbook + 历史 transcript + 工具 schema + 最新用户输入）在发往
+`/api/v0/chat/completion` 之前会先过一道字符上限。默认值**来自生产 chat_history 数据校准**
+（去重后的逻辑请求，非重试行）：expert 档（`model_type: "expert"`，即 `deepseek-v4-pro` /
+`deepseek-v4-pro-search`）在 ~150k 字符处出现可靠性拐点——150k 以下 15/15 全通过，150k 以上
+仅 3/8（~37%）成功；default 档（flash）在观测范围内（最大成功 380k）无退化。**注意失败机制
+是 `upstream_empty_output`（上游重试耗尽的空输出），不是尺寸硬拒绝**——压缩把请求控制在拐点
+以下可显著提升成功率，但不是唯一因素。上限按档位区分：
+
+| 配置项 | 默认值 | 作用 |
+|--------|--------|------|
+| `prompt_limit.enabled` | `true` | 总开关；`false` 时完全不检查、不压缩 |
+| `prompt_limit.max_chars_default` | `380000` | default 档（flash）上限，取观测最大成功值 |
+| `prompt_limit.max_chars_expert` | `150000` | expert 档（pro）上限，取可靠性拐点 |
+| `prompt_limit.auto_compress_enabled` | `false` | 是否允许超限时自动丢弃早期轮次；默认关闭，避免静默丢失上下文 |
+| `prompt_limit.compress_keep_recent` | `6` | 保留的最近轮数（1 轮 ≈ user + assistant 两条） |
+| `prompt_limit.compress_keep_system` | `true` | 始终保留首条 system message |
+| `prompt_limit.pro_flash_compression_enabled` | `false` | Pro 超限时是否真实调用 Flash 总结早期历史 |
+| `prompt_limit.pro_flash_compression_target_chars` | `150000` | Flash 总结后要求 Pro prompt 不超过的 UTF-16 单元数 |
+
+档位判定统一走 `config.GetModelType`，模型表是唯一事实来源；`prompt_limit` 可通过
+`config.json` / `DEEPSEEK_WEB_TO_API_CONFIG_JSON` 或 WebUI 的 `PUT /admin/settings` 配置。
+管理界面只写入明确列出的字段，未提交的字段保持原值。
+
+#### 执行顺序：压缩必须早于 CIF
+
+```
+NormalizeOpenAIChatRequest → ApplyThinkingInjection
+  → CompressPromptBeforeCIF   ← 仅开关开启或显式 compact 时丢弃早期轮次
+  → applyCurrentInputFile     ← CIF 把整段 transcript 折叠成 1 条 user message
+  → RunSafetyCheckAndBlock
+  → EnforcePromptLimit        ← 终局兜底，超限则 413
+```
+
+顺序不可交换。CIF 的两条路径（`applyCurrentInputStablePrefix` / `applyCurrentInputInlinePrefix`）
+都会把 `stdReq.Messages` 重写为**单条**合成 user message：
+
+```go
+messages := []any{map[string]any{"role": "user", "content": body}}
+stdReq.Messages = messages
+```
+
+一旦 CIF 执行完毕，`Messages` 只剩 1 个元素，按轮次裁剪的结构信息已经不存在，压缩器只能空转。
+由于 `current_input_file.enabled` 默认为 `true`，压缩放在 CIF 之后等于在长上下文场景**完全失效**。
+放在 CIF 之前，CIF 便基于已裁剪的历史重建 transcript，缩减量才真正到达上游。
+
+`EnforcePromptLimit` 是 CIF 之后的独立兜底：CIF 会把完整 transcript 连同它自己的指令块内联进
+prompt，最终字节数只有此刻才能确定，可能在压缩后仍然超限。此时已无可裁剪结构，直接返回
+`413 prompt_too_large`，而不是把注定失败的请求送去上游。
+
+#### 压缩策略
+
+`CompressToFit` 从 `compress_keep_recent` 出发逐次折半（6 → 3 → 1），每轮用
+`CompressMessages` 重建消息列表并重算 prompt，一旦落到上限内立即返回：
+
+- 保留首条 system message（受 `compress_keep_system` 控制）；
+- 保留最近 `keep * 2` 条非 system 消息；
+- **丢弃窗口开头的孤儿 tool result**：在任意位置切断历史，可能留下一条 `tool` / `function`
+  消息而产生它的 assistant `tool_calls` 已被丢弃。这种残缺配对属于非法交换序列，部分客户端与
+  解析器会直接拒绝，因此 `dropLeadingOrphanToolResults` 会剥掉开头这一串；
+- 兜底保证：若整个窗口都是孤儿 tool result，至少保留最后一条消息，绝不产出空对话。
+
+**章节来源**
+- [internal/promptcompat/prompt_compress.go](file://internal/promptcompat/prompt_compress.go)
+- [internal/httpapi/openai/shared/prompt_compress.go](file://internal/httpapi/openai/shared/prompt_compress.go)
+- [internal/config/models.go](file://internal/config/models.go)
+
 ## 故障排查指南
 
 - 模型忘记工具调用结果：检查 tool/result 消息是否进入标准消息序列。
@@ -305,6 +474,10 @@ func currentInputPrefixKeyForMode(a *auth.RequestAuth, stdReq, modelType, mode) 
 - CIF 前缀每轮刷新而非复用：检查 `BuildOpenAICurrentInputContextTranscript` 是否覆盖了 OpenClaw volatile metadata 剥离；若客户端注入 `message_id` / `timestamp` 但使用的是旧版本 ds2api（v1.0.7 前），前缀字节每轮变化，升级后修复。
 - `ReasoningEffortPrompt` 被重复注入多次：检查 `AppendThinkingInjectionPromptToLatestUser` 的幂等检测是否生效（依赖 `ThinkingInjectionMarker` 字符串检测）；若 user message 内容不是 string 类型而是 content block 数组，确认 `NormalizeOpenAIContentForPrompt` 能正确合并文本。
 - `ToolChainPlaybookPrompt` 每请求都被插入：检查 `PrependPlaybookToSystem` 的幂等检测；函数通过 `strings.Contains(existing, playbook)` 检测已有 playbook，若 playbook 内容版本不一致（旧版 playbook 和新版 playbook 字符串不同）会造成重复插入，升级时需确认历史 system message 不含旧版 playbook 残留。
+- 专家模式（`deepseek-v4-pro*`）长文本报错而 flash 档正常：这是 `prompt_limit.max_chars_expert`（默认 150000）比 `max_chars_default`（默认 380000）更紧导致的预期行为，两个默认值均来自生产数据校准。确认档位判定正确（`config.GetModelType` 应对 pro 返回 `"expert"`）；确需更大上限时调高 `prompt_limit.max_chars_expert`，但生产数据显示 expert 档在 150k 以上成功率从 100% 跌至 ~37%，且失败为上游空输出（重试耗尽）而非本地 413——调高上限会把失败点从本地压缩推迟到上游空输出重试，不会真正提升成功率。
+- 上下文超限时默认不会自动压缩：这是 `prompt_limit.auto_compress_enabled=false` 的预期行为，服务会返回带实际 UTF-16 units 和溢出量的 413；需要自动裁剪时显式开启该开关。Responses 的 `context_management.compact_threshold` 和 `/v1/responses/compact` 属于用户明确请求，仍会执行一次本地 compact；② 若已开启自动压缩，确认压缩调用位于 `applyCurrentInputFile` **之前**——放在 CIF 之后时 `Messages` 已被折叠为单条，`CompressMessages` 因 `len(nonSystem) <= window` 恒成立而空转；③ 对话轮数本身不足 `compress_keep_recent * 2` 条时无可丢弃，此时超限来自单条巨型消息，压缩无解，只能由调用方缩短输入。
+- 压缩后返回 `413 prompt_too_large`：`CompressToFit` 已折半到最小窗口仍超限，通常是单条消息（或 CIF 内联后的 transcript + 指令块）自身超过档位上限。检查 `dropped_messages` 与 `prompt_units` 日志字段确认压缩确实生效，再决定是调高上限还是缩短单条输入。
+- 压缩后模型报工具调用配对错误：确认 `dropLeadingOrphanToolResults` 生效。按轮次裁剪可能切在 assistant `tool_calls` 与其 `tool` 结果之间，留下孤儿结果；该函数会剥掉窗口开头的孤儿串。若客户端使用非标准 role 名承载工具结果（非 `tool` / `function`），孤儿检测不会识别，需要扩展 `isToolResultRole`。
 
 **章节来源**
 - [internal/promptcompat/tool_message_repair.go](file://internal/promptcompat/tool_message_repair.go)
@@ -313,7 +486,9 @@ func currentInputPrefixKeyForMode(a *auth.RequestAuth, stdReq, modelType, mode) 
 
 ## 结论
 
-PromptCompat 的设计目标是让多协议客户端共享同一套 DeepSeek Web 上下文构造规则。v1.0.7 在两个维度完成了关键升级：（1）Thinking-Injection 拆分，将稳定 playbook 移入 system message，消除 fast-path 下 playbook 被跳过的问题；（2）canonical history + CIF inline prefix 模式联合确保对话历史前缀在各轮次之间字节稳定，使 CIF 前缀复用率从依赖 file_id 上传的偶发命中提升为在 RemoteFileUpload 默认关闭时也能持续命中。后续凡是修改消息归一化、工具提示、工具历史、文件引用或 completion payload，都必须同步更新本文档。
+PromptCompat 的设计目标是让多协议客户端共享同一套 DeepSeek Web 上下文构造规则。v1.0.7 在两个维度完成了关键升级：（1）Thinking-Injection 拆分，将稳定 playbook 移入 system message，消除 fast-path 下 playbook 被跳过的问题；（2）canonical history + CIF inline prefix 模式联合确保对话历史前缀在各轮次之间字节稳定，使 CIF 前缀复用率从依赖 file_id 上传的偶发命中提升为在 RemoteFileUpload 默认关闭时也能持续命中。Prompt 尺寸限制与自压缩在此之上补齐了"上游拒绝超长输入"这一失败模式：expert 层（deepseek-v4-pro / -pro-search）的字符上限低于 default 层，长对话在 Pro 模型上会先于 flash 模型触顶。压缩阶段的**位置**是该特性的正确性核心——必须在 CIF 之前执行，否则 CIF 已把整份 transcript 折叠为单条消息，压缩器看到 1 元素切片直接 no-op，特性形同虚设。
+
+后续凡是修改消息归一化、工具提示、工具历史、文件引用、prompt 尺寸限制或 completion payload，都必须同步更新本文档。
 
 **章节来源**
 - [AGENTS.md](file://AGENTS.md)

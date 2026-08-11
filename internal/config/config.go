@@ -3,9 +3,12 @@ package config
 import (
 	// #nosec G505 -- SHA-1 is only used for legacy-compatible, non-secret proxy IDs.
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"DeepSeek_Web_To_API/internal/proxyuri"
 )
 
 type Config struct {
@@ -13,6 +16,7 @@ type Config struct {
 	APIKeys           []APIKey                `json:"api_keys,omitempty"`
 	Accounts          []Account               `json:"accounts,omitempty"`
 	Proxies           []Proxy                 `json:"proxies,omitempty"`
+	ProxyCore         ProxyCoreConfig         `json:"proxy_core,omitempty"`
 	ModelAliases      map[string]string       `json:"model_aliases,omitempty"`
 	Admin             AdminConfig             `json:"admin,omitempty"`
 	Server            ServerConfig            `json:"server,omitempty"`
@@ -27,18 +31,28 @@ type Config struct {
 	HistorySplit      HistorySplitConfig      `json:"history_split"`
 	CurrentInputFile  CurrentInputFileConfig  `json:"current_input_file,omitempty"`
 	ThinkingInjection ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
+	PromptLimit       PromptLimitConfig       `json:"prompt_limit,omitempty"`
 	AdditionalFields  map[string]any          `json:"-"`
 }
 
 type Account struct {
-	Name     string `json:"name,omitempty"`
-	Remark   string `json:"remark,omitempty"`
-	Email    string `json:"email,omitempty"`
-	Mobile   string `json:"mobile,omitempty"`
-	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
-	ProxyID  string `json:"proxy_id,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Remark         string `json:"remark,omitempty"`
+	Email          string `json:"email,omitempty"`
+	Mobile         string `json:"mobile,omitempty"`
+	Password       string `json:"password,omitempty"`
+	Token          string `json:"token,omitempty"`
+	ProxyID        string `json:"proxy_id,omitempty"`
+	Disabled       bool   `json:"disabled,omitempty"`
+	DisabledReason string `json:"disabled_reason,omitempty"`
+	DisabledAtUnix int64  `json:"disabled_at_unix,omitempty"`
 }
+
+const (
+	AccountDisabledManual             = "manual"
+	AccountDisabledInvalidCredentials = "invalid_credentials"
+	AccountDisabledUpstreamBanned     = "upstream_banned"
+)
 
 type APIKey struct {
 	Key    string `json:"key"`
@@ -54,15 +68,38 @@ type Proxy struct {
 	Port     int    `json:"port,omitempty"`
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+	URI      string `json:"uri,omitempty"`
+}
+
+type ProxyCoreConfig struct {
+	XrayBinaryPath        string `json:"xray_binary_path,omitempty"`
+	RuntimeDir            string `json:"runtime_dir,omitempty"`
+	StartupTimeoutSeconds int    `json:"startup_timeout_seconds,omitempty"`
 }
 
 func NormalizeProxy(p Proxy) Proxy {
 	p.ID = strings.TrimSpace(p.ID)
 	p.Name = strings.TrimSpace(p.Name)
-	p.Type = strings.ToLower(strings.TrimSpace(p.Type))
+	p.Type = proxyuri.NormalizeType(p.Type)
 	p.Host = strings.TrimSpace(p.Host)
 	p.Username = strings.TrimSpace(p.Username)
 	p.Password = strings.TrimSpace(p.Password)
+	p.URI = strings.TrimSpace(p.URI)
+	if proxyuri.IsCoreType(p.Type) {
+		p.Host = ""
+		p.Port = 0
+		p.Username = ""
+		p.Password = ""
+		if node, err := proxyuri.Parse(p.Type, p.URI); err == nil {
+			p.Host = node.Address
+			p.Port = node.Port
+			if p.Name == "" {
+				p.Name = node.DisplayName
+			}
+		}
+	} else {
+		p.URI = ""
+	}
 	if p.ID == "" {
 		p.ID = StableProxyID(p)
 	}
@@ -73,6 +110,11 @@ func NormalizeProxy(p Proxy) Proxy {
 }
 
 func StableProxyID(p Proxy) string {
+	p.Type = proxyuri.NormalizeType(p.Type)
+	if proxyuri.IsCoreType(p.Type) {
+		sum := sha256.Sum256([]byte(p.Type + "|" + strings.TrimSpace(p.URI)))
+		return "proxy_" + hex.EncodeToString(sum[:6])
+	}
 	// #nosec G401 -- preserve existing proxy ID compatibility; this is not a security boundary.
 	sum := sha1.Sum([]byte(strings.ToLower(strings.TrimSpace(p.Type)) + "|" + strings.ToLower(strings.TrimSpace(p.Host)) + "|" + fmt.Sprintf("%d", p.Port) + "|" + strings.TrimSpace(p.Username)))
 	return "proxy_" + hex.EncodeToString(sum[:6])
@@ -105,6 +147,11 @@ func (c *Config) NormalizeCredentials() {
 		c.Accounts[i].Name = strings.TrimSpace(c.Accounts[i].Name)
 		c.Accounts[i].Remark = strings.TrimSpace(c.Accounts[i].Remark)
 	}
+	for i := range c.Proxies {
+		c.Proxies[i] = NormalizeProxy(c.Proxies[i])
+	}
+	c.ProxyCore.XrayBinaryPath = strings.TrimSpace(c.ProxyCore.XrayBinaryPath)
+	c.ProxyCore.RuntimeDir = strings.TrimSpace(c.ProxyCore.RuntimeDir)
 
 	c.normalizeModelAliases()
 }
@@ -246,10 +293,11 @@ type SafetyAutoBanConfig struct {
 }
 
 type RuntimeConfig struct {
-	AccountMaxInflight        int `json:"account_max_inflight,omitempty"`
-	AccountMaxQueue           int `json:"account_max_queue,omitempty"`
-	GlobalMaxInflight         int `json:"global_max_inflight,omitempty"`
-	TokenRefreshIntervalHours int `json:"token_refresh_interval_hours,omitempty"`
+	AccountMaxInflight                int `json:"account_max_inflight,omitempty"`
+	AccountMaxQueue                   int `json:"account_max_queue,omitempty"`
+	GlobalMaxInflight                 int `json:"global_max_inflight,omitempty"`
+	TokenRefreshIntervalHours         int `json:"token_refresh_interval_hours,omitempty"`
+	AccountHealthCheckIntervalMinutes int `json:"account_health_check_interval_minutes,omitempty"`
 }
 
 type ResponsesConfig struct {
@@ -278,4 +326,73 @@ type CurrentInputFileConfig struct {
 type ThinkingInjectionConfig struct {
 	Enabled *bool  `json:"enabled,omitempty"`
 	Prompt  string `json:"prompt,omitempty"`
+}
+
+// PromptLimitSettings is a fully-resolved, defaults-applied snapshot of the
+// prompt_limit block. It is a plain value type with no pointers so that one
+// atomic read (config.Store.PromptLimitSnapshot) can be passed by value
+// through a request without any further locking, and so the compress and
+// enforce phases of a request provably observe identical settings.
+type PromptLimitSettings struct {
+	Enabled                   bool
+	MaxCharsDefault           int
+	MaxCharsExpert            int
+	MaxCharsDefaultConfigured bool
+	MaxCharsExpertConfigured  bool
+	AutoCompressEnable        bool
+	KeepRecentTurns           int
+	KeepSystemMessage         bool
+	ProFlashCompressionEnable bool
+	ProFlashCompressionTarget int
+	// IncrementalMaxTurns is an explicit local rollover policy for the
+	// process-local pinned-session cache. Zero means unlimited; it is not an
+	// assertion about an undocumented provider-side turn limit.
+	IncrementalMaxTurns           int
+	IncrementalRotationKeepRecent int
+}
+
+// ModelInputLimits contains provider-advertised hard input ceilings by
+// upstream tier. Zero means that tier was not present in the settings payload.
+type ModelInputLimits struct {
+	Default int
+	Expert  int
+}
+
+// DefaultPromptLimitSettings returns the settings used when the operator has
+// not configured prompt_limit at all. Also the fallback when no config Store is
+// available (tests, nil store), so behaviour is identical either way.
+func DefaultPromptLimitSettings() PromptLimitSettings {
+	return PromptLimitSettings{
+		Enabled:         true,
+		MaxCharsDefault: defaultPromptMaxCharsDefault,
+		MaxCharsExpert:  defaultPromptMaxCharsExpert,
+		// Automatic history dropping is opt-in. A silent rewrite of an
+		// over-limit request can lose context; callers may still request
+		// explicit Responses compaction or enable this setting deliberately.
+		AutoCompressEnable:            false,
+		KeepRecentTurns:               defaultPromptKeepRecentTurns,
+		KeepSystemMessage:             true,
+		ProFlashCompressionEnable:     false,
+		ProFlashCompressionTarget:     defaultPromptMaxCharsExpert,
+		IncrementalMaxTurns:           0,
+		IncrementalRotationKeepRecent: defaultPromptKeepRecentTurns,
+	}
+}
+
+// PromptLimitConfig governs prompt size limits before sending to upstream.
+// Expert mode (deepseek-v4-pro) has stricter context limits than default mode
+// (deepseek-v4-flash). When AutoCompress is enabled, oversized prompts are
+// automatically compressed by dropping older conversation turns while
+// preserving the system message and most recent turns.
+type PromptLimitConfig struct {
+	Enabled                        *bool `json:"enabled,omitempty"`
+	MaxCharsDefault                int   `json:"max_chars_default,omitempty"`                  // limit for flash/default models (default 380000, empirical)
+	MaxCharsExpert                 int   `json:"max_chars_expert,omitempty"`                   // limit for pro/expert models (default 150000, empirical reliability knee)
+	AutoCompressEnabled            *bool `json:"auto_compress_enabled,omitempty"`              // auto-compress when over limit
+	CompressKeepRecent             int   `json:"compress_keep_recent,omitempty"`               // recent turns to preserve (default 6)
+	CompressKeepSystem             *bool `json:"compress_keep_system,omitempty"`               // always keep system message (default true)
+	ProFlashCompressionEnabled     *bool `json:"pro_flash_compression_enabled,omitempty"`      // use a real Flash request to summarize oversized Pro history
+	ProFlashCompressionTargetChars int   `json:"pro_flash_compression_target_chars,omitempty"` // target UTF-16 units for the summarized Pro prompt
+	IncrementalMaxTurns            *int  `json:"incremental_max_turns,omitempty"`              // explicit local session rollover threshold; 0 disables
+	IncrementalRotationKeepRecent  int   `json:"incremental_rotation_keep_recent,omitempty"`   // recent turns retained after rollover
 }

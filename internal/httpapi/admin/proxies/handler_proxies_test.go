@@ -62,6 +62,74 @@ func TestAddProxyPersistsNormalizedProxy(t *testing.T) {
 	}
 }
 
+func TestAddCoreProxyStoresURIWithoutExposingIt(t *testing.T) {
+	router := newHTTPAdminHarness(t, `{"accounts":[]}`, &testingDSMock{})
+	uri := "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com"
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/proxies", []byte(`{
+		"name":"VLESS node",
+		"type":"vless",
+		"uri":"`+uri+`"
+	}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add core proxy status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(uri)) || bytes.Contains(rec.Body.Bytes(), []byte(`"uri"`)) {
+		t.Fatalf("response exposed proxy URI: %s", rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	proxy, _ := payload["proxy"].(map[string]any)
+	if hasURI, _ := proxy["has_uri"].(bool); !hasURI {
+		t.Fatalf("expected has_uri=true, got %#v", proxy)
+	}
+	if managed, _ := proxy["core_managed"].(bool); !managed {
+		t.Fatalf("expected core_managed=true, got %#v", proxy)
+	}
+	if proxy["host"] != "example.com" || proxy["port"] != float64(443) {
+		t.Fatalf("expected derived endpoint, got %#v", proxy)
+	}
+
+	readRec := httptest.NewRecorder()
+	router.ServeHTTP(readRec, adminReq(http.MethodGet, "/config", nil))
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("config read status=%d body=%s", readRec.Code, readRec.Body.String())
+	}
+	if bytes.Contains(readRec.Body.Bytes(), []byte(uri)) || bytes.Contains(readRec.Body.Bytes(), []byte(`"uri"`)) {
+		t.Fatalf("safe config response exposed proxy URI: %s", readRec.Body.String())
+	}
+}
+
+func TestUpdateCoreProxyBlankURIPreservesStoredSecret(t *testing.T) {
+	uri := "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com"
+	h := newAdminProxyTestHandler(t, `{
+		"proxies":[{"id":"proxy-1","name":"Node 1","type":"vless","uri":"`+uri+`"}]
+	}`)
+	r := chi.NewRouter()
+	r.Put("/admin/proxies/{proxyID}", h.updateProxy)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/proxies/proxy-1", bytes.NewBufferString(`{
+		"name":"Renamed node",
+		"type":"vless",
+		"uri":""
+	}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update core proxy status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	proxies := h.Store.Snapshot().Proxies
+	if len(proxies) != 1 || proxies[0].URI != uri {
+		t.Fatalf("expected stored URI to be preserved, got %#v", proxies)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(uri)) || bytes.Contains(rec.Body.Bytes(), []byte(`"uri"`)) {
+		t.Fatalf("update response exposed proxy URI: %s", rec.Body.String())
+	}
+}
+
 func TestAddProxyDoesNotFailOnUnrelatedInvalidRuntimeConfig(t *testing.T) {
 	router := newHTTPAdminHarness(t, `{
 		"keys":["k1"],
@@ -194,7 +262,7 @@ func TestTestProxyUsesStoredProxy(t *testing.T) {
 	defer func() { proxyConnectivityTester = original }()
 
 	var got config.Proxy
-	proxyConnectivityTester = func(_ context.Context, proxy config.Proxy) map[string]any {
+	proxyConnectivityTester = func(_ context.Context, proxy config.Proxy, _ config.ProxyCoreConfig) map[string]any {
 		got = proxy
 		return map[string]any{
 			"success":       true,

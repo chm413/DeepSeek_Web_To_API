@@ -26,6 +26,12 @@ func normalizeClaudeRequest(store ConfigReader, req map[string]any) (claudeNorma
 	}
 	normalizedMessages := normalizeClaudeMessages(messagesRaw)
 	payload := cloneMap(req)
+	applyClaudeContextManagement(payload)
+	// Context edits operate on the original Anthropic content blocks. Re-read
+	// the edited message array before converting it to the DeepSeek shape.
+	if edited, ok := payload["messages"].([]any); ok {
+		normalizedMessages = normalizeClaudeMessages(edited)
+	}
 	if systemText := claudeSystemText(req["system"]); systemText != "" {
 		payload["system"] = systemText
 	} else {
@@ -61,22 +67,27 @@ func normalizeClaudeRequest(store ConfigReader, req map[string]any) (claudeNorma
 	if len(toolNames) == 0 && len(toolsRequested) > 0 {
 		toolNames = []string{"__any_tool__"}
 	}
+	incrementalFormatPrompt := promptcompat.BuildOpenAIIncrementalFormatPrompt(nil, promptcompat.DefaultToolChoicePolicy())
+	if toolPrompt := strings.TrimSpace(buildClaudeToolPrompt(toolsRequested)); toolPrompt != "" {
+		incrementalFormatPrompt += "\n\n" + toolPrompt
+	}
 
 	return claudeNormalizedRequest{
 		Standard: promptcompat.StandardRequest{
-			Surface:         "anthropic_messages",
-			RequestedModel:  strings.TrimSpace(model),
-			ResolvedModel:   dsModel,
-			ResponseModel:   strings.TrimSpace(model),
-			Messages:        dsMessages,
-			LatestUserText:  promptcompat.ExtractLatestUserText(dsMessages),
-			PromptTokenText: finalPrompt,
-			ToolsRaw:        toolsRequested,
-			FinalPrompt:     finalPrompt,
-			ToolNames:       toolNames,
-			Stream:          util.ToBool(req["stream"]),
-			Thinking:        thinkingEnabled,
-			Search:          searchEnabled,
+			Surface:                 "anthropic_messages",
+			RequestedModel:          strings.TrimSpace(model),
+			ResolvedModel:           dsModel,
+			ResponseModel:           strings.TrimSpace(model),
+			Messages:                dsMessages,
+			LatestUserText:          promptcompat.ExtractLatestUserText(dsMessages),
+			PromptTokenText:         finalPrompt,
+			ToolsRaw:                toolsRequested,
+			FinalPrompt:             finalPrompt,
+			IncrementalFormatPrompt: incrementalFormatPrompt,
+			ToolNames:               toolNames,
+			Stream:                  util.ToBool(req["stream"]),
+			Thinking:                thinkingEnabled,
+			Search:                  searchEnabled,
 		},
 		NormalizedMessages: normalizedMessages,
 	}, nil

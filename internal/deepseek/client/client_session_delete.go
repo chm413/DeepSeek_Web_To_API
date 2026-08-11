@@ -52,6 +52,10 @@ func (c *Client) DeleteSession(ctx context.Context, a *auth.RequestAuth, session
 		}
 
 		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			return result, healthErr
+		}
 		if status == http.StatusOK && code == 0 && bizCode == 0 {
 			result.Success = true
 			return result, nil
@@ -61,8 +65,8 @@ func (c *Client) DeleteSession(ctx context.Context, a *auth.RequestAuth, session
 		config.Logger.Warn("[delete_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "session_id", sessionID)
 
 		if a.UseConfigToken {
-			if isTokenInvalid(status, code, bizCode, msg, bizMsg) && !refreshed {
-				if c.Auth.RefreshToken(ctx, a) {
+			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
+				if c.refreshManagedToken(ctx, a, status, code, bizCode, msg, bizMsg) {
 					refreshed = true
 					continue
 				}
@@ -93,68 +97,110 @@ func (c *Client) DeleteSessionForToken(ctx context.Context, token string, sessio
 		return result, errors.New(result.ErrorMessage)
 	}
 
-	headers := c.authHeaders(token)
 	payload := map[string]any{
 		"chat_session_id": sessionID,
 	}
+	requestToken := token
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := c.authHeaders(requestToken)
+		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteSessionURL, headers, payload)
+		if err != nil {
+			result.ErrorMessage = err.Error()
+			return result, err
+		}
 
-	resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteSessionURL, headers, payload)
-	if err != nil {
-		result.ErrorMessage = err.Error()
-		return result, err
+		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimitedFromContext(ctx, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealthFromContext(ctx, code, bizCode, msg, bizMsg); healthErr != nil {
+			return result, healthErr
+		}
+		if status != http.StatusOK || code != 0 || bizCode != 0 {
+			if attempt == 0 {
+				if refreshedToken, ok := c.refreshManagedTokenFromContext(ctx, status, code, bizCode, msg, bizMsg); ok {
+					requestToken = refreshedToken
+					continue
+				}
+			}
+			if bizMsg != "" {
+				msg = bizMsg
+			}
+			result.ErrorMessage = fmt.Sprintf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
+			return result, errors.New(result.ErrorMessage)
+		}
+
+		result.Success = true
+		return result, nil
 	}
-
-	code := intFrom(resp["code"])
-	if status != http.StatusOK || code != 0 {
-		msg, _ := resp["msg"].(string)
-		result.ErrorMessage = fmt.Sprintf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
-		return result, errors.New(result.ErrorMessage)
-	}
-
-	result.Success = true
-	return result, nil
+	result.ErrorMessage = "request failed after token refresh"
+	return result, errors.New(result.ErrorMessage)
 }
 
 // DeleteAllSessions 删除所有会话（谨慎使用）
 func (c *Client) DeleteAllSessions(ctx context.Context, a *auth.RequestAuth) error {
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken)
 	payload := map[string]any{}
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := c.authHeaders(a.DeepSeekToken)
+		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteAllSessionsURL, headers, payload)
+		if err != nil {
+			config.Logger.Warn("[delete_all_sessions] request error", "error", err)
+			return err
+		}
 
-	resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteAllSessionsURL, headers, payload)
-	if err != nil {
-		config.Logger.Warn("[delete_all_sessions] request error", "error", err)
-		return err
+		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			return healthErr
+		}
+		if status != http.StatusOK || code != 0 || bizCode != 0 {
+			if attempt == 0 && c.refreshManagedToken(ctx, a, status, code, bizCode, msg, bizMsg) {
+				continue
+			}
+			if bizMsg != "" {
+				msg = bizMsg
+			}
+			config.Logger.Warn("[delete_all_sessions] failed", "status", status, "code", code, "msg", msg)
+			return fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
+		}
+
+		return nil
 	}
-
-	code := intFrom(resp["code"])
-	if status != http.StatusOK || code != 0 {
-		msg, _ := resp["msg"].(string)
-		config.Logger.Warn("[delete_all_sessions] failed", "status", status, "code", code, "msg", msg)
-		return fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
-	}
-
-	return nil
+	return errors.New("request failed after token refresh")
 }
 
 // DeleteAllSessionsForToken 直接使用 token 删除所有会话（直通模式）
 func (c *Client) DeleteAllSessionsForToken(ctx context.Context, token string) error {
 	clients := c.requestClientsFromContext(ctx)
-	headers := c.authHeaders(token)
 	payload := map[string]any{}
+	requestToken := token
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := c.authHeaders(requestToken)
+		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteAllSessionsURL, headers, payload)
+		if err != nil {
+			config.Logger.Warn("[delete_all_sessions_for_token] request error", "error", err)
+			return err
+		}
 
-	resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekDeleteAllSessionsURL, headers, payload)
-	if err != nil {
-		config.Logger.Warn("[delete_all_sessions_for_token] request error", "error", err)
-		return err
+		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimitedFromContext(ctx, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealthFromContext(ctx, code, bizCode, msg, bizMsg); healthErr != nil {
+			return healthErr
+		}
+		if status != http.StatusOK || code != 0 || bizCode != 0 {
+			if attempt == 0 {
+				if refreshedToken, ok := c.refreshManagedTokenFromContext(ctx, status, code, bizCode, msg, bizMsg); ok {
+					requestToken = refreshedToken
+					continue
+				}
+			}
+			if bizMsg != "" {
+				msg = bizMsg
+			}
+			config.Logger.Warn("[delete_all_sessions_for_token] failed", "status", status, "code", code, "msg", msg)
+			return fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
+		}
+
+		return nil
 	}
-
-	code := intFrom(resp["code"])
-	if status != http.StatusOK || code != 0 {
-		msg, _ := resp["msg"].(string)
-		config.Logger.Warn("[delete_all_sessions_for_token] failed", "status", status, "code", code, "msg", msg)
-		return fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
-	}
-
-	return nil
+	return errors.New("request failed after token refresh")
 }

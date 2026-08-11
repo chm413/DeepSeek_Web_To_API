@@ -65,6 +65,7 @@ type responsesStreamRuntime struct {
 	finalText             string
 	finalFinishReason     string
 	finalUsage            map[string]any
+	completedObject       map[string]any
 
 	persistResponse func(obj map[string]any)
 }
@@ -198,6 +199,7 @@ func (s *responsesStreamRuntime) finalize(finishReason string, deferEmptyOutput 
 	s.closeIncompleteFunctionItems()
 
 	obj := s.buildCompletedResponseObject(finalThinking, finalText, detected)
+	s.completedObject = obj
 	if s.persistResponse != nil {
 		s.persistResponse(obj)
 	}

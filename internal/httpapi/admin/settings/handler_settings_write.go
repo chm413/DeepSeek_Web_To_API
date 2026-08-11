@@ -25,6 +25,11 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json"})
 		return
 	}
+	promptLimitCfg, err := parsePromptLimitUpdate(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
 
 	adminCfg, runtimeCfg, compatCfg, responsesCfg, embeddingsCfg, cacheCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, safetyCfg, aliasMap, err := parseSettingsUpdateRequest(req)
 	if err != nil {
@@ -41,6 +46,7 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	currentInputMinCharsSet := hasNestedSettingsKey(req, "current_input_file", "min_chars")
 	thinkingInjectionEnabledSet := hasNestedSettingsKey(req, "thinking_injection", "enabled")
 	thinkingInjectionPromptSet := hasNestedSettingsKey(req, "thinking_injection", "prompt")
+	accountHealthIntervalSet := hasNestedSettingsKey(req, "runtime", "account_health_check_interval_minutes")
 	cacheDirSet := hasNestedSettingsPath(req, "cache", "response", "dir")
 	cacheMemoryTTLSet := hasNestedSettingsPath(req, "cache", "response", "memory_ttl_seconds")
 	cacheDiskTTLSet := hasNestedSettingsPath(req, "cache", "response", "disk_ttl_seconds")
@@ -67,6 +73,9 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if runtimeCfg.TokenRefreshIntervalHours > 0 {
 				c.Runtime.TokenRefreshIntervalHours = runtimeCfg.TokenRefreshIntervalHours
+			}
+			if accountHealthIntervalSet {
+				c.Runtime.AccountHealthCheckIntervalMinutes = runtimeCfg.AccountHealthCheckIntervalMinutes
 			}
 		}
 		if compatCfg != nil {
@@ -124,6 +133,38 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if thinkingInjectionPromptSet {
 				c.ThinkingInjection.Prompt = thinkingInjCfg.Prompt
+			}
+		}
+		if promptLimitCfg != nil {
+			if promptLimitCfg.Enabled != nil {
+				c.PromptLimit.Enabled = promptLimitCfg.Enabled
+			}
+			if promptLimitCfg.MaxCharsDefault > 0 {
+				c.PromptLimit.MaxCharsDefault = promptLimitCfg.MaxCharsDefault
+			}
+			if promptLimitCfg.MaxCharsExpert > 0 {
+				c.PromptLimit.MaxCharsExpert = promptLimitCfg.MaxCharsExpert
+			}
+			if promptLimitCfg.AutoCompressEnabled != nil {
+				c.PromptLimit.AutoCompressEnabled = promptLimitCfg.AutoCompressEnabled
+			}
+			if promptLimitCfg.CompressKeepRecent > 0 {
+				c.PromptLimit.CompressKeepRecent = promptLimitCfg.CompressKeepRecent
+			}
+			if promptLimitCfg.CompressKeepSystem != nil {
+				c.PromptLimit.CompressKeepSystem = promptLimitCfg.CompressKeepSystem
+			}
+			if promptLimitCfg.ProFlashCompressionEnabled != nil {
+				c.PromptLimit.ProFlashCompressionEnabled = promptLimitCfg.ProFlashCompressionEnabled
+			}
+			if promptLimitCfg.ProFlashCompressionTargetChars > 0 {
+				c.PromptLimit.ProFlashCompressionTargetChars = promptLimitCfg.ProFlashCompressionTargetChars
+			}
+			if promptLimitCfg.IncrementalMaxTurns != nil {
+				c.PromptLimit.IncrementalMaxTurns = promptLimitCfg.IncrementalMaxTurns
+			}
+			if promptLimitCfg.IncrementalRotationKeepRecent > 0 {
+				c.PromptLimit.IncrementalRotationKeepRecent = promptLimitCfg.IncrementalRotationKeepRecent
 			}
 		}
 		if safetyCfg != nil {

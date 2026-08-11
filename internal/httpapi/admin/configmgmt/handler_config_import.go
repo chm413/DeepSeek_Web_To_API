@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
 func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +166,9 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			if hasPayloadKey("thinking_injection") {
 				next.ThinkingInjection = incoming.ThinkingInjection
 			}
+			if hasPayloadKey("proxy_core") {
+				next.ProxyCore = incoming.ProxyCore
+			}
 			// Storage paths: when payload provides "storage" we replace the
 			// whole subtree so newly added fields (e.g. token_usage_sqlite_path)
 			// survive a round-trip through export → import. Operators who do
@@ -215,6 +219,7 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	xrayproxy.Default().StopAll()
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":           true,

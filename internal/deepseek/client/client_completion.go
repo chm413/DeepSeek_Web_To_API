@@ -21,6 +21,14 @@ const completionFailureBodyLimit = 4096
 var errNoCompletionSwitchCandidate = errors.New("no completion switch candidate")
 
 func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int) (*http.Response, error) {
+	return c.callCompletion(ctx, a, payload, powResp, maxAttempts, true)
+}
+
+func (c *Client) CallCompletionPinned(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string) (*http.Response, error) {
+	return c.callCompletion(ctx, a, payload, powResp, 1, false)
+}
+
+func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int, allowAccountSwitch bool) (*http.Response, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
 	}
@@ -32,6 +40,7 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 	headers["x-ds-pow-response"] = powResp
 	captureSession := c.capture.Start("deepseek_completion", dsprotocol.DeepSeekCompletionURL, a.AccountID, payload)
 	attempts := 0
+	refreshed := false
 	var lastErr error
 	for attempts < maxAttempts {
 		resp, err := c.streamPost(ctx, clients.stream, dsprotocol.DeepSeekCompletionURL, headers, payload)
@@ -45,11 +54,13 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 			if attempts >= maxAttempts {
 				break
 			}
-			if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
-				continue
-			} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
-				config.Logger.Warn("[completion] switch account failed", "account", accountIDForLog(a), "error", switchErr)
-				return nil, firstError(switchErr, lastErr)
+			if allowAccountSwitch {
+				if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
+					continue
+				} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
+					config.Logger.Warn("[completion] switch account failed", "account", accountIDForLog(a), "error", switchErr)
+					return nil, firstError(switchErr, lastErr)
+				}
 			}
 			if err := sleepCompletionRetry(ctx, time.Second); err != nil {
 				return nil, err
@@ -57,6 +68,7 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 			continue
 		}
 		if resp.StatusCode == http.StatusOK {
+			resp.Body = c.wrapAccountHealthBody(a, resp.Body)
 			if captureSession != nil {
 				resp.Body = captureSession.WrapBody(resp.Body, resp.StatusCode)
 			}
@@ -66,12 +78,30 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 		if captureSession != nil {
 			resp.Body = captureSession.WrapBody(resp.Body, resp.StatusCode)
 		}
-		lastErr = completionStatusFailure(resp)
+		lastErr = c.completionStatusFailure(a, resp)
 		config.Logger.Warn("[completion] upstream returned non-OK status", "account", accountIDForLog(a), "status", resp.StatusCode, "failure_kind", requestFailureKind(lastErr), "error", lastErr)
 		if resp.Body != nil {
 			if err := resp.Body.Close(); err != nil {
 				config.Logger.Warn("[completion] close upstream response body failed", "account", accountIDForLog(a), "status", resp.StatusCode, "error", err)
 			}
+		}
+		var healthErr *auth.AccountHealthError
+		if errors.As(lastErr, &healthErr) {
+			if allowAccountSwitch && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
+				if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
+					continue
+				} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
+					return nil, firstError(switchErr, lastErr)
+				}
+			}
+			break
+		}
+		if !refreshed && IsManagedUnauthorizedError(lastErr) && c.Auth != nil && c.Auth.RefreshToken(ctx, a) {
+			refreshed = true
+			clients = c.requestClientsForAuth(ctx, a)
+			headers = c.authHeaders(a.DeepSeekToken)
+			headers["x-ds-pow-response"] = powResp
+			continue
 		}
 		// 429 from upstream means the account is rate-limited right now.
 		// Other accounts in the pool may have headroom — fail over to a
@@ -84,7 +114,7 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 		// client even when the operator's pool has dozens of idle
 		// accounts — the historical pain on /admin/metrics/overview's
 		// failure rate.
-		if resp.StatusCode == http.StatusTooManyRequests && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
+		if allowAccountSwitch && resp.StatusCode == http.StatusTooManyRequests && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
 			if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
 				config.Logger.Info("[completion] 429 fail-over to next account", "from", accountIDForLog(a), "tried", len(a.TriedAccounts))
 				continue
@@ -98,11 +128,13 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 		if attempts >= maxAttempts {
 			break
 		}
-		if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
-			continue
-		} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
-			config.Logger.Warn("[completion] switch account failed", "account", accountIDForLog(a), "error", switchErr)
-			return nil, firstError(switchErr, lastErr)
+		if allowAccountSwitch {
+			if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
+				continue
+			} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
+				config.Logger.Warn("[completion] switch account failed", "account", accountIDForLog(a), "error", switchErr)
+				return nil, firstError(switchErr, lastErr)
+			}
 		}
 		if err := sleepCompletionRetry(ctx, time.Second); err != nil {
 			return nil, err
@@ -148,7 +180,13 @@ func (c *Client) hasCompletionSwitchCandidate(a *auth.RequestAuth) bool {
 		return true
 	}
 	accounts := c.Store.Accounts()
-	if len(accounts) <= 1 {
+	enabled := 0
+	for _, acc := range accounts {
+		if !acc.Disabled {
+			enabled++
+		}
+	}
+	if enabled <= 1 {
 		return false
 	}
 	tried := len(a.TriedAccounts)
@@ -157,7 +195,7 @@ func (c *Client) hasCompletionSwitchCandidate(a *auth.RequestAuth) bool {
 			tried++
 		}
 	}
-	return tried < len(accounts)
+	return tried < enabled
 }
 
 func (c *Client) createCompletionRetrySession(ctx context.Context, a *auth.RequestAuth, clients requestClients) (string, error) {
@@ -167,10 +205,14 @@ func (c *Client) createCompletionRetrySession(ctx context.Context, a *auth.Reque
 		return "", transportFailure("create session", ctx, err)
 	}
 	code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+	c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
 	if status == http.StatusOK && code == 0 && bizCode == 0 {
 		if sessionID := extractCreateSessionID(resp); sessionID != "" {
 			return sessionID, nil
 		}
+	}
+	if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+		return "", healthErr
 	}
 	message := failureMessage(msg, bizMsg, "create session failed")
 	kind := FailureUpstreamStatus
@@ -187,6 +229,7 @@ func (c *Client) getCompletionRetryPow(ctx context.Context, a *auth.RequestAuth,
 		return "", transportFailure("get pow", ctx, err)
 	}
 	code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+	c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
 	if status == http.StatusOK && code == 0 && bizCode == 0 {
 		data, _ := resp["data"].(map[string]any)
 		bizData, _ := data["biz_data"].(map[string]any)
@@ -196,6 +239,9 @@ func (c *Client) getCompletionRetryPow(ctx context.Context, a *auth.RequestAuth,
 			return "", transportFailure("get pow", ctx, err)
 		}
 		return BuildPowHeader(challenge, answer)
+	}
+	if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+		return "", healthErr
 	}
 	message := failureMessage(msg, bizMsg, "get pow failed")
 	kind := FailureUpstreamStatus
@@ -253,11 +299,14 @@ func (c *Client) streamPost(ctx context.Context, doer trans.Doer, url string, he
 	return resp, nil
 }
 
-func completionStatusFailure(resp *http.Response) error {
+func (c *Client) completionStatusFailure(a *auth.RequestAuth, resp *http.Response) error {
 	if resp == nil {
 		return &RequestFailure{Op: "completion", Kind: FailureUpstreamStatus, Message: "missing upstream response"}
 	}
 	message := http.StatusText(resp.StatusCode)
+	kind := FailureUpstreamStatus
+	code, bizCode := 0, 0
+	msg, bizMsg := "", ""
 	if resp.Body != nil {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, completionFailureBodyLimit+1))
 		if err != nil {
@@ -269,8 +318,27 @@ func completionStatusFailure(resp *http.Response) error {
 		if trimmed := strings.TrimSpace(string(body)); trimmed != "" {
 			message = trimmed
 		}
+		var parsed map[string]any
+		if json.Unmarshal(body, &parsed) == nil {
+			code, bizCode, msg, bizMsg = extractResponseStatus(parsed)
+			if data, ok := parsed["data"].(map[string]any); ok {
+				if code == 0 {
+					code = intFrom(data["code"])
+				}
+				if bizCode == 0 {
+					bizCode = intFrom(data["biz_code"])
+				}
+			}
+			if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+				return healthErr
+			}
+		}
 	}
-	return &RequestFailure{Op: "completion", Kind: FailureUpstreamStatus, StatusCode: resp.StatusCode, Message: message}
+	c.markAccountRateLimited(a, resp.StatusCode, code, bizCode, msg, bizMsg, resp.Header.Get("Retry-After"))
+	if isTokenInvalid(resp.StatusCode, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
+		kind = authFailureKind(a != nil && a.UseConfigToken)
+	}
+	return &RequestFailure{Op: "completion", Kind: kind, StatusCode: resp.StatusCode, Message: message}
 }
 
 func completionFailureRetryable(err error) bool {

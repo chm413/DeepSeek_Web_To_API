@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"DeepSeek_Web_To_API/internal/config"
 	"context"
 	"io"
 	"net/http"
@@ -35,6 +36,11 @@ func (responsesHistoryConfigStub) ThinkingInjectionEnabled() bool      { return 
 func (responsesHistoryConfigStub) ThinkingInjectionPrompt() string     { return "" }
 func (responsesHistoryConfigStub) SafetyBlockMessage() string          { return "" }
 func (responsesHistoryConfigStub) RemoteFileUploadEnabled() bool       { return true }
+func (responsesHistoryConfigStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	s := config.DefaultPromptLimitSettings()
+	s.Enabled = true
+	return s
+}
 
 type responsesHistoryCurrentInputConfigStub struct {
 	responsesHistoryConfigStub

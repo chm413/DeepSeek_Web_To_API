@@ -21,10 +21,11 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 			"default_password_warning": authn.UsingDefaultAdminKey(h.Store),
 		},
 		"runtime": map[string]any{
-			"account_max_inflight":         h.Store.RuntimeAccountMaxInflight(),
-			"account_max_queue":            h.Store.RuntimeAccountMaxQueue(recommended),
-			"global_max_inflight":          h.Store.RuntimeGlobalMaxInflight(recommended),
-			"token_refresh_interval_hours": h.Store.RuntimeTokenRefreshIntervalHours(),
+			"account_max_inflight":                  h.Store.RuntimeAccountMaxInflight(),
+			"account_max_queue":                     h.Store.RuntimeAccountMaxQueue(recommended),
+			"global_max_inflight":                   h.Store.RuntimeGlobalMaxInflight(recommended),
+			"token_refresh_interval_hours":          h.Store.RuntimeTokenRefreshIntervalHours(),
+			"account_health_check_interval_minutes": h.Store.RuntimeAccountHealthCheckIntervalMinutes(),
 		},
 		"compat": map[string]any{
 			"wide_input_strict_output": h.Store.CompatWideInputStrictOutput(),
@@ -48,9 +49,27 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 			"prompt":         h.Store.ThinkingInjectionPrompt(),
 			"default_prompt": promptcompat.DefaultThinkingInjectionPrompt,
 		},
+		"prompt_limit":  promptLimitResponse(h.Store.PromptLimitSnapshot()),
 		"model_aliases": snap.ModelAliases,
 		"env_backed":    h.Store.IsEnvBacked(),
 	})
+}
+
+func promptLimitResponse(s config.PromptLimitSettings) map[string]any {
+	return map[string]any{
+		"enabled":                            s.Enabled,
+		"max_chars_default":                  s.MaxCharsDefault,
+		"max_chars_expert":                   s.MaxCharsExpert,
+		"max_chars_default_configured":       s.MaxCharsDefaultConfigured,
+		"max_chars_expert_configured":        s.MaxCharsExpertConfigured,
+		"auto_compress_enabled":              s.AutoCompressEnable,
+		"compress_keep_recent":               s.KeepRecentTurns,
+		"compress_keep_system":               s.KeepSystemMessage,
+		"pro_flash_compression_enabled":      s.ProFlashCompressionEnable,
+		"pro_flash_compression_target_chars": s.ProFlashCompressionTarget,
+		"incremental_max_turns":              s.IncrementalMaxTurns,
+		"incremental_rotation_keep_recent":   s.IncrementalRotationKeepRecent,
+	}
 }
 
 // safetyResponse merges the legacy SafetyConfig with the dedicated SQLite

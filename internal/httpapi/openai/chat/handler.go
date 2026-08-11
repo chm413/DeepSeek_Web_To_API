@@ -13,6 +13,7 @@ import (
 	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/toolcall"
 	"DeepSeek_Web_To_API/internal/toolstream"
+	"DeepSeek_Web_To_API/internal/upstreamsession"
 )
 
 const openAIGeneralMaxSize = shared.GeneralMaxSize
@@ -25,6 +26,7 @@ type Handler struct {
 	DS          shared.DeepSeekCaller
 	ChatHistory *chathistory.Store
 	SafetyLLM   safetyllm.Checker
+	Incremental *upstreamsession.Store
 }
 
 func (h *Handler) compatStripReferenceMarkers() bool {
@@ -36,6 +38,9 @@ func (h *Handler) compatStripReferenceMarkers() bool {
 
 func (h *Handler) applyCurrentInputFile(ctx context.Context, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) (promptcompat.StandardRequest, error) {
 	if h == nil {
+		return stdReq, nil
+	}
+	if stdReq.IncrementalSessionRotated {
 		return stdReq, nil
 	}
 	// CurrentInputFileSkipped is set by Claude/Gemini proxies that bridge

@@ -10,7 +10,7 @@ import {
 
 const DEFAULT_FORM = {
     admin: { jwt_expire_hours: 24 },
-    runtime: { account_max_inflight: 2, account_max_queue: 10, global_max_inflight: 10, token_refresh_interval_hours: 6 },
+    runtime: { account_max_inflight: 2, account_max_queue: 10, global_max_inflight: 10, token_refresh_interval_hours: 6, account_health_check_interval_minutes: 0 },
     compat: { wide_input_strict_output: true, strip_reference_markers: true },
     responses: { store_ttl_seconds: 900 },
     embeddings: { provider: '' },
@@ -29,6 +29,20 @@ const DEFAULT_FORM = {
     auto_delete: { mode: 'none' },
     current_input_file: { enabled: true, min_chars: 0 },
     thinking_injection: { enabled: true, prompt: '', default_prompt: '' },
+    prompt_limit: {
+        enabled: true,
+        max_chars_default: 380000,
+        max_chars_expert: 150000,
+        max_chars_default_configured: false,
+        max_chars_expert_configured: false,
+        auto_compress_enabled: false,
+        compress_keep_recent: 6,
+        compress_keep_system: true,
+        pro_flash_compression_enabled: false,
+        pro_flash_compression_target_chars: 150000,
+        incremental_max_turns: 0,
+        incremental_rotation_keep_recent: 6,
+    },
     safety: {
         enabled: false,
         block_message: '',
@@ -136,6 +150,7 @@ function fromServerForm(data) {
             account_max_queue: Number(data.runtime?.account_max_queue || 10),
             global_max_inflight: Number(data.runtime?.global_max_inflight || 10),
             token_refresh_interval_hours: Number(data.runtime?.token_refresh_interval_hours || 6),
+            account_health_check_interval_minutes: Number(data.runtime?.account_health_check_interval_minutes || 0),
         },
         compat: {
             wide_input_strict_output: data.compat?.wide_input_strict_output ?? true,
@@ -170,6 +185,20 @@ function fromServerForm(data) {
             enabled: data.thinking_injection?.enabled ?? true,
             prompt: data.thinking_injection?.prompt || '',
             default_prompt: data.thinking_injection?.default_prompt || '',
+        },
+        prompt_limit: {
+            enabled: data.prompt_limit?.enabled ?? true,
+            max_chars_default: Number(data.prompt_limit?.max_chars_default || 380000),
+            max_chars_expert: Number(data.prompt_limit?.max_chars_expert || 150000),
+            max_chars_default_configured: Boolean(data.prompt_limit?.max_chars_default_configured),
+            max_chars_expert_configured: Boolean(data.prompt_limit?.max_chars_expert_configured),
+            auto_compress_enabled: data.prompt_limit?.auto_compress_enabled ?? false,
+            compress_keep_recent: Number(data.prompt_limit?.compress_keep_recent || 6),
+            compress_keep_system: data.prompt_limit?.compress_keep_system ?? true,
+            pro_flash_compression_enabled: data.prompt_limit?.pro_flash_compression_enabled ?? false,
+            pro_flash_compression_target_chars: Number(data.prompt_limit?.pro_flash_compression_target_chars || 150000),
+            incremental_max_turns: Number(data.prompt_limit?.incremental_max_turns ?? 0),
+            incremental_rotation_keep_recent: Number(data.prompt_limit?.incremental_rotation_keep_recent || 6),
         },
         safety: {
             enabled: Boolean(data.safety?.enabled),
@@ -213,6 +242,7 @@ function toServerPayload(form) {
             account_max_queue: Number(form.runtime.account_max_queue),
             global_max_inflight: Number(form.runtime.global_max_inflight),
             token_refresh_interval_hours: Number(form.runtime.token_refresh_interval_hours),
+            account_health_check_interval_minutes: Number(form.runtime.account_health_check_interval_minutes),
         },
         compat: {
             wide_input_strict_output: Boolean(form.compat?.wide_input_strict_output ?? true),
@@ -238,6 +268,22 @@ function toServerPayload(form) {
         thinking_injection: {
             enabled: Boolean(form.thinking_injection?.enabled ?? true),
             prompt: String(form.thinking_injection?.prompt || '').trim(),
+        },
+        prompt_limit: {
+            enabled: Boolean(form.prompt_limit?.enabled ?? true),
+            ...(form.prompt_limit?.max_chars_default_configured
+                ? { max_chars_default: safeNumber(form.prompt_limit?.max_chars_default, 380000, 1, 10000000) }
+                : {}),
+            ...(form.prompt_limit?.max_chars_expert_configured
+                ? { max_chars_expert: safeNumber(form.prompt_limit?.max_chars_expert, 150000, 1, 1000000) }
+                : {}),
+            auto_compress_enabled: Boolean(form.prompt_limit?.auto_compress_enabled ?? false),
+            compress_keep_recent: safeNumber(form.prompt_limit?.compress_keep_recent, 6, 1, 100),
+            compress_keep_system: Boolean(form.prompt_limit?.compress_keep_system ?? true),
+            pro_flash_compression_enabled: Boolean(form.prompt_limit?.pro_flash_compression_enabled ?? false),
+            pro_flash_compression_target_chars: safeNumber(form.prompt_limit?.pro_flash_compression_target_chars, 150000, 1, 1000000),
+            incremental_max_turns: safeNumber(form.prompt_limit?.incremental_max_turns, 0, 0, 1000000),
+            incremental_rotation_keep_recent: safeNumber(form.prompt_limit?.incremental_rotation_keep_recent, 6, 1, 100),
         },
         safety: {
             enabled: Boolean(form.safety?.enabled),

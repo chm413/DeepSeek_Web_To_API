@@ -34,6 +34,12 @@ type DeepSeekCaller interface {
 	DeleteAllSessionsForToken(ctx context.Context, token string) error
 }
 
+// DynamicPromptLimitProvider is optional so protocol tests and alternate
+// upstream clients can continue to work with the static fallback settings.
+type DynamicPromptLimitProvider interface {
+	GetModelInputLimits(ctx context.Context, a *auth.RequestAuth) (config.ModelInputLimits, error)
+}
+
 type ConfigReader interface {
 	ModelAliases() map[string]string
 	CompatWideInputStrictOutput() bool
@@ -63,6 +69,14 @@ type ConfigReader interface {
 	// via DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED=true if they
 	// have headroom.
 	RemoteFileUploadEnabled() bool
+
+	// Prompt limit and auto-compression settings (v1.0.14+)
+	// PromptLimitSnapshot returns every prompt_limit knob read under one
+	// lock. A single snapshot must be taken per request and threaded through
+	// both the compress and enforce phases: reading the knobs twice lets a
+	// concurrent config write reject a request that was never offered the
+	// chance to compress.
+	PromptLimitSnapshot() config.PromptLimitSettings
 }
 
 type Deps struct {

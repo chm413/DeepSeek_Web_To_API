@@ -7,6 +7,7 @@ import AccountsTable from './AccountsTable'
 import AddKeyModal from './AddKeyModal'
 import AddAccountModal from './AddAccountModal'
 import EditAccountModal from './EditAccountModal'
+import BatchAccountUploadModal from './BatchAccountUploadModal'
 
 export default function AccountManagerContainer({ config, onRefresh, onMessage, authFetch }) {
     const { t } = useI18n()
@@ -14,6 +15,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
 
     const {
         queueStatus,
+        metrics,
         keysExpanded,
         setKeysExpanded,
         accounts,
@@ -23,6 +25,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         totalAccounts,
         loadingAccounts,
         fetchAccounts,
+        changePage,
         changePageSize,
         resolveAccountIdentifier,
         searchQuery,
@@ -38,6 +41,11 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         showAddAccount,
         openAddAccount,
         closeAddAccount,
+        showBatchUpload,
+        openBatchUpload,
+        closeBatchUpload,
+        batchUploading,
+        uploadBatchAccounts,
         showEditAccount,
         editingAccount,
         editAccount,
@@ -57,6 +65,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         sessionCounts,
         deletingSessions,
         updatingProxy,
+        updatingEnabled,
         addKey,
         deleteKey,
         addAccount,
@@ -66,6 +75,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         testAllAccounts,
         deleteAllSessions,
         updateAccountProxy,
+        updateAccountEnabled,
     } = useAccountActions({
         apiFetch,
         t,
@@ -100,7 +110,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 </div>
             )}
 
-            <QueueCards queueStatus={queueStatus} t={t} />
+            <QueueCards queueStatus={queueStatus} metrics={metrics} t={t} />
 
             <ApiKeysPanel
                 t={t}
@@ -124,6 +134,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 sessionCounts={sessionCounts}
                 deletingSessions={deletingSessions}
                 updatingProxy={updatingProxy}
+                updatingEnabled={updatingEnabled}
                 totalAccounts={totalAccounts}
                 page={page}
                 pageSize={pageSize}
@@ -132,13 +143,15 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 proxies={config?.proxies || []}
                 onTestAll={testAllAccounts}
                 onShowAddAccount={openAddAccount}
+                onShowBatchUpload={openBatchUpload}
                 onEditAccount={openEditAccount}
                 onTestAccount={testAccount}
                 onDeleteAccount={deleteAccount}
                 onDeleteAllSessions={deleteAllSessions}
                 onUpdateAccountProxy={updateAccountProxy}
-                onPrevPage={() => fetchAccounts(page - 1)}
-                onNextPage={() => fetchAccounts(page + 1)}
+                onUpdateAccountEnabled={updateAccountEnabled}
+                onPrevPage={() => changePage(page - 1)}
+                onNextPage={() => changePage(page + 1)}
                 onPageSizeChange={changePageSize}
                 searchQuery={searchQuery}
                 onSearchChange={handleSearchChange}
@@ -175,6 +188,14 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 loading={loading}
                 onClose={closeEditAccount}
                 onSave={updateAccount}
+            />
+
+            <BatchAccountUploadModal
+                show={showBatchUpload}
+                t={t}
+                loading={batchUploading}
+                onClose={closeBatchUpload}
+                onUpload={uploadBatchAccounts}
             />
         </div>
     )

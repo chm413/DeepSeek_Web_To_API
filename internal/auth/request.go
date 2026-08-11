@@ -107,11 +107,28 @@ func (r *Resolver) Determine(req *http.Request) (*RequestAuth, error) {
 // account.
 // On successful managed acquire, the binding is created/refreshed.
 func (r *Resolver) DetermineWithSession(req *http.Request, body []byte) (*RequestAuth, error) {
+	return r.determineWithSessionKey(req, body, "")
+}
+
+// DetermineWithSessionKey resolves a request using a previously established,
+// caller-scoped session key. Responses uses this for previous_response_id so
+// account selection happens on the original conversation binding before the
+// retained upstream branch is looked up.
+func (r *Resolver) DetermineWithSessionKey(req *http.Request, body []byte, inheritedSessionKey string) (*RequestAuth, error) {
+	return r.determineWithSessionKey(req, body, strings.TrimSpace(inheritedSessionKey))
+}
+
+func (r *Resolver) determineWithSessionKey(req *http.Request, body []byte, inheritedSessionKey string) (*RequestAuth, error) {
 	callerKey := extractCallerToken(req)
 	if callerKey == "" {
 		return nil, ErrUnauthorized
 	}
 	callerID := callerTokenID(callerKey)
+	sessionKey := inheritedSessionKey
+	if sessionKey == "" && len(body) > 0 {
+		callerHash := account.CallerHash(callerKey)
+		sessionKey = sessionKeyFromRequest(req, callerHash, body)
+	}
 	if !r.Store.HasAPIKey(callerKey) {
 		if r.directTokenBlocked(callerID, time.Now()) {
 			return nil, ErrInvalidDirectToken
@@ -120,17 +137,15 @@ func (r *Resolver) DetermineWithSession(req *http.Request, body []byte) (*Reques
 			UseConfigToken: false,
 			DeepSeekToken:  callerKey,
 			CallerID:       callerID,
+			SessionKey:     sessionKey,
 			resolver:       r,
 			TriedAccounts:  map[string]bool{},
 		}, nil
 	}
 
-	var sessionKey string
 	target := requestHeader(req, TargetAccountHeader, LegacyTargetAccountHeader)
 	explicitTarget := target != ""
 	if len(body) > 0 && r.Pool != nil && r.Pool.Affinity != nil {
-		callerHash := account.CallerHash(callerKey)
-		sessionKey = sessionKeyFromRequest(req, callerHash, body)
 		unlock := r.Pool.Affinity.Lock(sessionKey)
 		defer unlock()
 		if sessionKey != "" && target == "" {
@@ -279,16 +294,79 @@ func FromContext(ctx context.Context) (*RequestAuth, bool) {
 func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 	token, err := r.Login(ctx, a.Account)
 	if err != nil {
+		r.recordAccountHealth(a.AccountID, err)
 		return err
 	}
 	a.Account.Token = token
 	a.DeepSeekToken = token
 	r.markTokenRefreshedNow(a.AccountID)
+	if r.Pool != nil {
+		r.Pool.ClearHealth(a.AccountID)
+	}
 	return r.Store.UpdateAccountToken(a.AccountID, token)
 }
 
+func (r *Resolver) recordAccountHealth(accountID string, err error) {
+	if r == nil || accountID == "" {
+		return
+	}
+	var healthErr *AccountHealthError
+	if !errors.As(err, &healthErr) {
+		return
+	}
+	switch healthErr.State {
+	case account.HealthRateLimited:
+		if r.Pool != nil {
+			r.Pool.MarkRateLimited(accountID, healthErr.Until, healthErr.Error())
+		}
+	case account.HealthTemporarilyMuted:
+		if r.Pool != nil {
+			r.Pool.MarkTemporaryMute(accountID, healthErr.Until, healthErr.Error())
+		}
+	case account.HealthInvalidCredentials:
+		if r.Pool != nil {
+			r.Pool.MarkInvalidCredentials(accountID, healthErr.Error())
+		}
+		r.persistAutomaticAccountDisable(accountID, config.AccountDisabledInvalidCredentials, healthErr)
+	case account.HealthPermanentlyBanned:
+		if r.Pool != nil {
+			r.Pool.MarkPermanentlyBanned(accountID, healthErr.Error())
+		}
+		r.persistAutomaticAccountDisable(accountID, config.AccountDisabledUpstreamBanned, healthErr)
+	}
+}
+
+func (r *Resolver) persistAutomaticAccountDisable(accountID, reason string, healthErr *AccountHealthError) {
+	if r == nil || r.Store == nil || healthErr == nil {
+		return
+	}
+	if current, ok := r.Store.FindAccount(accountID); ok && current.Disabled && current.DisabledReason == reason {
+		return
+	}
+	if err := r.Store.SetAccountDisabled(accountID, true, reason); err != nil {
+		config.Logger.Error("[account_health] persist automatic disable failed", "account", accountID, "reason", reason, "error", err)
+		return
+	}
+	config.Logger.Warn("[account_health] account automatically disabled", "account", accountID, "reason", reason, "state", healthErr.State, "code", healthErr.Code)
+}
+
+// MarkAccountHealth lets upstream clients report an explicit account state
+// discovered after a cached token was used.
+func (r *Resolver) MarkAccountHealth(accountID string, err error) {
+	r.recordAccountHealth(accountID, err)
+}
+
 func (r *Resolver) RefreshToken(ctx context.Context, a *RequestAuth) bool {
-	if !a.UseConfigToken || a.AccountID == "" {
+	if r == nil || a == nil || !a.UseConfigToken || a.AccountID == "" {
+		return false
+	}
+	if strings.TrimSpace(a.Account.Password) == "" {
+		healthErr := &AccountHealthError{
+			State:   account.HealthInvalidCredentials,
+			Message: "stored token was rejected and no password is available for refresh",
+		}
+		r.recordAccountHealth(a.AccountID, healthErr)
+		config.Logger.Error("[refresh_token] failed", "account", a.AccountID, "error", healthErr)
 		return false
 	}
 	_ = r.Store.UpdateAccountToken(a.AccountID, "")

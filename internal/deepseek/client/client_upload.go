@@ -118,6 +118,10 @@ func (c *Client) UploadFile(ctx context.Context, a *auth.RequestAuth, req Upload
 			}
 		}
 		code, bizCode, msg, bizMsg := extractResponseStatus(parsed)
+		c.markAccountRateLimited(a, resp.StatusCode, code, bizCode, msg, bizMsg, resp.Header.Get("Retry-After"))
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			return nil, healthErr
+		}
 		if resp.StatusCode == http.StatusOK && code == 0 && bizCode == 0 {
 			result := extractUploadFileResult(parsed)
 			result.Raw = parsed

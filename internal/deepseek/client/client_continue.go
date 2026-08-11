@@ -72,18 +72,34 @@ func (c *Client) callContinue(ctx context.Context, a *auth.RequestAuth, sessionI
 	}
 	config.Logger.Info("[auto_continue] calling continue", "session_id", sessionID, "message_id", responseMessageID)
 	captureSession := c.capture.Start("deepseek_continue", dsprotocol.DeepSeekContinueURL, a.AccountID, payload)
-	resp, err := c.streamPost(ctx, clients.stream, dsprotocol.DeepSeekContinueURL, headers, payload)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 2; attempt++ {
+		headers = c.authHeaders(a.DeepSeekToken)
+		headers["x-ds-pow-response"] = powResp
+		resp, err := c.streamPost(ctx, clients.stream, dsprotocol.DeepSeekContinueURL, headers, payload)
+		if err != nil {
+			return nil, err
+		}
+		if captureSession != nil {
+			resp.Body = captureSession.WrapBody(resp.Body, resp.StatusCode)
+		}
+		if resp.StatusCode != http.StatusOK {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			_ = resp.Body.Close()
+			parsed := map[string]any{}
+			_ = json.Unmarshal(raw, &parsed)
+			code, bizCode, msg, bizMsg := extractResponseStatus(parsed)
+			c.markAccountRateLimited(a, resp.StatusCode, code, bizCode, msg, bizMsg, resp.Header.Get("Retry-After"))
+			if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+				return nil, healthErr
+			}
+			if attempt == 0 && c.refreshManagedToken(ctx, a, resp.StatusCode, code, bizCode, msg, bizMsg) {
+				continue
+			}
+			return nil, fmt.Errorf("continue failed: HTTP %d: %s", resp.StatusCode, failureMessage(msg, bizMsg, "unknown upstream error"))
+		}
+		return resp, nil
 	}
-	if captureSession != nil {
-		resp.Body = captureSession.WrapBody(resp.Body, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, errors.New("continue failed")
-	}
-	return resp, nil
+	return nil, errors.New("continue failed after token refresh")
 }
 
 // newAutoContinueBody returns a new ReadCloser that transparently pumps

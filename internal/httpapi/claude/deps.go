@@ -35,6 +35,7 @@ type ConfigReader interface {
 	// SafetyBlockMessage returns the operator-configured response body
 	// when v1.0.14+ LLM safety review blocks a request.
 	SafetyBlockMessage() string
+	PromptLimitSnapshot() config.PromptLimitSettings
 }
 
 type OpenAIChatRunner interface {

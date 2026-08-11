@@ -7,18 +7,36 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Store struct {
-	mu         sync.RWMutex
-	cfg        Config
-	path       string
-	fromEnv    bool
-	accountsDB *accountSQLiteStore
-	keyMap     map[string]struct{} // O(1) API key lookup index
-	accMap     map[string]int      // O(1) account lookup: identifier -> slice index
-	accTest    map[string]string   // runtime-only account test status cache
-	accSess    map[string]int      // runtime-only account session count cache
+	mu            sync.RWMutex
+	cfg           Config
+	path          string
+	fromEnv       bool
+	accountsDB    *accountSQLiteStore
+	keyMap        map[string]struct{}          // O(1) API key lookup index
+	accMap        map[string]int               // O(1) account lookup: identifier -> slice index
+	accTest       map[string]string            // runtime-only account test status cache
+	accTestResult map[string]AccountTestResult // runtime-only account test detail cache
+	accSess       map[string]int               // runtime-only account session count cache
+}
+
+// AccountTestResult is the latest operator-triggered account check. It is
+// intentionally runtime-only: failure details remain visible after a Web UI
+// refresh but are never persisted with account credentials.
+type AccountTestResult struct {
+	Status         string `json:"status"`
+	Phase          string `json:"phase,omitempty"`
+	FailureReason  string `json:"failure_reason,omitempty"`
+	ErrorCode      int    `json:"error_code,omitempty"`
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	AccountState   string `json:"account_state,omitempty"`
+	AutoDisabled   bool   `json:"auto_disabled,omitempty"`
+	ConfigWarning  string `json:"config_warning,omitempty"`
+	ResponseTimeMs int    `json:"response_time_ms,omitempty"`
+	UpdatedAtUnix  int64  `json:"updated_at_unix"`
 }
 
 func LoadStore() *Store {
@@ -100,6 +118,53 @@ func (s *Store) AccountTestStatus(identifier string) (string, bool) {
 	return status, ok
 }
 
+// UpdateAccountTestResult records the full, non-secret outcome of an
+// operator-triggered account check in the in-memory status cache.
+func (s *Store) UpdateAccountTestResult(identifier string, result AccountTestResult) error {
+	identifier = strings.TrimSpace(identifier)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.findAccountIndexLocked(identifier)
+	if !ok {
+		return errors.New("account not found")
+	}
+	result.Status = lower(result.Status)
+	if result.Status == "" {
+		result.Status = "failed"
+	}
+	result.Phase = strings.TrimSpace(result.Phase)
+	result.FailureReason = truncateRuntimeTestDetail(result.FailureReason)
+	result.ConfigWarning = truncateRuntimeTestDetail(result.ConfigWarning)
+	if result.UpdatedAtUnix <= 0 {
+		result.UpdatedAtUnix = time.Now().Unix()
+	}
+	s.setAccountTestStatusLocked(s.cfg.Accounts[idx], result.Status, identifier)
+	s.setAccountTestResultLocked(s.cfg.Accounts[idx], result, identifier)
+	return nil
+}
+
+// AccountTestResult returns the latest operator-triggered check outcome for
+// the supplied account identifier. The result is cleared on process restart.
+func (s *Store) AccountTestResult(identifier string) (AccountTestResult, bool) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return AccountTestResult{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result, ok := s.accTestResult[identifier]
+	return result, ok
+}
+
+func truncateRuntimeTestDetail(value string) string {
+	const maxRunes = 1200
+	value = strings.TrimSpace(value)
+	if len([]rune(value)) <= maxRunes {
+		return value
+	}
+	return string([]rune(value)[:maxRunes]) + "..."
+}
+
 func (s *Store) UpdateAccountSessionCount(identifier string, count int) error {
 	identifier = strings.TrimSpace(identifier)
 	if count < 0 {
@@ -154,6 +219,38 @@ func (s *Store) UpdateAccountToken(identifier, token string) error {
 		}
 	}
 	return s.saveLocked()
+}
+
+func (s *Store) SetAccountDisabled(identifier string, disabled bool, reason string) error {
+	identifier = strings.TrimSpace(identifier)
+	return s.Update(func(cfg *Config) error {
+		for i := range cfg.Accounts {
+			if !accountIdentifiersMatch(cfg.Accounts[i], identifier) {
+				continue
+			}
+			cfg.Accounts[i].Disabled = disabled
+			if disabled {
+				cfg.Accounts[i].DisabledReason = strings.TrimSpace(reason)
+				cfg.Accounts[i].DisabledAtUnix = time.Now().Unix()
+			} else {
+				cfg.Accounts[i].DisabledReason = ""
+				cfg.Accounts[i].DisabledAtUnix = 0
+			}
+			return nil
+		}
+		return errors.New("account not found")
+	})
+}
+
+func accountIdentifiersMatch(acc Account, identifier string) bool {
+	if identifier == "" {
+		return false
+	}
+	if strings.TrimSpace(acc.Email) == identifier || acc.Identifier() == identifier {
+		return true
+	}
+	mobile := CanonicalMobileKey(identifier)
+	return mobile != "" && mobile == CanonicalMobileKey(acc.Mobile)
 }
 
 func (s *Store) Replace(cfg Config) error {

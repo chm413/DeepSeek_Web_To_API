@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
@@ -18,6 +19,7 @@ import (
 
 type testingDSMock struct {
 	loginCalls                 int
+	loginErr                   error
 	createSessionCalls         int
 	getPowCalls                int
 	callCompletionCalls        int
@@ -27,8 +29,21 @@ type testingDSMock struct {
 	sessionCount               int
 }
 
+type failingLoginTestingDS struct {
+	*testingDSMock
+	loginErr error
+}
+
+func (m *failingLoginTestingDS) Login(_ context.Context, _ config.Account) (string, error) {
+	m.loginCalls++
+	return "", m.loginErr
+}
+
 func (m *testingDSMock) Login(_ context.Context, _ config.Account) (string, error) {
 	m.loginCalls++
+	if m.loginErr != nil {
+		return "", m.loginErr
+	}
 	return "new-token", nil
 }
 
@@ -105,6 +120,42 @@ func TestTestAccount_BatchModeOnlyCreatesSession(t *testing.T) {
 	}
 }
 
+func TestTestAccountPersistsTokenRefreshFailureDetails(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"accounts":[{"email":"batch@example.com","password":"pwd"}]}`)
+	store := config.LoadStore()
+	ds := &failingLoginTestingDS{
+		testingDSMock: &testingDSMock{},
+		loginErr: &auth.AccountHealthError{
+			State:   account.HealthPermanentlyBanned,
+			Code:    40012,
+			Message: "upstream account ban",
+		},
+	}
+	h := &Handler{Store: store, DS: ds}
+	acc, ok := store.FindAccount("batch@example.com")
+	if !ok {
+		t.Fatal("expected test account")
+	}
+
+	result := h.testAccount(context.Background(), acc, "deepseek-v4-flash", "")
+	if success, _ := result["success"].(bool); success {
+		t.Fatalf("expected refresh failure, got %#v", result)
+	}
+	if phase, _ := result["phase"].(string); phase != "token_refresh" {
+		t.Fatalf("failure phase = %q, want token_refresh", phase)
+	}
+	if reason, _ := result["failure_reason"].(string); reason != "upstream account ban" {
+		t.Fatalf("failure reason = %q", reason)
+	}
+	if code, _ := result["error_code"].(int); code != 40012 {
+		t.Fatalf("error code = %d, want 40012", code)
+	}
+	persisted, ok := store.AccountTestResult("batch@example.com")
+	if !ok || persisted.Phase != "token_refresh" || persisted.FailureReason != "upstream account ban" || persisted.ErrorCode != 40012 {
+		t.Fatalf("persisted test failure = %#v (ok=%v)", persisted, ok)
+	}
+}
+
 func TestDeleteAllSessions_RetryWithReloginOnDeleteFailure(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"accounts":[{"email":"batch@example.com","password":"pwd","token":"expired-token"}]}`)
 	store := config.LoadStore()
@@ -141,6 +192,35 @@ func TestDeleteAllSessions_RetryWithReloginOnDeleteFailure(t *testing.T) {
 	sessionCount, ok := store.AccountSessionCount("batch@example.com")
 	if !ok || sessionCount != 0 {
 		t.Fatalf("expected runtime session count reset to 0, got %d (ok=%v)", sessionCount, ok)
+	}
+}
+
+func TestDeleteAllSessionsLoginFailureAutomaticallyDisablesInvalidCredentials(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"accounts":[{"email":"invalid@example.com","password":"wrong"}]}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	ds := &testingDSMock{loginErr: &auth.AccountHealthError{
+		State:   account.HealthInvalidCredentials,
+		Message: "password rejected",
+	}}
+	h := &Handler{Store: store, Pool: pool, DS: ds}
+	req := httptest.NewRequest(http.MethodPost, "/delete-all", bytes.NewBufferString(`{"identifier":"invalid@example.com"}`))
+	rec := httptest.NewRecorder()
+	h.deleteAllSessions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if autoDisabled, _ := response["auto_disabled"].(bool); !autoDisabled {
+		t.Fatalf("expected auto_disabled response, got %#v", response)
+	}
+	acc, ok := store.FindAccount("invalid@example.com")
+	if !ok || !acc.Disabled || acc.DisabledReason != config.AccountDisabledInvalidCredentials {
+		t.Fatalf("expected invalid account to be disabled, got %#v, %v", acc, ok)
 	}
 }
 

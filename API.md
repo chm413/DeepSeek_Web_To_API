@@ -106,12 +106,15 @@ curl "http://127.0.0.1:5001/v1beta/models/gemini-2.5-pro:generateContent?key=you
 | `POST` | `/admin/config/import` | 导入配置 |
 | `GET` | `/admin/config/export` | 导出配置 |
 | `GET` / `POST` | `/admin/accounts` | 查询或新增账号 |
+| `POST` | `/admin/accounts/batch` | 批量校验、创建或更新账号；凭据不回显 |
 | `PUT` / `DELETE` | `/admin/accounts/{identifier}` | 更新或删除账号 |
 | `POST` | `/admin/accounts/test` | 测试单账号 |
 | `POST` | `/admin/accounts/test-all` | 批量测试账号 |
 | `GET` | `/admin/queue/status` | 账号池与队列状态 |
 | `GET` / `POST` | `/admin/proxies` | 查询或新增代理 |
 | `PUT` / `DELETE` | `/admin/proxies/{proxyID}` | 更新或删除代理 |
+| `POST` | `/admin/proxies/test` | 测试 SOCKS 或 Xray 代理连通性 |
+| `GET` / `PUT` | `/admin/proxies/core` | 查询 Xray core 状态或更新核心路径、运行目录和启动超时 |
 | `GET` | `/admin/chat-history` | 分页查看历史记录 |
 | `GET` | `/admin/chat-history/{id}` | 查看历史详情 |
 | `DELETE` | `/admin/chat-history` | 清空历史记录 |
@@ -136,6 +139,7 @@ X-DeepSeek-Web-To-API-Cache-Control: bypass
 ## 更多文档
 
 - [配置说明](docs/configuration.md)
+- [Xray 代理协议](docs/xray-proxy.md)
 - [API 兼容系统](docs/API%20Compatibility%20System/API%20Compatibility%20System.md)
 - [客户端兼容性](docs/client-compat/README.md)
 - [Prompt 兼容流程](docs/prompt-compatibility.md)

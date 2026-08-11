@@ -121,6 +121,20 @@ func (a *Affinity) Forget(key string) {
 	delete(a.bindings, key)
 }
 
+// ForgetAccount removes every session binding that points at accountID.
+func (a *Affinity) ForgetAccount(accountID string) {
+	if a == nil || accountID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key, entry := range a.bindings {
+		if entry != nil && entry.accountID == accountID {
+			delete(a.bindings, key)
+		}
+	}
+}
+
 // Stats returns the current binding count and configured TTL.
 func (a *Affinity) Stats() (count int, ttl time.Duration) {
 	if a == nil {

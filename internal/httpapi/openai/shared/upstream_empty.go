@@ -50,7 +50,7 @@ func PrepareEmptyOutputRetry(ctx context.Context, resolver any, ds DeepSeekCalle
 	if ds == nil {
 		return originalPow, true
 	}
-	if switcher, ok := resolver.(EmptyRetryAccountSwitcher); ok && a != nil && a.UseConfigToken {
+	if switcher, ok := resolver.(EmptyRetryAccountSwitcher); ok && a != nil && a.UseConfigToken && !IsPinnedCompletionPayload(basePayload) {
 		oldAccountID := strings.TrimSpace(a.AccountID)
 		for switchAttempt := 1; switchAttempt <= emptyOutputRetryAccountSwitchAttempts; switchAttempt++ {
 			if !switcher.SwitchAccount(ctx, a) {

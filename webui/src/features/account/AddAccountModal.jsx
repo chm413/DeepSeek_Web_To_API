@@ -73,6 +73,18 @@ export default function AddAccountModal({
                             onChange={e => setNewAccount({ ...newAccount, password: e.target.value })}
                         />
                     </div>
+                    <label className="flex items-center justify-between gap-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+                        <span>
+                            <span className="block text-sm font-medium">{t('accountManager.accountEnabledLabel')}</span>
+                            <span className="block text-xs text-muted-foreground">{t('accountManager.accountEnabledHint')}</span>
+                        </span>
+                        <input
+                            type="checkbox"
+                            checked={newAccount.enabled !== false}
+                            onChange={e => setNewAccount({ ...newAccount, enabled: e.target.checked })}
+                            className="h-4 w-4 accent-emerald-600"
+                        />
+                    </label>
                     <div className="flex justify-end gap-2 pt-2">
                         <button onClick={onClose} className="btn btn-secondary">{t('actions.cancel')}</button>
                         <button onClick={onAdd} disabled={loading} className="btn btn-primary">

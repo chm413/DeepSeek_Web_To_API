@@ -8,6 +8,8 @@ import (
 
 func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Get("/proxies", h.listProxies)
+	r.Get("/proxies/core", h.getProxyCore)
+	r.Put("/proxies/core", h.updateProxyCore)
 	r.Post("/proxies", h.addProxy)
 	r.Put("/proxies/{proxyID}", h.updateProxy)
 	r.Delete("/proxies/{proxyID}", h.deleteProxy)

@@ -1,6 +1,12 @@
 package promptcompat
 
-import "DeepSeek_Web_To_API/internal/config"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+
+	"DeepSeek_Web_To_API/internal/config"
+)
 
 type StandardRequest struct {
 	Surface        string
@@ -28,6 +34,8 @@ type StandardRequest struct {
 	CurrentInputCheckpointRefresh bool   // first turn or prefix-string mismatch — a fresh prefix was uploaded
 	ToolsRaw                      any
 	FinalPrompt                   string
+	IncrementalFormatPrompt       string
+	IncrementalSessionRotated     bool
 	ToolNames                     []string
 	ToolChoice                    ToolChoicePolicy
 	Stream                        bool
@@ -37,6 +45,31 @@ type StandardRequest struct {
 	RefFileIDs                    []string
 	RefFileTokens                 int
 	PassThrough                   map[string]any
+}
+
+func (r StandardRequest) IncrementalVariant() string {
+	payload := struct {
+		Surface      string
+		Model        string
+		Thinking     bool
+		Search       bool
+		FormatPrompt string
+		Tools        any
+		ToolChoice   ToolChoicePolicy
+		PassThrough  map[string]any
+	}{
+		Surface:      r.Surface,
+		Model:        r.ResolvedModel,
+		Thinking:     r.Thinking,
+		Search:       r.Search,
+		FormatPrompt: r.IncrementalFormatPrompt,
+		Tools:        r.ToolsRaw,
+		ToolChoice:   r.ToolChoice,
+		PassThrough:  r.PassThrough,
+	}
+	b, _ := json.Marshal(payload)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
 }
 
 type ToolChoiceMode string

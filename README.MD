@@ -24,6 +24,7 @@ DeepSeek_Web_To_API 是一个自托管的 Go 网关，把 DeepSeek Web 侧的会
 - **运维能力**：`/healthz`、`/readyz`、安全响应头、CORS、JSON UTF-8 入站校验、优雅退出。
 - **账号与历史记录**：账号池单独写入 `data/accounts.sqlite`；对话历史写入 SQLite，默认保留 2 万条，详情内容 gzip 压缩。
 - **管理台**：`/admin` 提供账号、代理、密钥、运行设置、对话历史、测试器、总览指标和新版本提醒。
+- **扩展代理协议**：可调用本机 Xray core 使用 VLESS、VMess、Hysteria2/HY2 分享链接；核心状态、路径和运行实例数可在代理管理页查看，节点 URI 不通过安全管理接口回显。
 
 ## 快速开始
 

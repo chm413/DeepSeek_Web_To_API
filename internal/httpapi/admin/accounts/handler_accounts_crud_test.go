@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"DeepSeek_Web_To_API/internal/account"
+	"DeepSeek_Web_To_API/internal/config"
 )
 
 func TestListAccountsPageSizeCapIs5000(t *testing.T) {
@@ -87,6 +90,41 @@ func TestUpdateAccountMetadataPreservesCredentials(t *testing.T) {
 	}
 }
 
+func TestUpdateAccountEnabledStatePersistsAndResetsPool(t *testing.T) {
+	h := newAdminTestHandler(t, `{
+		"accounts":[{"email":"u@example.com","password":"secret"}]
+	}`)
+	r := chi.NewRouter()
+	r.Put("/admin/accounts/{identifier}", h.updateAccount)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/accounts/u@example.com", strings.NewReader(`{"enabled":false}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	acc, ok := h.Store.FindAccount("u@example.com")
+	if !ok || !acc.Disabled || acc.DisabledReason != "manual" {
+		t.Fatalf("expected manually disabled account, got %#v, %v", acc, ok)
+	}
+	if pool, ok := h.Pool.(*account.Pool); ok {
+		if _, acquired := pool.Acquire("u@example.com", nil); acquired {
+			t.Fatal("disabled account remained acquirable")
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/accounts/u@example.com", strings.NewReader(`{"enabled":true}`))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	acc, ok = h.Store.FindAccount("u@example.com")
+	if !ok || acc.Disabled || acc.DisabledReason != "" || acc.DisabledAtUnix != 0 {
+		t.Fatalf("expected enabled account, got %#v, %v", acc, ok)
+	}
+}
+
 func TestListAccountsMasksTokenPreview(t *testing.T) {
 	h := newAdminTestHandler(t, `{
 		"accounts":[{"email":"u@example.com","password":"pwd"}]
@@ -144,5 +182,77 @@ func TestListAccountsReturnsRuntimeSessionCount(t *testing.T) {
 	first, _ := items[0].(map[string]any)
 	if got, _ := first["session_count"].(float64); got != 9 {
 		t.Fatalf("expected session_count 9, got %#v", first["session_count"])
+	}
+}
+
+func TestListAccountsReturnsDetailedRuntimeState(t *testing.T) {
+	h := newAdminTestHandler(t, `{
+		"runtime":{"account_max_inflight":2},
+		"accounts":[{"email":"busy@example.com","password":"pwd"}]
+	}`)
+	pool := h.Pool.(*account.Pool)
+	if _, ok := pool.Acquire("busy@example.com", nil); !ok {
+		t.Fatal("expected account acquisition")
+	}
+	defer pool.Release("busy@example.com")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/accounts?page=1&page_size=10", nil)
+	rec := httptest.NewRecorder()
+	h.listAccounts(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+	items, _ := payload["items"].([]any)
+	item, _ := items[0].(map[string]any)
+	if item["account_state"] != "busy" || item["runtime_state"] != "busy" {
+		t.Fatalf("unexpected account state: %#v", item)
+	}
+	if item["in_use"] != float64(1) || item["available_slots"] != float64(1) {
+		t.Fatalf("unexpected runtime counters: %#v", item)
+	}
+}
+
+func TestListAccountsReturnsLatestTestFailureDetail(t *testing.T) {
+	h := newAdminTestHandler(t, `{
+		"accounts":[{"email":"u@example.com","password":"pwd"}]
+	}`)
+	resultStore, ok := h.Store.(interface {
+		UpdateAccountTestResult(string, config.AccountTestResult) error
+	})
+	if !ok {
+		t.Fatal("handler store does not support runtime test result details")
+	}
+	if err := resultStore.UpdateAccountTestResult("u@example.com", config.AccountTestResult{
+		Status:        "failed",
+		Phase:         "token_refresh",
+		FailureReason: "login rejected by upstream",
+		ErrorCode:     40012,
+	}); err != nil {
+		t.Fatalf("seed runtime test result: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/accounts?page=1&page_size=10", nil)
+	rec := httptest.NewRecorder()
+	h.listAccounts(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	items, _ := payload["items"].([]any)
+	first, _ := items[0].(map[string]any)
+	detail, _ := first["test_result"].(map[string]any)
+	if got, _ := detail["phase"].(string); got != "token_refresh" {
+		t.Fatalf("test result phase = %q", got)
+	}
+	if got, _ := detail["failure_reason"].(string); got != "login rejected by upstream" {
+		t.Fatalf("test failure reason = %q", got)
+	}
+	if got, _ := detail["error_code"].(float64); got != 40012 {
+		t.Fatalf("test error code = %#v", detail["error_code"])
 	}
 }

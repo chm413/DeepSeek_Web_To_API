@@ -1,6 +1,10 @@
 package claude
 
-import "testing"
+import (
+	"testing"
+
+	"DeepSeek_Web_To_API/internal/config"
+)
 
 type mockClaudeConfig struct {
 	aliases map[string]string
@@ -10,6 +14,9 @@ func (m mockClaudeConfig) ModelAliases() map[string]string { return m.aliases }
 func (mockClaudeConfig) CompatStripReferenceMarkers() bool { return true }
 func (mockClaudeConfig) AutoDeleteMode() string            { return "none" }
 func (mockClaudeConfig) SafetyBlockMessage() string        { return "" }
+func (mockClaudeConfig) PromptLimitSnapshot() config.PromptLimitSettings {
+	return config.DefaultPromptLimitSettings()
+}
 
 func TestNormalizeClaudeRequestUsesGlobalAliasMapping(t *testing.T) {
 	req := map[string]any{

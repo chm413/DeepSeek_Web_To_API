@@ -46,6 +46,30 @@ func TestDetermineWithXAPIKeyUsesDirectToken(t *testing.T) {
 	}
 }
 
+func TestDetermineWithSessionDirectTokenKeepsStableConversationKey(t *testing.T) {
+	r := newTestResolver(t)
+	firstReq, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	firstReq.Header.Set("x-api-key", "direct-token")
+	first, err := r.DetermineWithSession(firstReq, []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"first question"}]}`))
+	if err != nil {
+		t.Fatalf("first determine failed: %v", err)
+	}
+
+	secondReq, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	secondReq.Header.Set("x-api-key", "direct-token")
+	second, err := r.DetermineWithSession(secondReq, []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"first question"},{"role":"assistant","content":"answer"},{"role":"user","content":"second question"}]}`))
+	if err != nil {
+		t.Fatalf("second determine failed: %v", err)
+	}
+
+	if first.SessionKey == "" {
+		t.Fatal("expected direct-token request to receive a session key")
+	}
+	if second.SessionKey != first.SessionKey {
+		t.Fatalf("expected a stable direct-token conversation key, got %q then %q", first.SessionKey, second.SessionKey)
+	}
+}
+
 func TestDetermineRejectsRecentlyInvalidDirectToken(t *testing.T) {
 	r := newTestResolver(t)
 	req, _ := http.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
@@ -465,6 +489,47 @@ func TestDetermineWithSessionResponsesInputReusesBoundAccount(t *testing.T) {
 	}
 	if a2.AccountID != a1.AccountID {
 		t.Fatalf("expected responses session-bound account %q, got %q", a1.AccountID, a2.AccountID)
+	}
+}
+
+func TestDetermineWithSessionKeyReusesOriginalResponsesBinding(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"acc1@example.com","password":"pwd","token":"token-1"},
+			{"email":"acc2@example.com","password":"pwd","token":"token-2"}
+		],
+		"runtime":{"account_max_inflight":8}
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+
+	firstReq, _ := http.NewRequest(http.MethodPost, "/v1/responses", nil)
+	firstReq.Header.Set("x-api-key", "managed-key")
+	first, err := resolver.DetermineWithSession(firstReq, []byte(`{"model":"deepseek-v4-flash","input":"first"}`))
+	if err != nil {
+		t.Fatalf("first determine failed: %v", err)
+	}
+	defer resolver.Release(first)
+	if first.SessionKey == "" {
+		t.Fatal("first request did not establish a session key")
+	}
+
+	secondReq, _ := http.NewRequest(http.MethodPost, "/v1/responses", nil)
+	secondReq.Header.Set("x-api-key", "managed-key")
+	second, err := resolver.DetermineWithSessionKey(secondReq, []byte(`{"model":"deepseek-v4-flash","previous_response_id":"resp_1","input":"second"}`), first.SessionKey)
+	if err != nil {
+		t.Fatalf("inherited determine failed: %v", err)
+	}
+	defer resolver.Release(second)
+	if second.SessionKey != first.SessionKey {
+		t.Fatalf("session key changed: first=%q second=%q", first.SessionKey, second.SessionKey)
+	}
+	if second.AccountID != first.AccountID {
+		t.Fatalf("inherited session moved accounts: first=%q second=%q", first.AccountID, second.AccountID)
 	}
 }
 

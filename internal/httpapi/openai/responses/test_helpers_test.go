@@ -25,4 +25,5 @@ func decodeJSONBody(t *testing.T, body string) map[string]any {
 func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Post("/v1/responses", h.Responses)
 	r.Get("/v1/responses/{response_id}", h.GetResponseByID)
+	r.Post("/v1/responses/compact", h.Compact)
 }

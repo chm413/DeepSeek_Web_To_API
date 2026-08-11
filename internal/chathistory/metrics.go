@@ -27,6 +27,11 @@ type TokenUsageStats struct {
 	TotalByModel   map[string]TokenUsageTotals `json:"total_by_model"`
 }
 
+type AccountTokenUsage struct {
+	TokenUsageTotals
+	ByModel map[string]TokenUsageTotals `json:"by_model"`
+}
+
 var FailureRateExcludedStatusCodes = []int{401, 403, 502, 504, 524}
 
 type OutcomeStats struct {
@@ -98,6 +103,55 @@ func (s *Store) TokenUsageStats(window time.Duration) (TokenUsageStats, error) {
 		}
 	}
 	return stats, nil
+}
+
+func (s *Store) AccountTokenUsageByAccount(window time.Duration) (map[string]AccountTokenUsage, error) {
+	if s == nil {
+		return nil, errors.New("chat history store is nil")
+	}
+	if s.sqlite != nil {
+		return s.sqlite.AccountTokenUsageByAccount(window)
+	}
+	if window <= 0 {
+		window = time.Minute
+	}
+	windowStart := time.Now().UnixMilli() - window.Milliseconds()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	result := map[string]AccountTokenUsage{}
+	for _, summary := range s.state.Items {
+		item := entryFromSummary(summary)
+		if cached, ok := s.details[summary.ID]; ok && strings.TrimSpace(cached.ID) != "" {
+			item = cached
+		}
+		accountID := strings.ToLower(strings.TrimSpace(item.AccountID))
+		if accountID == "" {
+			continue
+		}
+		refTime := item.CompletedAt
+		if refTime <= 0 {
+			refTime = item.CreatedAt
+		}
+		if refTime < windowStart {
+			continue
+		}
+
+		usage := tokenUsageFromMap(item.Usage)
+		usage.Requests = 1
+		current := result[accountID]
+		if current.ByModel == nil {
+			current.ByModel = map[string]TokenUsageTotals{}
+		}
+		current.add(usage)
+		addModelTotals(current.ByModel, normalizedMetricModel(item.Model), usage)
+		result[accountID] = current
+	}
+	return result, nil
 }
 
 func (s *Store) OutcomeStats() (OutcomeStats, error) {

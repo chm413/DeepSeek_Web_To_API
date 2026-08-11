@@ -10,7 +10,7 @@ import (
 	streamengine "DeepSeek_Web_To_API/internal/stream"
 )
 
-func (h *Handler) handleClaudeStreamRealtime(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, messages []any, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, historySessions ...*historycapture.Session) {
+func (h *Handler) handleClaudeStreamRealtime(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, messages []any, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, historySessions ...*historycapture.Session) claudeCompletionOutcome {
 	historySession := firstHistorySession(historySessions)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -20,7 +20,7 @@ func (h *Handler) handleClaudeStreamRealtime(w http.ResponseWriter, r *http.Requ
 			historySession.Error(resp.StatusCode, message, "error", "", "")
 		}
 		writeClaudeError(w, resp.StatusCode, message)
-		return
+		return claudeCompletionOutcome{}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -93,4 +93,9 @@ func (h *Handler) handleClaudeStreamRealtime(w http.ResponseWriter, r *http.Requ
 			}
 		},
 	})
+	if !streamRuntime.completed || streamRuntime.responseMessageID <= 0 || len(streamRuntime.finalContent) == 0 {
+		return claudeCompletionOutcome{}
+	}
+	responseMessages := normalizeClaudeResponseMessages(streamRuntime.finalContent)
+	return claudeCompletionOutcome{success: len(responseMessages) > 0, responseMessageID: streamRuntime.responseMessageID, responseMessages: responseMessages}
 }

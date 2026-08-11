@@ -11,10 +11,12 @@ import (
 
 	"DeepSeek_Web_To_API/internal/config"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
+	"DeepSeek_Web_To_API/internal/proxyuri"
+	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
-var proxyConnectivityTester = func(ctx context.Context, proxy config.Proxy) map[string]any {
-	return dsclient.TestProxyConnectivity(ctx, proxy)
+var proxyConnectivityTester = func(ctx context.Context, proxy config.Proxy, core config.ProxyCoreConfig) map[string]any {
+	return dsclient.TestProxyConnectivityWithCore(ctx, proxy, core)
 }
 
 func validateProxyMutation(cfg *config.Config) error {
@@ -37,6 +39,8 @@ func proxyResponse(proxy config.Proxy) map[string]any {
 		"port":         proxy.Port,
 		"username":     proxy.Username,
 		"has_password": strings.TrimSpace(proxy.Password) != "",
+		"has_uri":      strings.TrimSpace(proxy.URI) != "",
+		"core_managed": proxyuri.IsCoreType(proxy.Type),
 	}
 }
 
@@ -44,16 +48,7 @@ func (h *Handler) listProxies(w http.ResponseWriter, _ *http.Request) {
 	proxies := h.Store.Snapshot().Proxies
 	items := make([]map[string]any, 0, len(proxies))
 	for _, proxy := range proxies {
-		proxy = config.NormalizeProxy(proxy)
-		items = append(items, map[string]any{
-			"id":           proxy.ID,
-			"name":         proxy.Name,
-			"type":         proxy.Type,
-			"host":         proxy.Host,
-			"port":         proxy.Port,
-			"username":     proxy.Username,
-			"has_password": strings.TrimSpace(proxy.Password) != "",
-		})
+		items = append(items, proxyResponse(proxy))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
@@ -92,6 +87,10 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 			if proxy.Password == "" {
 				proxy.Password = existing.Password
 			}
+			if proxy.URI == "" && proxyuri.IsCoreType(proxy.Type) && proxy.Type == existing.Type {
+				proxy.URI = existing.URI
+			}
+			proxy = config.NormalizeProxy(proxy)
 			c.Proxies[i] = proxy
 			return validateProxyMutation(c)
 		}
@@ -105,6 +104,8 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	xrayproxy.Default().Stop(proxyID)
+	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "proxy": proxyResponse(proxy)})
 }
 
@@ -141,6 +142,8 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	xrayproxy.Default().Stop(proxyID)
+	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -161,7 +164,7 @@ func (h *Handler) testProxy(w http.ResponseWriter, r *http.Request) {
 		proxy = toProxy(req)
 	}
 
-	result := proxyConnectivityTester(r.Context(), proxy)
+	result := proxyConnectivityTester(r.Context(), proxy, h.Store.Snapshot().ProxyCore)
 	writeJSON(w, http.StatusOK, result)
 }
 

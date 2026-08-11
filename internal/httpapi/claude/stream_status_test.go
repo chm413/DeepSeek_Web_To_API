@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"DeepSeek_Web_To_API/internal/config"
+
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 )
@@ -28,6 +30,10 @@ func (streamStatusClaudeStoreStub) CompatStripReferenceMarkers() bool { return t
 func (streamStatusClaudeStoreStub) AutoDeleteMode() string { return "none" }
 
 func (streamStatusClaudeStoreStub) SafetyBlockMessage() string { return "" }
+
+func (streamStatusClaudeStoreStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	return config.DefaultPromptLimitSettings()
+}
 
 func captureClaudeStatusMiddleware(statuses *[]int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

@@ -3,6 +3,7 @@ package account
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"DeepSeek_Web_To_API/internal/config"
 )
@@ -13,6 +14,7 @@ type Pool struct {
 	queue                  []string
 	inUse                  map[string]int
 	waiters                []chan struct{}
+	health                 map[string]Health
 	maxInflightPerAccount  int
 	recommendedConcurrency int
 	maxQueueSize           int
@@ -28,6 +30,7 @@ func NewPool(store *config.Store) *Pool {
 	p := &Pool{
 		store:                 store,
 		inUse:                 map[string]int{},
+		health:                map[string]Health{},
 		maxInflightPerAccount: maxPer,
 		Affinity:              NewAffinity(),
 	}
@@ -47,6 +50,9 @@ func (p *Pool) Reset() {
 	})
 	ids := make([]string, 0, len(accounts))
 	for _, a := range accounts {
+		if a.Disabled {
+			continue
+		}
 		id := a.Identifier()
 		if id != "" {
 			ids = append(ids, id)
@@ -69,6 +75,18 @@ func (p *Pool) Reset() {
 	p.drainWaitersLocked()
 	p.queue = ids
 	p.inUse = map[string]int{}
+	if p.health == nil {
+		p.health = map[string]Health{}
+	}
+	active := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		active[id] = struct{}{}
+	}
+	for id := range p.health {
+		if _, ok := active[id]; !ok {
+			delete(p.health, id)
+		}
+	}
 	p.recommendedConcurrency = recommended
 	p.maxQueueSize = queueLimit
 	p.globalMaxInflight = globalLimit
@@ -109,7 +127,7 @@ func (p *Pool) Status() map[string]any {
 	inUseAccounts := make([]string, 0, len(p.inUse))
 	inUseSlots := 0
 	for _, id := range p.queue {
-		if p.inUse[id] < p.maxInflightPerAccount {
+		if _, blocked := p.accountHealthLocked(id); !blocked && p.inUse[id] < p.maxInflightPerAccount {
 			available = append(available, id)
 		}
 	}
@@ -119,11 +137,80 @@ func (p *Pool) Status() map[string]any {
 			inUseSlots += count
 		}
 	}
+	health := make(map[string]map[string]any, len(p.health))
+	for id, h := range p.health {
+		if isTransientHealth(h.State) && !h.Until.After(time.Now()) {
+			delete(p.health, id)
+			continue
+		}
+		item := map[string]any{
+			"state":      h.State,
+			"reason":     h.Reason,
+			"updated_at": h.UpdatedAt,
+		}
+		if !h.Until.IsZero() {
+			item["until"] = h.Until
+		}
+		health[id] = item
+	}
 	sort.Strings(inUseAccounts)
+	allAccounts := p.store.Accounts()
+	disabled := 0
+	runtimeAccounts := make(map[string]map[string]any, len(allAccounts))
+	stateCounts := map[string]int{
+		"idle": 0, "busy": 0, "saturated": 0, "disabled": 0,
+		"rate_limited": 0, "temporarily_muted": 0,
+		"invalid_credentials": 0, "permanently_banned": 0,
+	}
+	for _, acc := range allAccounts {
+		id := acc.Identifier()
+		inUse := p.inUse[id]
+		availableSlots := p.maxInflightPerAccount - inUse
+		if availableSlots < 0 {
+			availableSlots = 0
+		}
+		activityState := "idle"
+		if inUse >= p.maxInflightPerAccount {
+			activityState = "saturated"
+		} else if inUse > 0 {
+			activityState = "busy"
+		}
+		state := activityState
+		if acc.Disabled {
+			disabled++
+			switch acc.DisabledReason {
+			case config.AccountDisabledUpstreamBanned:
+				state = string(HealthPermanentlyBanned)
+			case config.AccountDisabledInvalidCredentials:
+				state = string(HealthInvalidCredentials)
+			default:
+				state = "disabled"
+			}
+			availableSlots = 0
+		} else if currentHealth, blocked := p.accountHealthLocked(id); blocked {
+			state = string(currentHealth.State)
+			availableSlots = 0
+		}
+		stateCounts[state]++
+		utilization := 0.0
+		if p.maxInflightPerAccount > 0 {
+			utilization = float64(inUse) * 100 / float64(p.maxInflightPerAccount)
+		}
+		runtimeAccounts[id] = map[string]any{
+			"state":               state,
+			"activity_state":      activityState,
+			"in_use":              inUse,
+			"max_inflight":        p.maxInflightPerAccount,
+			"available_slots":     availableSlots,
+			"utilization_percent": utilization,
+		}
+	}
 	return map[string]any{
 		"available":                len(available),
 		"in_use":                   inUseSlots,
-		"total":                    len(p.store.Accounts()),
+		"total":                    len(allAccounts),
+		"enabled":                  len(allAccounts) - disabled,
+		"disabled":                 disabled,
 		"available_accounts":       available,
 		"in_use_accounts":          inUseAccounts,
 		"max_inflight_per_account": p.maxInflightPerAccount,
@@ -131,5 +218,8 @@ func (p *Pool) Status() map[string]any {
 		"recommended_concurrency":  p.recommendedConcurrency,
 		"waiting":                  len(p.waiters),
 		"max_queue_size":           p.maxQueueSize,
+		"account_health":           health,
+		"account_runtime":          runtimeAccounts,
+		"state_counts":             stateCounts,
 	}
 }

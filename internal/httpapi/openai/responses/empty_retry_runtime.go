@@ -31,7 +31,13 @@ type responsesNonStreamResult struct {
 	responseMessageID     int
 }
 
-func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx context.Context, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) {
+type responsesCompletionOutcome struct {
+	success           bool
+	responseMessageID int
+	responseMessages  []any
+}
+
+func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx context.Context, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) responsesCompletionOutcome {
 	attempts := 0
 	currentResp := resp
 	usagePrompt := finalPrompt
@@ -41,7 +47,7 @@ func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx c
 	for {
 		result, ok := h.collectResponsesNonStreamAttempt(w, currentResp, responseID, model, usagePrompt, refFileTokens, thinkingEnabled, searchEnabled, toolNames, toolsRaw, historySession)
 		if !ok {
-			return
+			return responsesCompletionOutcome{}
 		}
 		accumulatedThinking += sse.TrimContinuationOverlap(accumulatedThinking, result.thinking)
 		accumulatedRawThinking += sse.TrimContinuationOverlap(accumulatedRawThinking, result.rawThinking)
@@ -54,8 +60,10 @@ func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx c
 		addRefFileTokensToUsage(result.body, refFileTokens)
 
 		if !shouldRetryResponsesNonStream(result, attempts) {
-			h.finishResponsesNonStreamResult(w, result, attempts, owner, responseID, toolChoice, traceID, historySession, usagePrompt, refFileTokens)
-			return
+			if h.finishResponsesNonStreamResult(w, result, attempts, owner, responseID, toolChoice, traceID, historySession, usagePrompt, refFileTokens) {
+				return responsesOutcomeFromBody(result.body, result.responseMessageID)
+			}
+			return responsesCompletionOutcome{}
 		}
 
 		attempts++
@@ -63,14 +71,22 @@ func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx c
 		retryPayload := clonePayloadForEmptyOutputRetry(payload, result.responseMessageID)
 		retryPow, prepared := h.prepareResponsesEmptyOutputRetry(ctx, a, payload, retryPayload, pow, attempts, false, historySession)
 		if !prepared {
-			h.finishResponsesNonStreamResult(w, result, attempts, owner, responseID, toolChoice, traceID, historySession, usagePrompt, refFileTokens)
-			return
+			if h.finishResponsesNonStreamResult(w, result, attempts, owner, responseID, toolChoice, traceID, historySession, usagePrompt, refFileTokens) {
+				return responsesOutcomeFromBody(result.body, result.responseMessageID)
+			}
+			return responsesCompletionOutcome{}
 		}
-		nextResp, err := h.DS.CallCompletion(ctx, a, retryPayload, retryPow, 3)
+		var nextResp *http.Response
+		var err error
+		if shared.IsPinnedCompletionPayload(payload) {
+			nextResp, err = shared.CallPinnedCompletion(ctx, h.DS, a, retryPayload, retryPow)
+		} else {
+			nextResp, err = h.DS.CallCompletion(ctx, a, retryPayload, retryPow, 3)
+		}
 		if err != nil {
 			writeCompletionCallError(w, historySession, err, result.thinking, result.text)
 			config.Logger.Warn("[openai_empty_retry] retry request failed", "surface", "responses", "stream", false, "retry_attempt", attempts, "error", err)
-			return
+			return responsesCompletionOutcome{}
 		}
 		usagePrompt = usagePromptWithEmptyOutputRetry(usagePrompt, attempts)
 		currentResp = nextResp
@@ -111,14 +127,14 @@ func (h *Handler) collectResponsesNonStreamAttempt(w http.ResponseWriter, resp *
 	}, true
 }
 
-func (h *Handler) finishResponsesNonStreamResult(w http.ResponseWriter, result responsesNonStreamResult, attempts int, owner, responseID string, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session, usagePrompt string, refFileTokens int) {
+func (h *Handler) finishResponsesNonStreamResult(w http.ResponseWriter, result responsesNonStreamResult, attempts int, owner, responseID string, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session, usagePrompt string, refFileTokens int) bool {
 	if len(result.parsed.Calls) == 0 && writeUpstreamEmptyOutputError(w, result.text, result.thinking, result.contentFilter) {
 		if historySession != nil {
 			status, message, code := upstreamEmptyOutputDetail(result.contentFilter, result.text, result.thinking)
 			historySession.Error(status, message, code, result.thinking, result.text)
 		}
 		config.Logger.Info("[openai_empty_retry] terminal empty output", "surface", "responses", "stream", false, "retry_attempts", attempts, "success_source", "none", "content_filter", result.contentFilter)
-		return
+		return false
 	}
 	logResponsesToolPolicyRejection(traceID, toolChoice, result.parsed, "text")
 	if toolChoice.IsRequired() && len(result.parsed.Calls) == 0 {
@@ -126,7 +142,7 @@ func (h *Handler) finishResponsesNonStreamResult(w http.ResponseWriter, result r
 			historySession.Error(http.StatusUnprocessableEntity, "tool_choice requires at least one valid tool call.", "tool_choice_violation", result.thinking, result.text)
 		}
 		writeOpenAIErrorWithCode(w, http.StatusUnprocessableEntity, "tool_choice requires at least one valid tool call.", "tool_choice_violation")
-		return
+		return false
 	}
 	h.getResponseStore().put(owner, responseID, result.body)
 	if historySession != nil {
@@ -138,6 +154,15 @@ func (h *Handler) finishResponsesNonStreamResult(w http.ResponseWriter, result r
 		source = "synthetic_retry"
 	}
 	config.Logger.Info("[openai_empty_retry] completed", "surface", "responses", "stream", false, "retry_attempts", attempts, "success_source", source)
+	return true
+}
+
+func responsesOutcomeFromBody(body map[string]any, responseMessageID int) responsesCompletionOutcome {
+	if responseMessageID <= 0 || body == nil {
+		return responsesCompletionOutcome{}
+	}
+	messages := promptcompat.NormalizeResponsesInputAsMessages(body["output"])
+	return responsesCompletionOutcome{success: len(messages) > 0, responseMessageID: responseMessageID, responseMessages: messages}
 }
 
 // shouldRetryResponsesNonStream — see chat counterpart for rationale.
@@ -152,13 +177,13 @@ func shouldRetryResponsesNonStream(result responsesNonStreamResult, attempts int
 		strings.TrimSpace(result.thinking) == ""
 }
 
-func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) {
+func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) responsesCompletionOutcome {
 	streamRuntime, initialType, ok := h.prepareResponsesStreamRuntime(w, resp, owner, responseID, model, finalPrompt, refFileTokens, thinkingEnabled, searchEnabled, toolNames, toolsRaw, toolChoice, traceID)
 	if !ok {
 		if historySession != nil {
 			historySession.Error(resp.StatusCode, "upstream response error", "error", "", "")
 		}
-		return
+		return responsesCompletionOutcome{}
 	}
 	attempts := 0
 	currentResp := resp
@@ -167,13 +192,13 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 		if terminalWritten {
 			recordResponsesStreamHistory(streamRuntime, historySession)
 			logResponsesStreamTerminal(streamRuntime, attempts)
-			return
+			return responsesOutcomeFromBody(streamRuntime.completedObject, streamRuntime.responseMessageID)
 		}
 		if !retryable || !emptyOutputRetryEnabled() || attempts >= emptyOutputRetryMaxAttempts() {
 			streamRuntime.finalize("stop", false)
 			recordResponsesStreamHistory(streamRuntime, historySession)
 			config.Logger.Info("[openai_empty_retry] terminal empty output", "surface", "responses", "stream", true, "retry_attempts", attempts, "success_source", "none", "error_code", streamRuntime.finalErrorCode)
-			return
+			return responsesCompletionOutcome{}
 		}
 		attempts++
 		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "responses", "stream", true, "retry_attempt", attempts, "parent_message_id", streamRuntime.responseMessageID)
@@ -183,20 +208,26 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 			streamRuntime.finalize("stop", false)
 			recordResponsesStreamHistory(streamRuntime, historySession)
 			config.Logger.Info("[openai_empty_retry] terminal empty output", "surface", "responses", "stream", true, "retry_attempts", attempts, "success_source", "none", "error_code", streamRuntime.finalErrorCode)
-			return
+			return responsesCompletionOutcome{}
 		}
-		nextResp, err := h.DS.CallCompletion(r.Context(), a, retryPayload, retryPow, 3)
+		var nextResp *http.Response
+		var err error
+		if shared.IsPinnedCompletionPayload(payload) {
+			nextResp, err = shared.CallPinnedCompletion(r.Context(), h.DS, a, retryPayload, retryPow)
+		} else {
+			nextResp, err = h.DS.CallCompletion(r.Context(), a, retryPayload, retryPow, 3)
+		}
 		if err != nil {
 			failResponsesStreamCompletionError(streamRuntime, historySession, err)
 			config.Logger.Warn("[openai_empty_retry] retry request failed", "surface", "responses", "stream", true, "retry_attempt", attempts, "error", err)
-			return
+			return responsesCompletionOutcome{}
 		}
 		if nextResp.StatusCode != http.StatusOK {
 			defer func() { _ = nextResp.Body.Close() }()
 			body, _ := io.ReadAll(nextResp.Body)
 			streamRuntime.failResponse(nextResp.StatusCode, strings.TrimSpace(string(body)), "error")
 			recordResponsesStreamHistory(streamRuntime, historySession)
-			return
+			return responsesCompletionOutcome{}
 		}
 		streamRuntime.finalPrompt = usagePromptWithEmptyOutputRetry(finalPrompt, attempts)
 		currentResp = nextResp

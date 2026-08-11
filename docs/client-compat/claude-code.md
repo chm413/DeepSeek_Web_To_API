@@ -444,6 +444,19 @@ data: {"type": "error", "error": {"type": "overloaded_error", "message": "Overlo
 
 Claude Code **频繁调用** count_tokens 进行 token 预算计算（用于触发上下文压缩 compact）。
 
+### 9.1 增量会话复用
+
+`/v1/messages` 在 `auto_delete.mode=none` 时支持与 Chat/Responses 相同的上游
+增量续接：服务端按 `X-Claude-Code-Session-Id`（或稳定的调用方、系统提示和
+首条用户消息指纹）定位逻辑会话，严格校验历史前缀后复用 DeepSeek
+`chat_session_id` 和父消息 ID。每次命中都发送新的强制输出格式提示词、当前工具
+契约以及本轮新增 role blocks；不会把旧 transcript 再放进提示词。工具调用和
+thinking 块会按实际输出记录，便于下一轮严格匹配。
+
+分支编辑、工具/思考设置改变、并发占用或 pinned completion 失败都会放弃增量租约；
+当前请求自动退回完整历史重放。缓存为进程内六小时 TTL、每个作用域最多八条分支，
+不跨进程重启保存。
+
 **请求格式（标准 `/v1/messages` body，去掉 `stream` 字段）：**
 
 ```json
@@ -627,7 +640,7 @@ Claude Code v2.x 相对于"标准 Anthropic SDK 用法"的核心超集特性：
 | 编号 | 改动要点 | 文件 | 当前问题 |
 |------|---------|------|---------|
 | P1-1 | 剥离 `cache_control.scope` 字段（防止转发给 DeepSeek 时出错）以及 `ttl`、`cache_edits` 等扩展字段 | `handler_utils_sanitize.go` | `sanitizeClaudeBlockForPrompt` 已删除整个 `cache_control` key，但如果 ds2api 日后需要透传 `cache_control` 到某些后端（如真实 Anthropic API），则需精细化：保留 `type` 字段，剥离 `scope`/`ttl`（或不被支持的字段） |
-| P1-2 | `betas` / `context_management` / `defer_loading` 等 Claude Code 专有字段不应泄漏到 DeepSeek 提示文本或报错 | `standard_request.go`, `handler_utils.go` | 测试用例 `TestNormalizeClaudeRequestSupportsClaudeCodeSystemBlocks` 验证了不泄漏，但应确保 `context_management.edits` 整体被静默忽略 |
+| P1-2 | `betas` / `context_management` / `defer_loading` 等 Claude Code 专有字段不应泄漏到 DeepSeek 提示文本或报错 | `standard_request.go`, `handler_utils.go` | `clear_thinking*` edits 会应用到规范化历史，其余不支持的 edits 被容忍且不泄漏 |
 | P1-3 | `message_delta.usage` 中必须包含 `output_tokens`（Claude Code 依赖此字段统计用量） | `stream_runtime_finalize.go:68` | ✅ 已实现，但需确认 `input_tokens` 在 `message_start` 中的准确性 |
 | P1-4 | 工具流式输入使用 `input_json_delta` + `partial_json`（不是旧版整体 `input` 对象） | `stream_runtime_finalize.go:104` | ✅ 已实现 `input_json_delta`，需确认 `content_block_start` 中的 `"input": {}` 占位符 |
 | P1-5 | `count_tokens` 端点：`?beta=true` 查询参数应被忽略（路由正则不含 query string，Go HTTP 已自动处理） | `handler_routes.go` | 已通过 chi 路由处理，无需额外修改 |

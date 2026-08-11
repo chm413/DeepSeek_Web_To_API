@@ -113,6 +113,13 @@ func (p *Pool) canAcquireIDLocked(accountID string) bool {
 	if accountID == "" {
 		return false
 	}
+	acc, ok := p.store.FindAccount(accountID)
+	if !ok || acc.Disabled {
+		return false
+	}
+	if _, blocked := p.accountHealthLocked(accountID); blocked {
+		return false
+	}
 	if p.inUse[accountID] >= p.maxInflightPerAccount {
 		return false
 	}

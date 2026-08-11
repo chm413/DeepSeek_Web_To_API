@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Pencil, Play, Plus, Shield, Trash2, X } from 'lucide-react'
+import { Cpu, Pencil, Play, Plus, RefreshCw, Save, Shield, Trash2, X } from 'lucide-react'
 import clsx from 'clsx'
 
 import { useI18n } from '../../i18n'
@@ -39,6 +39,13 @@ const EMPTY_FORM = {
     port: 1080,
     username: '',
     password: '',
+    uri: '',
+}
+
+const CORE_PROXY_TYPES = new Set(['vless', 'vmess', 'hysteria2'])
+
+function isCoreProxyType(type) {
+    return CORE_PROXY_TYPES.has(String(type || '').toLowerCase())
 }
 
 function createEmptyProxyForm() {
@@ -122,6 +129,12 @@ function ProxiesTable({
                                                 {proxy.username}
                                             </span>
                                         )}
+                                        {proxy.core_managed && (
+                                            <span className="inline-flex items-center gap-1 rounded-full border border-cyan-300/60 bg-cyan-50 px-2 py-1 text-[10px] font-medium text-cyan-700">
+                                                <Cpu className="w-3 h-3" />
+                                                Xray
+                                            </span>
+                                        )}
                                         <ProxyStatusBadge t={t} result={result} testing={testing[proxy.id]} />
                                     </div>
                                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -172,6 +185,82 @@ function ProxiesTable({
     )
 }
 
+function CoreStatusPanel({ t, status, form, setForm, loading, onRefresh, onSave }) {
+    const available = Boolean(status?.available)
+    return (
+        <div className="ops-panel overflow-hidden" data-testid="xray-core-status">
+            <div className="flex flex-col gap-3 border-b border-border px-4 py-3 md:flex-row md:items-center md:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-cyan-200 bg-cyan-50 text-cyan-700">
+                        <Cpu className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <h2 className="text-sm font-black">{t('proxyManager.coreTitle')}</h2>
+                            <span className={clsx(
+                                'rounded-full border px-2 py-0.5 text-[10px] font-bold',
+                                available
+                                    ? 'border-emerald-300/60 bg-emerald-50 text-emerald-700'
+                                    : 'border-amber-300/60 bg-amber-50 text-amber-700',
+                            )}>
+                                {available ? t('proxyManager.coreAvailable') : t('proxyManager.coreUnavailable')}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground tabular-nums">
+                                {t('proxyManager.coreRunning', { count: Number(status?.running_instances) || 0 })}
+                            </span>
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground" title={status?.binary_path || status?.error || ''}>
+                            {status?.version || status?.error || t('proxyManager.coreAutoDetect')}
+                        </div>
+                    </div>
+                </div>
+                <div className="flex items-center gap-2">
+                    <button type="button" onClick={onRefresh} className="btn btn-secondary btn-sm px-2" title={t('proxyManager.coreRefresh')}>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                    </button>
+                    <button type="button" onClick={onSave} disabled={loading} className="btn btn-primary btn-sm">
+                        <Save className="h-3.5 w-3.5" />
+                        {loading ? t('proxyManager.saving') : t('proxyManager.coreSave')}
+                    </button>
+                </div>
+            </div>
+            <div className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(260px,1.4fr)_minmax(220px,1fr)_150px]">
+                <div>
+                    <label className="mb-1 block text-xs font-bold text-muted-foreground">{t('proxyManager.coreBinaryPath')}</label>
+                    <input
+                        type="text"
+                        className="input-field h-9 min-h-9 text-xs"
+                        value={form.xray_binary_path}
+                        onChange={event => setForm({ ...form, xray_binary_path: event.target.value })}
+                        placeholder={t('proxyManager.coreBinaryPlaceholder')}
+                    />
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs font-bold text-muted-foreground">{t('proxyManager.coreRuntimeDir')}</label>
+                    <input
+                        type="text"
+                        className="input-field h-9 min-h-9 text-xs"
+                        value={form.runtime_dir}
+                        onChange={event => setForm({ ...form, runtime_dir: event.target.value })}
+                        placeholder={t('proxyManager.coreRuntimePlaceholder')}
+                    />
+                </div>
+                <div>
+                    <label className="mb-1 block text-xs font-bold text-muted-foreground">{t('proxyManager.coreStartupTimeout')}</label>
+                    <input
+                        type="number"
+                        min="1"
+                        max="60"
+                        className="input-field h-9 min-h-9 text-xs"
+                        value={form.startup_timeout_seconds}
+                        onChange={event => setForm({ ...form, startup_timeout_seconds: Number(event.target.value) || 0 })}
+                    />
+                </div>
+            </div>
+        </div>
+    )
+}
+
 function ProxyFormModal({
     show,
     t,
@@ -198,6 +287,7 @@ function ProxyFormModal({
     if (!show) {
         return null
     }
+    const coreManaged = isCoreProxyType(form.type)
 
     const modal = (
         <div
@@ -249,62 +339,84 @@ function ProxyFormModal({
                             >
                                 <option value="socks5">socks5</option>
                                 <option value="socks5h">socks5h</option>
+                                <option value="vless">VLESS</option>
+                                <option value="vmess">VMess</option>
+                                <option value="hysteria2">Hysteria2 / HY2</option>
                             </select>
                         </div>
                     </div>
 
-                    <div className="grid md:grid-cols-[1fr_128px] gap-4">
+                    {coreManaged ? (
                         <div>
-                            <label className="block text-sm font-medium mb-1.5">{t('proxyManager.hostLabel')}</label>
-                            <input
-                                type="text"
-                                className="input-field"
-                                placeholder={t('proxyManager.hostPlaceholder')}
-                                value={form.host}
-                                onChange={e => setForm({ ...form, host: e.target.value })}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium mb-1.5">{t('proxyManager.portLabel')}</label>
-                            <input
-                                type="number"
-                                min="1"
-                                max="65535"
-                                className="input-field"
-                                value={form.port}
-                                onChange={e => setForm({ ...form, port: Number(e.target.value) || '' })}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="grid md:grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-sm font-medium mb-1.5">{t('proxyManager.usernameLabel')}</label>
-                            <input
-                                type="text"
-                                className="input-field"
-                                placeholder={t('proxyManager.usernamePlaceholder')}
-                                value={form.username}
-                                onChange={e => setForm({ ...form, username: e.target.value })}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium mb-1.5">{t('proxyManager.passwordLabel')}</label>
+                            <label className="block text-sm font-medium mb-1.5">{t('proxyManager.nodeUriLabel')}</label>
                             <input
                                 type="password"
-                                className="input-field bg-card"
-                                placeholder={t('proxyManager.passwordPlaceholder')}
-                                value={form.password}
-                                onChange={e => setForm({ ...form, password: e.target.value })}
+                                autoComplete="new-password"
+                                className="input-field bg-card font-mono text-xs"
+                                placeholder={t('proxyManager.nodeUriPlaceholder', { type: form.type })}
+                                value={form.uri}
+                                onChange={e => setForm({ ...form, uri: e.target.value })}
                             />
-                            {isEditing && (
-                                <p className="mt-1 text-[11px] text-muted-foreground">{t('proxyManager.passwordKeepHint')}</p>
+                            {isEditing && form.uri === '' && (
+                                <p className="mt-1 text-[11px] text-muted-foreground">{t('proxyManager.nodeUriKeepHint')}</p>
                             )}
                         </div>
-                    </div>
+                    ) : (
+                        <>
+                            <div className="grid md:grid-cols-[1fr_128px] gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-1.5">{t('proxyManager.hostLabel')}</label>
+                                    <input
+                                        type="text"
+                                        className="input-field"
+                                        placeholder={t('proxyManager.hostPlaceholder')}
+                                        value={form.host}
+                                        onChange={e => setForm({ ...form, host: e.target.value })}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-1.5">{t('proxyManager.portLabel')}</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="65535"
+                                        className="input-field"
+                                        value={form.port}
+                                        onChange={e => setForm({ ...form, port: Number(e.target.value) || '' })}
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="grid md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-1.5">{t('proxyManager.usernameLabel')}</label>
+                                    <input
+                                        type="text"
+                                        className="input-field"
+                                        placeholder={t('proxyManager.usernamePlaceholder')}
+                                        value={form.username}
+                                        onChange={e => setForm({ ...form, username: e.target.value })}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-1.5">{t('proxyManager.passwordLabel')}</label>
+                                    <input
+                                        type="password"
+                                        className="input-field bg-card"
+                                        placeholder={t('proxyManager.passwordPlaceholder')}
+                                        value={form.password}
+                                        onChange={e => setForm({ ...form, password: e.target.value })}
+                                    />
+                                    {isEditing && (
+                                        <p className="mt-1 text-[11px] text-muted-foreground">{t('proxyManager.passwordKeepHint')}</p>
+                                    )}
+                                </div>
+                            </div>
+                        </>
+                    )}
 
                     <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                        {t('proxyManager.typeHelp')}
+                        {t(coreManaged ? 'proxyManager.coreTypeHelp' : 'proxyManager.typeHelp')}
                     </div>
 
                     <div className="flex justify-end gap-2 pt-2">
@@ -344,8 +456,31 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
     const [saving, setSaving] = useState(false)
     const [testing, setTesting] = useState({})
     const [testResults, setTestResults] = useState({})
+    const [coreStatus, setCoreStatus] = useState(null)
+    const [coreForm, setCoreForm] = useState({ xray_binary_path: '', runtime_dir: '', startup_timeout_seconds: 10 })
+    const [savingCore, setSavingCore] = useState(false)
 
     const proxies = config?.proxies || []
+
+    const loadCoreStatus = async () => {
+        try {
+            const res = await apiFetch('/admin/proxies/core')
+            const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
+            if (!res.ok) return
+            setCoreStatus(data.status || null)
+            setCoreForm({
+                xray_binary_path: data.config?.xray_binary_path || '',
+                runtime_dir: data.config?.runtime_dir || '',
+                startup_timeout_seconds: Number(data.config?.startup_timeout_seconds) || 10,
+            })
+        } catch (_err) {
+            setCoreStatus(null)
+        }
+    }
+
+    useEffect(() => {
+        loadCoreStatus()
+    }, [])
 
     const openCreate = () => {
         setEditingProxy(null)
@@ -362,6 +497,7 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
             port: proxy.port || 1080,
             username: proxy.username || '',
             password: '',
+            uri: '',
         })
         setShowModal(true)
     }
@@ -373,7 +509,8 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
     }
 
     const saveProxy = async () => {
-        if (!form.host || !form.port) {
+        const coreManaged = isCoreProxyType(form.type)
+        if ((!coreManaged && (!form.host || !form.port)) || (coreManaged && !form.uri && !editingProxy?.has_uri)) {
             onMessage('error', t('proxyManager.requiredFields'))
             return
         }
@@ -393,6 +530,7 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
                     port: Number(form.port),
                     username: form.username,
                     password: form.password,
+                    uri: form.uri,
                 }),
             })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
@@ -407,6 +545,29 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
             onMessage('error', err?.message || t('messages.networkError'))
         } finally {
             setSaving(false)
+        }
+    }
+
+    const saveCoreSettings = async () => {
+        setSavingCore(true)
+        try {
+            const res = await apiFetch('/admin/proxies/core', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(coreForm),
+            })
+            const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return
+            }
+            setCoreStatus(data.status || null)
+            await onRefresh?.()
+            onMessage('success', t('proxyManager.coreSaved'))
+        } catch (err) {
+            onMessage('error', err?.message || t('messages.networkError'))
+        } finally {
+            setSavingCore(false)
         }
     }
 
@@ -451,14 +612,24 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
 
     return (
         <div className="space-y-6">
+            <CoreStatusPanel
+                t={t}
+                status={coreStatus}
+                form={coreForm}
+                setForm={setCoreForm}
+                loading={savingCore}
+                onRefresh={loadCoreStatus}
+                onSave={saveCoreSettings}
+            />
+
             <div className="grid gap-4 md:grid-cols-3">
                 <div className="metric-tile">
                     <div className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider">{t('proxyManager.totalProxies')}</div>
                     <div className="mt-2 text-2xl font-bold">{proxies.length}</div>
                 </div>
                 <div className="metric-tile">
-                    <div className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider">{t('proxyManager.socks5hCount')}</div>
-                    <div className="mt-2 text-2xl font-bold">{proxies.filter(proxy => proxy.type === 'socks5h').length}</div>
+                    <div className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider">{t('proxyManager.coreProxyCount')}</div>
+                    <div className="mt-2 text-2xl font-bold">{proxies.filter(proxy => proxy.core_managed || isCoreProxyType(proxy.type)).length}</div>
                 </div>
                 <div className="metric-tile">
                     <div className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider">{t('proxyManager.authProxyCount')}</div>

@@ -1,24 +1,20 @@
 package metrics
 
 import (
-	"strings"
 	"time"
 
 	"DeepSeek_Web_To_API/internal/chathistory"
+	"DeepSeek_Web_To_API/internal/usagepricing"
 )
 
 const (
-	pricingSourceURL = "https://api-docs.deepseek.com/quick_start/pricing"
-	pricingCurrency  = "USD"
+	pricingSourceURL = usagepricing.SourceURL
+	pricingCurrency  = usagepricing.Currency
 )
 
-var proDiscountEndsAt = time.Date(2026, 5, 31, 15, 59, 0, 0, time.UTC)
+var proDiscountEndsAt = usagepricing.ProDiscountEndsAt
 
-type modelPricing struct {
-	InputCacheHitPerMillion  float64 `json:"input_cache_hit_per_1m"`
-	InputCacheMissPerMillion float64 `json:"input_cache_miss_per_1m"`
-	OutputPerMillion         float64 `json:"output_per_1m"`
-}
+type modelPricing = usagepricing.ModelPricing
 
 type costBreakdown struct {
 	Currency       string                  `json:"currency"`
@@ -54,36 +50,9 @@ func buildCostBreakdown(stats chathistory.TokenUsageStats, now time.Time) costBr
 }
 
 func calculateCostUSD(byModel map[string]chathistory.TokenUsageTotals, now time.Time) float64 {
-	var total float64
-	for model, usage := range byModel {
-		price := priceForModel(model, now)
-		hit := float64(usage.CacheHitInputTokens) * price.InputCacheHitPerMillion
-		miss := float64(usage.CacheMissInputTokens) * price.InputCacheMissPerMillion
-		output := float64(usage.OutputTokens) * price.OutputPerMillion
-		total += (hit + miss + output) / 1_000_000
-	}
-	return total
+	return usagepricing.CalculateUSD(byModel, now)
 }
 
 func priceForModel(model string, now time.Time) modelPricing {
-	normalized := strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(normalized, "pro") {
-		if now.UTC().Before(proDiscountEndsAt) {
-			return modelPricing{
-				InputCacheHitPerMillion:  0.003625,
-				InputCacheMissPerMillion: 0.435,
-				OutputPerMillion:         0.87,
-			}
-		}
-		return modelPricing{
-			InputCacheHitPerMillion:  0.0145,
-			InputCacheMissPerMillion: 1.74,
-			OutputPerMillion:         3.48,
-		}
-	}
-	return modelPricing{
-		InputCacheHitPerMillion:  0.0028,
-		InputCacheMissPerMillion: 0.14,
-		OutputPerMillion:         0.28,
-	}
+	return usagepricing.PriceForModel(model, now)
 }

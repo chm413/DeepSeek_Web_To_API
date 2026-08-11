@@ -60,6 +60,10 @@ func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAt
 		}
 
 		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			return stats, healthErr
+		}
 		if status == http.StatusOK && code == 0 && bizCode == 0 {
 			data, _ := resp["data"].(map[string]any)
 			bizData, _ := data["biz_data"].(map[string]any)
@@ -86,8 +90,8 @@ func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAt
 		config.Logger.Warn("[get_session_count] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "account", a.AccountID)
 
 		if a.UseConfigToken {
-			if isTokenInvalid(status, code, bizCode, msg, bizMsg) && !refreshed {
-				if c.Auth.RefreshToken(ctx, a) {
+			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
+				if c.refreshManagedToken(ctx, a, status, code, bizCode, msg, bizMsg) {
 					refreshed = true
 					continue
 				}
@@ -109,43 +113,57 @@ func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAt
 // GetSessionCountForToken 直接使用 token 获取会话数量（直通模式）
 func (c *Client) GetSessionCountForToken(ctx context.Context, token string) (*SessionStats, error) {
 	clients := c.requestClientsFromContext(ctx)
-	headers := c.authHeaders(token)
 	reqURL := dsprotocol.DeepSeekFetchSessionURL + "?lte_cursor.pinned=false"
+	requestToken := token
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := c.authHeaders(requestToken)
 
-	resp, status, err := c.getJSONWithStatus(ctx, clients.regular, reqURL, headers)
-	if err != nil {
-		return nil, err
-	}
-
-	code, bizCode, msg, bizMsg := extractResponseStatus(resp)
-	if status != http.StatusOK || code != 0 || bizCode != 0 {
-		if strings.TrimSpace(bizMsg) != "" {
-			msg = bizMsg
+		resp, status, err := c.getJSONWithStatus(ctx, clients.regular, reqURL, headers)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
-	}
 
-	data, _ := resp["data"].(map[string]any)
-	bizData, _ := data["biz_data"].(map[string]any)
-	chatSessions, _ := bizData["chat_sessions"].([]any)
-	hasMore, _ := bizData["has_more"].(bool)
+		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimitedFromContext(ctx, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealthFromContext(ctx, code, bizCode, msg, bizMsg); healthErr != nil {
+			return nil, healthErr
+		}
+		if status != http.StatusOK || code != 0 || bizCode != 0 {
+			if attempt == 0 {
+				if refreshedToken, ok := c.refreshManagedTokenFromContext(ctx, status, code, bizCode, msg, bizMsg); ok {
+					requestToken = refreshedToken
+					continue
+				}
+			}
+			if strings.TrimSpace(bizMsg) != "" {
+				msg = bizMsg
+			}
+			return nil, fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
+		}
 
-	stats := &SessionStats{
-		FirstPageCount: len(chatSessions),
-		HasMore:        hasMore,
-		Success:        true,
-	}
+		data, _ := resp["data"].(map[string]any)
+		bizData, _ := data["biz_data"].(map[string]any)
+		chatSessions, _ := bizData["chat_sessions"].([]any)
+		hasMore, _ := bizData["has_more"].(bool)
 
-	// 统计置顶会话数量
-	for _, session := range chatSessions {
-		if s, ok := session.(map[string]any); ok {
-			if pinned, ok := s["pinned"].(bool); ok && pinned {
-				stats.PinnedCount++
+		stats := &SessionStats{
+			FirstPageCount: len(chatSessions),
+			HasMore:        hasMore,
+			Success:        true,
+		}
+
+		// 统计置顶会话数量
+		for _, session := range chatSessions {
+			if s, ok := session.(map[string]any); ok {
+				if pinned, ok := s["pinned"].(bool); ok && pinned {
+					stats.PinnedCount++
+				}
 			}
 		}
-	}
 
-	return stats, nil
+		return stats, nil
+	}
+	return nil, errors.New("request failed after token refresh")
 }
 
 // GetSessionCountAll 获取所有账号的会话数量统计
@@ -154,6 +172,9 @@ func (c *Client) GetSessionCountAll(ctx context.Context) []*SessionStats {
 	results := make([]*SessionStats, 0, len(accounts))
 
 	for _, acc := range accounts {
+		if acc.Disabled {
+			continue
+		}
 		token := acc.Token
 		accountID := acc.Email
 		if accountID == "" {
@@ -163,7 +184,7 @@ func (c *Client) GetSessionCountAll(ctx context.Context) []*SessionStats {
 		// 如果没有 token，尝试登录获取
 		if token == "" {
 			var err error
-			token, err = c.Login(auth.WithAuth(ctx, &auth.RequestAuth{AccountID: acc.Identifier(), Account: acc}), acc)
+			token, err = c.Login(auth.WithAuth(ctx, &auth.RequestAuth{UseConfigToken: true, AccountID: acc.Identifier(), Account: acc}), acc)
 			if err != nil {
 				results = append(results, &SessionStats{
 					AccountID:    accountID,
@@ -174,7 +195,7 @@ func (c *Client) GetSessionCountAll(ctx context.Context) []*SessionStats {
 			}
 		}
 
-		ctxWithAuth := auth.WithAuth(ctx, &auth.RequestAuth{AccountID: acc.Identifier(), Account: acc, DeepSeekToken: token})
+		ctxWithAuth := auth.WithAuth(ctx, &auth.RequestAuth{UseConfigToken: true, AccountID: acc.Identifier(), Account: acc, DeepSeekToken: token})
 		stats, err := c.GetSessionCountForToken(ctxWithAuth, token)
 		if err != nil {
 			results = append(results, &SessionStats{
@@ -195,7 +216,6 @@ func (c *Client) GetSessionCountAll(ctx context.Context) []*SessionStats {
 // FetchSessionPage 获取会话列表（支持分页）
 func (c *Client) FetchSessionPage(ctx context.Context, a *auth.RequestAuth, cursor string) ([]SessionInfo, bool, error) {
 	clients := c.requestClientsForAuth(ctx, a)
-	headers := c.authHeaders(a.DeepSeekToken)
 
 	// 构建请求 URL
 	params := url.Values{}
@@ -205,37 +225,50 @@ func (c *Client) FetchSessionPage(ctx context.Context, a *auth.RequestAuth, curs
 	}
 	reqURL := dsprotocol.DeepSeekFetchSessionURL + "?" + params.Encode()
 
-	resp, status, err := c.getJSONWithStatus(ctx, clients.regular, reqURL, headers)
-	if err != nil {
-		return nil, false, err
-	}
-
-	code := intFrom(resp["code"])
-	if status != http.StatusOK || code != 0 {
-		msg, _ := resp["msg"].(string)
-		return nil, false, fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
-	}
-
-	data, _ := resp["data"].(map[string]any)
-	bizData, _ := data["biz_data"].(map[string]any)
-	chatSessions, _ := bizData["chat_sessions"].([]any)
-	hasMore, _ := bizData["has_more"].(bool)
-
-	sessions := make([]SessionInfo, 0, len(chatSessions))
-	for _, s := range chatSessions {
-		if m, ok := s.(map[string]any); ok {
-			session := SessionInfo{
-				ID:        stringFromMap(m, "id"),
-				Title:     stringFromMap(m, "title"),
-				TitleType: stringFromMap(m, "title_type"),
-				Pinned:    boolFromMap(m, "pinned"),
-				UpdatedAt: floatFromMap(m, "updated_at"),
-			}
-			sessions = append(sessions, session)
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := c.authHeaders(a.DeepSeekToken)
+		resp, status, err := c.getJSONWithStatus(ctx, clients.regular, reqURL, headers)
+		if err != nil {
+			return nil, false, err
 		}
-	}
 
-	return sessions, hasMore, nil
+		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
+		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
+			return nil, false, healthErr
+		}
+		if status != http.StatusOK || code != 0 || bizCode != 0 {
+			if attempt == 0 && c.refreshManagedToken(ctx, a, status, code, bizCode, msg, bizMsg) {
+				continue
+			}
+			if strings.TrimSpace(bizMsg) != "" {
+				msg = bizMsg
+			}
+			return nil, false, fmt.Errorf("request failed: status=%d, code=%d, msg=%s", status, code, msg)
+		}
+
+		data, _ := resp["data"].(map[string]any)
+		bizData, _ := data["biz_data"].(map[string]any)
+		chatSessions, _ := bizData["chat_sessions"].([]any)
+		hasMore, _ := bizData["has_more"].(bool)
+
+		sessions := make([]SessionInfo, 0, len(chatSessions))
+		for _, s := range chatSessions {
+			if m, ok := s.(map[string]any); ok {
+				session := SessionInfo{
+					ID:        stringFromMap(m, "id"),
+					Title:     stringFromMap(m, "title"),
+					TitleType: stringFromMap(m, "title_type"),
+					Pinned:    boolFromMap(m, "pinned"),
+					UpdatedAt: floatFromMap(m, "updated_at"),
+				}
+				sessions = append(sessions, session)
+			}
+		}
+
+		return sessions, hasMore, nil
+	}
+	return nil, false, errors.New("request failed after token refresh")
 }
 
 // 辅助函数

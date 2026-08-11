@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/proxyuri"
 )
 
 func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
@@ -19,6 +20,11 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 		"env_writeback_enabled": h.Store.IsEnvWritebackEnabled(),
 		"config_path":           h.Store.ConfigPath(),
 		"model_aliases":         snap.ModelAliases,
+		"proxy_core": map[string]any{
+			"xray_binary_path":        snap.ProxyCore.XrayBinaryPath,
+			"runtime_dir":             snap.ProxyCore.RuntimeDir,
+			"startup_timeout_seconds": snap.ProxyCore.StartupTimeoutSeconds,
+		},
 	}
 	accounts := make([]map[string]any, 0, len(snap.Accounts))
 	for _, acc := range snap.Accounts {
@@ -47,6 +53,8 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 			"port":         proxy.Port,
 			"username":     proxy.Username,
 			"has_password": strings.TrimSpace(proxy.Password) != "",
+			"has_uri":      strings.TrimSpace(proxy.URI) != "",
+			"core_managed": proxyuri.IsCoreType(proxy.Type),
 		})
 	}
 	safe["proxies"] = proxies

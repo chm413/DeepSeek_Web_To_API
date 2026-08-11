@@ -158,13 +158,19 @@ func normalizeResponsesInputItemWithState(m map[string]any, callNameByID map[str
 				"content": txt,
 			}
 		}
-	case "compaction", "reasoning":
-		// Codex CLI inserts these synthetic items in the input array to carry
-		// server-side encrypted state across turns. We do not own that state
-		// (no Responses store on the upstream DeepSeek side), so we skip the
-		// item silently rather than forwarding the encrypted blob into the
-		// prompt or returning 400. Returning nil here lets the caller drop
-		// the entry from the normalized message stream.
+	case "compaction", "compaction_summary":
+		// Preserve a client-visible summary when supplied. Never stringify
+		// provider-owned encrypted state into the DeepSeek prompt.
+		for _, key := range []string{"summary", "text", "content"} {
+			if text := normalizeResponsesCompactionText(m[key]); text != "" {
+				return map[string]any{"role": "system", "content": text}
+			}
+		}
+		return nil
+	case "context_compaction", "compaction_trigger", "reasoning":
+		// Reasoning items are provider-owned state. DeepSeek cannot consume
+		// their encrypted form, and compaction triggers are control items, so
+		// omit them instead of fabricating prompt content.
 		return nil
 	}
 
@@ -183,6 +189,34 @@ func normalizeResponsesInputItemWithState(m map[string]any, callNameByID map[str
 		}
 	}
 	return nil
+}
+
+func normalizeResponsesCompactionText(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				if text := strings.TrimSpace(asString(m["text"])); text != "" {
+					parts = append(parts, text)
+				}
+				continue
+			}
+			if text := strings.TrimSpace(asString(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	case map[string]any:
+		for _, key := range []string{"text", "summary", "content"} {
+			if text := normalizeResponsesCompactionText(v[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func normalizeResponsesAssistantMessage(m map[string]any) map[string]any {

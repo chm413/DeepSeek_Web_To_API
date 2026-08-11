@@ -24,6 +24,7 @@ Current version: **v1.0.13** · Self-hosted, see [docs/deployment.md](docs/deplo
 - **Operations**: `/healthz`, `/readyz`, security response headers, CORS, JSON UTF-8 inbound validation, graceful shutdown.
 - **SQLite chat history** with gzip-compressed detail blobs and a default 20,000-record retention limit.
 - **Admin console** served from `/admin`.
+- **Extended proxy protocols** through a local Xray core: VLESS, VMess, and Hysteria2/HY2 node URIs, with core status/version reporting and secret-safe admin responses. See [Xray proxy protocols](docs/xray-proxy.md).
 
 ## Quick Start
 

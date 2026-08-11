@@ -99,6 +99,13 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			}
 			cfg.TokenRefreshIntervalHours = n
 		}
+		if v, exists := raw["account_health_check_interval_minutes"]; exists {
+			n := intFrom(v)
+			if err := config.ValidateIntRange("runtime.account_health_check_interval_minutes", n, 1, 1440, false); err != nil {
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+			}
+			cfg.AccountHealthCheckIntervalMinutes = n
+		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
 			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}
@@ -329,6 +336,73 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 	}
 
 	return adminCfg, runtimeCfg, compatCfg, respCfg, embCfg, cacheCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, safetyCfg, aliasMap, nil
+}
+
+func parsePromptLimitUpdate(req map[string]any) (*config.PromptLimitConfig, error) {
+	raw, ok := req["prompt_limit"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	cfg := &config.PromptLimitConfig{}
+	if v, exists := raw["enabled"]; exists {
+		b := boolFrom(v)
+		cfg.Enabled = &b
+	}
+	if v, exists := raw["max_chars_default"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.max_chars_default", n, 1, 10000000, true); err != nil {
+			return nil, err
+		}
+		cfg.MaxCharsDefault = n
+	}
+	if v, exists := raw["max_chars_expert"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.max_chars_expert", n, 1, 1000000, true); err != nil {
+			return nil, err
+		}
+		cfg.MaxCharsExpert = n
+	}
+	if v, exists := raw["auto_compress_enabled"]; exists {
+		b := boolFrom(v)
+		cfg.AutoCompressEnabled = &b
+	}
+	if v, exists := raw["compress_keep_recent"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.compress_keep_recent", n, 1, 100, true); err != nil {
+			return nil, err
+		}
+		cfg.CompressKeepRecent = n
+	}
+	if v, exists := raw["compress_keep_system"]; exists {
+		b := boolFrom(v)
+		cfg.CompressKeepSystem = &b
+	}
+	if v, exists := raw["pro_flash_compression_enabled"]; exists {
+		b := boolFrom(v)
+		cfg.ProFlashCompressionEnabled = &b
+	}
+	if v, exists := raw["pro_flash_compression_target_chars"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.pro_flash_compression_target_chars", n, 1, 1000000, true); err != nil {
+			return nil, err
+		}
+		cfg.ProFlashCompressionTargetChars = n
+	}
+	if v, exists := raw["incremental_max_turns"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.incremental_max_turns", n, 0, 1000000, true); err != nil {
+			return nil, err
+		}
+		cfg.IncrementalMaxTurns = &n
+	}
+	if v, exists := raw["incremental_rotation_keep_recent"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.incremental_rotation_keep_recent", n, 1, 100, true); err != nil {
+			return nil, err
+		}
+		cfg.IncrementalRotationKeepRecent = n
+	}
+	return cfg, nil
 }
 
 func stringSliceFrom(value any) []string {

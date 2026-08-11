@@ -22,6 +22,11 @@
       "password": ""
     }
   ],
+  "proxy_core": {
+    "xray_binary_path": "",
+    "runtime_dir": "",
+    "startup_timeout_seconds": 10
+  },
   "model_aliases": {
     "gpt-4o": "deepseek-v4-flash",
     "gpt-5.5": "deepseek-v4-flash",
@@ -81,7 +86,8 @@
     "account_max_inflight": 2,
     "account_max_queue": 0,
     "global_max_inflight": 0,
-    "token_refresh_interval_hours": 6
+    "token_refresh_interval_hours": 6,
+    "account_health_check_interval_minutes": 0
   },
   "responses": {
     "store_ttl_seconds": 900
@@ -89,6 +95,18 @@
   "current_input_file": {
     "enabled": true,
     "min_chars": 0
+  },
+  "prompt_limit": {
+    "enabled": true,
+    "max_chars_default": 380000,
+    "max_chars_expert": 150000,
+    "auto_compress_enabled": false,
+    "compress_keep_recent": 6,
+    "compress_keep_system": true,
+    "pro_flash_compression_enabled": false,
+    "pro_flash_compression_target_chars": 150000,
+    "incremental_max_turns": 0,
+    "incremental_rotation_keep_recent": 6
   },
   "thinking_injection": {
     "enabled": true,

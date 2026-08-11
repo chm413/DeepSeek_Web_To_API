@@ -4,10 +4,15 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"DeepSeek_Web_To_API/internal/proxyuri"
 )
 
 func ValidateConfig(c Config) error {
 	if err := ValidateProxyConfig(c.Proxies); err != nil {
+		return err
+	}
+	if err := ValidateProxyCoreConfig(c.ProxyCore); err != nil {
 		return err
 	}
 	if err := ValidateAdminConfig(c.Admin); err != nil {
@@ -52,19 +57,30 @@ func ValidateProxyConfig(proxies []Proxy) error {
 		}
 		switch proxy.Type {
 		case "socks5", "socks5h":
+			if err := ValidateTrimmedString("proxies.host", proxy.Host, true); err != nil {
+				return err
+			}
+			if err := ValidateIntRange("proxies.port", proxy.Port, 1, 65535, true); err != nil {
+				return err
+			}
+		case "vless", "vmess", "hysteria2":
+			if _, err := proxyuri.Parse(proxy.Type, proxy.URI); err != nil {
+				return fmt.Errorf("invalid %s proxy URI: %w", proxy.Type, err)
+			}
 		default:
-			return fmt.Errorf("proxies.type must be one of socks5, socks5h")
-		}
-		if err := ValidateTrimmedString("proxies.host", proxy.Host, true); err != nil {
-			return err
-		}
-		if err := ValidateIntRange("proxies.port", proxy.Port, 1, 65535, true); err != nil {
-			return err
+			return fmt.Errorf("proxies.type must be one of socks5, socks5h, vless, vmess, hysteria2")
 		}
 		if _, ok := seen[proxy.ID]; ok {
 			return fmt.Errorf("duplicate proxy id: %s", proxy.ID)
 		}
 		seen[proxy.ID] = struct{}{}
+	}
+	return nil
+}
+
+func ValidateProxyCoreConfig(core ProxyCoreConfig) error {
+	if core.StartupTimeoutSeconds != 0 {
+		return ValidateIntRange("proxy_core.startup_timeout_seconds", core.StartupTimeoutSeconds, 1, 60, true)
 	}
 	return nil
 }
@@ -183,6 +199,9 @@ func ValidateRuntimeConfig(runtime RuntimeConfig) error {
 		return err
 	}
 	if err := ValidateIntRange("runtime.token_refresh_interval_hours", runtime.TokenRefreshIntervalHours, 1, 720, false); err != nil {
+		return err
+	}
+	if err := ValidateIntRange("runtime.account_health_check_interval_minutes", runtime.AccountHealthCheckIntervalMinutes, 1, 1440, false); err != nil {
 		return err
 	}
 	if runtime.AccountMaxInflight > 0 && runtime.GlobalMaxInflight > 0 && runtime.GlobalMaxInflight < runtime.AccountMaxInflight {

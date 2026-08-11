@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"DeepSeek_Web_To_API/internal/config"
 	"testing"
 
 	"DeepSeek_Web_To_API/internal/promptcompat"
@@ -53,6 +54,11 @@ func (m mockOpenAIConfig) RemoteFileUploadEnabled() bool {
 		return true
 	}
 	return *m.remoteFileUpload
+}
+func (m mockOpenAIConfig) PromptLimitSnapshot() config.PromptLimitSettings {
+	s := config.DefaultPromptLimitSettings()
+	s.Enabled = false
+	return s
 }
 func (m mockOpenAIConfig) CurrentInputFileMinChars() int {
 	return m.currentInputMin

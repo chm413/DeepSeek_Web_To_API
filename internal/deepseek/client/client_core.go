@@ -27,6 +27,9 @@ type Client struct {
 
 	proxyClientsMu sync.RWMutex
 	proxyClients   map[string]requestClients
+
+	modelInputLimitsMu sync.Mutex
+	modelInputLimits   map[string]cachedModelInputLimits
 }
 
 func NewClient(store *config.Store, resolver *auth.Resolver) *Client {

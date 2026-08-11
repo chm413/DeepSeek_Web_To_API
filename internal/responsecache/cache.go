@@ -66,6 +66,13 @@ type Options struct {
 	DiskMaxBytes   int64
 	SemanticKey    bool
 	OnHit          HitFunc
+	// Now overrides the clock used for TTL bookkeeping. Nil means
+	// time.Now. Tests inject a controllable clock so lease assertions do
+	// not race the real one: a store fixes an entry's deadline and only
+	// then runs gzip + temp-file writes + two directory walks, so on a
+	// loaded machine an unbounded amount of wall time can elapse between
+	// the deadline being set and the next request observing it.
+	Now func() time.Time
 }
 
 type Cache struct {
@@ -92,6 +99,17 @@ type Cache struct {
 	lastDiskSweep  time.Time
 	onHit          HitFunc
 	semanticKey    bool
+	now            func() time.Time
+}
+
+// timeNow reads the cache's clock. Always use this instead of time.Now so an
+// injected test clock is honoured; nil falls back to the real clock, which
+// keeps zero-value Cache values usable.
+func (c *Cache) timeNow() time.Time {
+	if c == nil || c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }
 
 // inflightSlot collapses concurrent identical requests onto a single
@@ -164,6 +182,7 @@ func New(opts Options) *Cache {
 		sessionEntries: map[string]map[string]struct{}{},
 		onHit:          opts.OnHit,
 		semanticKey:    opts.SemanticKey,
+		now:            opts.Now,
 	}
 }
 
@@ -218,6 +237,11 @@ func (c *Cache) ApplyOptions(opts Options) {
 	c.semanticKey = opts.SemanticKey
 	if opts.OnHit != nil {
 		c.onHit = opts.OnHit
+	}
+	// Same rule as OnHit: a hot reload that omits the clock must not drop the
+	// one already installed.
+	if opts.Now != nil {
+		c.now = opts.Now
 	}
 
 	c.items = map[string]memoryEntry{}
@@ -606,7 +630,7 @@ func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, boo
 	if key == "" {
 		return Entry{}, "", false
 	}
-	now := time.Now()
+	now := c.timeNow()
 	c.mu.Lock()
 	c.sweepMemoryLocked(now)
 	if item, ok := c.items[key]; ok {
@@ -733,7 +757,7 @@ func (c *Cache) setWithPolicySession(key, sessionKey string, entry Entry, policy
 	if key == "" || !entry.cacheable(c.maxBody) {
 		return
 	}
-	now := time.Now()
+	now := c.timeNow()
 	diskTTL := c.diskTTL
 	if entry.DiskExpiresAt.IsZero() || !entry.DiskExpiresAt.After(now) {
 		entry.DiskExpiresAt = now.Add(diskTTL)

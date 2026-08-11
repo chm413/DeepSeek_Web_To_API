@@ -328,21 +328,35 @@ Codex CLI 对所有 o 系列和 GPT-5.x 推理模型发送 `reasoning` 字段：
 Codex CLI 使用 Responses API 的两种上下文延续模式，可根据配置选择：
 
 **模式 A：输入数组链（无状态）**  
-每轮请求携带完整的 `input` 历史数组，将前一轮的所有输出 item（含推理、工具调用）追加进去，不使用 `previous_response_id`。
+每轮请求携带完整的 `input` 历史数组，将前一轮的可见输出与工具调用追加进去，不使用 `previous_response_id`。provider-owned opaque reasoning/compaction item 只能由原提供方解释，ds2api 会跳过这些状态而不是将密文写入提示词。
 
 **模式 B：`previous_response_id` 链**  
 仅在 `input` 中传入新用户消息，通过 `previous_response_id` 引用前一轮响应 ID，历史由服务端维护。此模式依赖 `store: true`。
 
 ### 7.2 自动上下文压缩（Compaction）
 
-当 `context_management.compact_threshold` 设置后（如 0.85，即 85% 上下文使用率），服务端在流式推理过程中自动触发压缩，在同一个 stream 里插入 `compaction` 类型的 output item（包含 `encrypted_content`），然后继续推理。
+OpenAI 原生服务可在 `context_management.compact_threshold` 设置后（如 0.85）生成 provider-owned compaction state。ds2api 将该字段解释为本次请求的提前压缩预算：按当前模型的动态有效输入上限乘以阈值，调用已有的本地历史压缩流程。当前 Codex 的 v2 `compaction_trigger` 也会被识别，并返回一个本代理可解析的本地 compaction handle；该 handle 不是 OpenAI provider-owned ciphertext。
 
 独立压缩端点：`POST /v1/responses/compact`，发送完整上下文，返回压缩后的上下文窗口供下轮使用。
 
 **ds2api 适配**：
-- `previous_response_id`：ds2api 已有 `response_store.go` 实现响应 ID 存储，需确保存储的响应对象包含完整 `input` 快照，以便续接请求能重建上下文
-- 自动 compaction：当前 ds2api 不需要实现服务端 compaction 逻辑，但**不应返回 400/500 错误**，可将 `context_management` 字段静默忽略
-- `/v1/responses/compact` 端点：目前 ds2api 未实现此端点，Codex 在配置了 standalone compaction 的场景下会失败；建议返回 `501 Not Implemented` 而非 `404`
+- `previous_response_id`：ds2api 在进程内按调用方保存 canonical input，并追加上一响应的可见 output；过期或不存在的 ID 返回 404。provider-owned encrypted reasoning/compaction 状态不会被伪造。
+- 自动 compaction：本地自动压缩启用且 `compact_threshold` 为 `(0,1)` 时，按模型的动态有效输入上限计算本次压缩预算；非法值被容忍且不报 400/500。`compaction_trigger` 的 SSE 响应只发出一个已完成的 `compaction` output item，再发 `response.completed`。
+- `/v1/responses/compact` 端点：返回 `{ "output": [{ "type": "compaction", "encrypted_content": "ds2api_compact_..." }] }`。该值是按调用方隔离、受 Responses store TTL 约束的本地不透明句柄；进程重启、TTL 过期或换调用方后不可使用。它不是可迁移或可由 OpenAI 验证的密文。
+
+### 7.3 增量上游会话复用
+
+除 `previous_response_id` 的本地 Responses 状态外，ds2api 在
+`auto_delete.mode=none` 时还会复用同一 DeepSeek 上游 session。第二轮必须
+是上一轮 canonical input + 可见 output 的严格前缀扩展；命中后请求只携带
+本轮新增 input，以及每轮都会重新发送的强制输出格式提示词和工具约束，且
+设置上轮的 `parent_message_id`。分支被编辑、设置/工具契约变化、会话过期或
+并发占用都会走完整历史重放。固定父消息调用失败时，本轮立即新建 session
+并完整重放，不会切换到另一个账号继续使用旧父消息。
+
+该缓存是进程内六小时 TTL、每个作用域最多八条分支，重启后丢失。它让连续多轮
+请求能够利用上游已保留的长上下文，但不改变模型单次输入上限，也不是 OpenAI
+provider-owned 的可迁移状态。
 
 ---
 
@@ -442,9 +456,9 @@ Codex CLI 使用 Responses API 的两种上下文延续模式，可根据配置�
 
 | 编号 | 检查项 | 涉及文件 | 状态 |
 |------|--------|---------|------|
-| C-09 | `previous_response_id` 字段被识别，能查询存储的响应并重建 `input` 历史 | `internal/httpapi/openai/responses/response_store.go` | 确认 |
-| C-10 | `context_management` 字段（含 `compact_threshold`）被静默忽略，不报 400 | `internal/promptcompat/standard_request.go` | 确认 |
-| C-11 | `input` 数组中 `type: "compaction"` 的 item 不触发错误（静默跳过或降级） | `internal/promptcompat/responses_input_items.go` | 待实现 |
+| C-09 | `previous_response_id` 字段被识别，能查询存储的响应并重建 `input` 历史 | `internal/httpapi/openai/responses/previous_response.go` | 确认（进程内、按调用方、TTL 内） |
+| C-10 | `context_management.compact_threshold` 为 `(0,1)` 时触发本地提前压缩预算，非法值被容忍 | `internal/httpapi/openai/shared/dynamic_prompt_limit.go` | 确认（本地句柄，不伪造 provider state） |
+| C-11 | `compaction` / `context_compaction` / `compaction_trigger` 输入状态不会泄漏为提示词；本代理句柄在 TTL 内可展开 | `internal/httpapi/openai/responses/compact.go` | 确认 |
 | C-12 | `reasoning` 字段（`effort`, `summary`）被静默忽略或转换为思维链提示，不报 400 | `internal/promptcompat/thinking_injection.go` | 确认 |
 
 ### P2（工具与模型适配）
@@ -454,7 +468,7 @@ Codex CLI 使用 Responses API 的两种上下文延续模式，可根据配置�
 | C-13 | 工具定义中未知额外字段（如 `outputSchema`）被忽略，不影响 schema 规范化 | `internal/toolcall/toolcalls_schema_normalize.go` | 确认 |
 | C-14 | `parallel_tool_calls: true` 字段被容忍（不报错，行为上串行执行亦可） | `internal/httpapi/openai/shared/handler_toolcall_policy.go` | 确认 |
 | C-15 | `model` 字段透传给翻译层，不做硬编码模型名校验 | `internal/promptcompat/standard_request.go` | 确认 |
-| C-16 | `POST /v1/responses/compact` 端点若未实现，返回 `501` 而非 `404` | `internal/httpapi/openai/responses/handler.go` 或路由注册 | 待实现 |
+| C-16 | `POST /v1/responses/compact` 返回单个本地 opaque compaction item；Codex v2 trigger 流返回一个完成 item 后结束 | `internal/httpapi/openai/responses/compact.go` | 确认（仅进程内 TTL 状态） |
 | C-17 | `include: ["reasoning.encrypted_content"]` 等 `include` 数组字段被容忍 | `internal/promptcompat/standard_request.go` | 确认 |
 
 ---
