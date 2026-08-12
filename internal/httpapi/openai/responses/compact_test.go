@@ -1,14 +1,27 @@
 package responses
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"DeepSeek_Web_To_API/internal/account"
+	"DeepSeek_Web_To_API/internal/auth"
+	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/promptcompat"
 )
+
+type responsesCompactionErrorDSStub struct {
+	responsesHistoryDSStub
+	err error
+}
+
+func (s responsesCompactionErrorDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, _ map[string]any, _ string, _ int) (*http.Response, error) {
+	return nil, s.err
+}
 
 func TestCompactionStateUsesSlidingIdleTTL(t *testing.T) {
 	now := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
@@ -56,18 +69,79 @@ func TestMissingCompactionStateKeepsFreshTail(t *testing.T) {
 	}
 }
 
+func TestRecoveredCompactionFreshTailIsExplicitlyCompressed(t *testing.T) {
+	h := &Handler{responses: newResponseStore(time.Minute)}
+	req := map[string]any{
+		"input": []any{
+			map[string]any{"type": "compaction", "encrypted_content": localCompactionHandlePrefix + "expired"},
+			map[string]any{"role": "user", "content": strings.Repeat("old", 300)},
+			map[string]any{"role": "assistant", "content": strings.Repeat("answer", 300)},
+			map[string]any{"role": "user", "content": "continue development"},
+		},
+	}
+	recovered, err := h.expandLocalCompactionStateWithRecovery("caller", req)
+	if err != nil {
+		t.Fatalf("expand missing state: %v", err)
+	}
+	messages := promptcompat.NormalizeResponsesInputAsMessages(req["input"])
+	stdReq := promptcompat.StandardRequest{ResolvedModel: "deepseek-v4-pro", Messages: messages}
+	stdReq.FinalPrompt, _ = promptcompat.BuildOpenAIPrompt(messages, nil, "", promptcompat.DefaultToolChoicePolicy(), false)
+	limit := config.DefaultPromptLimitSettings()
+	limit.Enabled = true
+	limit.MaxCharsExpert = 1000
+	limit.KeepRecentTurns = 1
+	dropped, compressed := h.recoverExpiredCompaction(&stdReq, recovered, limit)
+	if !compressed || dropped == 0 {
+		t.Fatalf("expected explicit recovery compression, compressed=%v dropped=%d", compressed, dropped)
+	}
+	if got := promptcompat.ExtractLatestUserText(stdReq.Messages); got != "continue development" {
+		t.Fatalf("recovery compression lost latest user instruction: %q", got)
+	}
+	if !strings.Contains(stdReq.FinalPrompt, "Incremental response format requirements") {
+		t.Fatalf("recovery prompt lost forced output format: %q", stdReq.FinalPrompt)
+	}
+}
+
+func TestRecoveredCompactionRejectsWhenFormatAndLatestTurnCannotFit(t *testing.T) {
+	h := &Handler{responses: newResponseStore(time.Minute)}
+	recovered := recoveredLocalCompaction{Handle: localCompactionHandlePrefix + "expired"}
+	messages := []any{
+		map[string]any{"role": "user", "content": "latest instruction"},
+	}
+	stdReq := promptcompat.StandardRequest{ResolvedModel: "deepseek-v4-pro", Messages: messages}
+	stdReq.FinalPrompt, _ = promptcompat.BuildOpenAIPrompt(messages, nil, "", promptcompat.DefaultToolChoicePolicy(), false)
+	originalPrompt := stdReq.FinalPrompt
+	limit := config.DefaultPromptLimitSettings()
+	limit.Enabled = true
+	limit.MaxCharsExpert = 100
+
+	dropped, recoveredOK := h.recoverExpiredCompaction(&stdReq, recovered, limit)
+	if recoveredOK || dropped != 0 {
+		t.Fatalf("unfit recovery must be rejected, recovered=%v dropped=%d", recoveredOK, dropped)
+	}
+	if stdReq.FinalPrompt != originalPrompt {
+		t.Fatal("failed recovery must leave the normalized request unchanged")
+	}
+}
+
 func TestCompactReturnsTenantBoundLocalHandle(t *testing.T) {
 	h := &Handler{
 		Store: responsesHistoryConfigStub{},
 		Auth:  responsesHistoryAuthStub{},
-		DS:    responsesHistoryDSStub{},
+		DS: responsesHistoryDSStub{resp: makeResponsesHistorySSEHTTPResponse(
+			`data: {"p":"response/content","v":"Keep the latest requirements and completed decisions."}`,
+			`data: [DONE]`,
+		)},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{
   "model":"deepseek-v4-flash",
   "input":[
     {"role":"user","content":"first requirement"},
     {"role":"assistant","content":"first answer"},
-    {"role":"user","content":"latest question"}
+    {"role":"user","content":"second requirement"},
+    {"role":"assistant","content":"second answer"},
+    {"role":"user","content":"latest question"},
+    {"role":"assistant","content":"latest answer"}
   ]
 }`))
 	rec := httptest.NewRecorder()
@@ -76,11 +150,14 @@ func TestCompactReturnsTenantBoundLocalHandle(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := decodeJSONBody(t, rec.Body.String())
-	output, _ := body["output"].([]any)
-	if len(output) != 1 {
-		t.Fatalf("expected one compact output item, got %#v", body)
+	if body["object"] != "response.compaction" {
+		t.Fatalf("unexpected compact response object: %#v", body)
 	}
-	item, _ := output[0].(map[string]any)
+	output, _ := body["output"].([]any)
+	if len(output) < 2 {
+		t.Fatalf("expected retained items plus compact state, got %#v", body)
+	}
+	item, _ := output[len(output)-1].(map[string]any)
 	if item["type"] != "compaction" {
 		t.Fatalf("unexpected compact item: %#v", item)
 	}
@@ -90,6 +167,33 @@ func TestCompactReturnsTenantBoundLocalHandle(t *testing.T) {
 	}
 	if _, ok := h.getResponseStore().getCompaction("another-caller", handle); ok {
 		t.Fatal("local compaction state must not cross caller boundaries")
+	}
+	stored, ok := h.getResponseStore().getCompaction("caller:responses", handle)
+	if !ok {
+		t.Fatal("expected compact state for creating caller")
+	}
+	original := []any{
+		map[string]any{"role": "user", "content": "first requirement"},
+		map[string]any{"role": "assistant", "content": "first answer"},
+		map[string]any{"role": "user", "content": "second requirement"},
+		map[string]any{"role": "assistant", "content": "second answer"},
+		map[string]any{"role": "user", "content": "latest question"},
+		map[string]any{"role": "assistant", "content": "latest answer"},
+	}
+	if responseStateSize(stored) >= responseStateSize(original) {
+		t.Fatalf("compact state did not shrink: before=%d after=%d", responseStateSize(original), responseStateSize(stored))
+	}
+
+	canonicalNext := append(cloneAnySlice(output), map[string]any{"role": "user", "content": "canonical next turn"})
+	canonicalReq := map[string]any{"input": canonicalNext}
+	if err := h.expandLocalCompactionState("caller:responses", canonicalReq); err != nil {
+		t.Fatalf("expand canonical compact output: %v", err)
+	}
+	canonicalPrompt, _ := promptcompat.BuildOpenAIPrompt(
+		promptcompat.NormalizeResponsesInputAsMessages(canonicalReq["input"]), nil, "", promptcompat.DefaultToolChoicePolicy(), false,
+	)
+	if !strings.Contains(canonicalPrompt, "latest question") || !strings.Contains(canonicalPrompt, "canonical next turn") {
+		t.Fatalf("canonical compact output could not be passed as-is: %q", canonicalPrompt)
 	}
 
 	followup := map[string]any{
@@ -106,13 +210,67 @@ func TestCompactReturnsTenantBoundLocalHandle(t *testing.T) {
 	}
 	messages := promptcompat.NormalizeResponsesInputAsMessages(followup["input"])
 	prompt, _ := promptcompat.BuildOpenAIPrompt(messages, nil, "", promptcompat.DefaultToolChoicePolicy(), false)
-	for _, expected := range []string{"first requirement", "first answer", "latest question", "continue from the saved context"} {
+	for _, expected := range []string{"latest question", "latest answer", "continue from the saved context"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("expanded compact state lost %q: %q", expected, prompt)
 		}
 	}
-	if count := strings.Count(prompt, "first requirement"); count != 1 {
-		t.Fatalf("retained messages must be replaced rather than duplicated, count=%d prompt=%q", count, prompt)
+	for _, dropped := range []string{"first requirement", "first answer", "second requirement", "second answer"} {
+		if strings.Contains(prompt, dropped) {
+			t.Fatalf("expanded compact state retained dropped history %q: %q", dropped, prompt)
+		}
+	}
+}
+
+func TestCompactRejectsSingleIndivisibleUserTurn(t *testing.T) {
+	h := &Handler{
+		Store: responsesHistoryConfigStub{},
+		Auth:  responsesHistoryAuthStub{},
+		DS:    responsesHistoryDSStub{},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{
+  "model":"deepseek-v4-flash",
+  "input":[{"role":"user","content":"one large indivisible turn"}]
+}`))
+	rec := httptest.NewRecorder()
+	h.Compact(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "at least two complete user turns") {
+		t.Fatalf("unexpected compact error: %s", rec.Body.String())
+	}
+}
+
+func TestCompactPreservesAccountHealthError(t *testing.T) {
+	healthErr := &auth.AccountHealthError{
+		State:   account.HealthTemporarilyMuted,
+		Code:    5,
+		Message: "user is muted",
+	}
+	h := &Handler{
+		Store: responsesHistoryConfigStub{},
+		Auth:  responsesHistoryAuthStub{},
+		DS: responsesCompactionErrorDSStub{
+			responsesHistoryDSStub: responsesHistoryDSStub{},
+			err:                    healthErr,
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{
+  "model":"deepseek-v4-flash",
+  "input":[
+    {"role":"user","content":"first requirement"},
+    {"role":"assistant","content":"first answer"},
+    {"role":"user","content":"latest requirement"}
+  ]
+}`))
+	rec := httptest.NewRecorder()
+	h.Compact(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"account_temporarily_muted"`) {
+		t.Fatalf("expected structured account health error, got %s", rec.Body.String())
 	}
 }
 
@@ -120,32 +278,38 @@ func TestResponsesCompactionTriggerEmitsOneCompactionItem(t *testing.T) {
 	h := &Handler{
 		Store: responsesHistoryConfigStub{},
 		Auth:  responsesHistoryAuthStub{},
-		DS:    responsesHistoryDSStub{},
+		DS: responsesHistoryDSStub{resp: makeResponsesHistorySSEHTTPResponse(
+			`data: {"p":"response/content","v":"Preserve the current requirement."}`,
+			`data: [DONE]`,
+		)},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	reqBody := `{
   "model":"deepseek-v4-flash",
   "stream":true,
   "input":[
+    {"role":"user","content":"` + strings.Repeat("old context ", 200) + `"},
+    {"role":"assistant","content":"` + strings.Repeat("old answer ", 200) + `"},
     {"role":"user","content":"preserve this context"},
     {"type":"compaction_trigger"}
   ]
-}`))
+}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
 	rec := httptest.NewRecorder()
 	h.Responses(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if count := strings.Count(body, "event: response.output_item.done\n"); count != 1 {
-		t.Fatalf("expected exactly one output-item completion, got %d body=%s", count, body)
+	if count := strings.Count(body, "event: response.output_item.done\n"); count < 2 {
+		t.Fatalf("expected retained items plus compaction completion, got %d body=%s", count, body)
 	}
 	for _, required := range []string{"\"type\":\"compaction\"", "response.completed", "data: [DONE]"} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("missing %q from compaction stream: %s", required, body)
 		}
 	}
-	if strings.Contains(body, "preserve this context") {
-		t.Fatalf("compaction stream must return only opaque state, got %s", body)
+	if !strings.Contains(body, "preserve this context") {
+		t.Fatalf("canonical compact window must retain the recent turn, got %s", body)
 	}
 }
 

@@ -67,6 +67,8 @@ func promptLimitResponse(s config.PromptLimitSettings) map[string]any {
 		"compress_keep_system":               s.KeepSystemMessage,
 		"pro_flash_compression_enabled":      s.ProFlashCompressionEnable,
 		"pro_flash_compression_target_chars": s.ProFlashCompressionTarget,
+		"summary_compaction_enabled":         s.SummaryCompactionEnable,
+		"summary_compaction_threshold":       s.SummaryCompactionThreshold,
 		"incremental_max_turns":              s.IncrementalMaxTurns,
 		"incremental_rotation_keep_recent":   s.IncrementalRotationKeepRecent,
 	}

@@ -33,6 +33,7 @@ type Lease struct {
 	DeltaMessages   []any
 	TurnCount       int
 	Rotate          bool
+	MatchMode       string
 }
 
 type entry struct {
@@ -58,17 +59,24 @@ type Store struct {
 // MatchDiagnostics describes why a strict incremental branch lookup missed
 // without exposing any prompt or account contents in logs.
 type MatchDiagnostics struct {
-	InvalidInput           bool
-	Branches               int
-	Busy                   int
-	NotExtendable          int
-	RequestPrefixMismatch  int
-	ResponsePrefixMismatch int
-	Extendable             int
-	ExpectedResponseShape  string
-	CurrentResponseShape   string
-	ExpectedResponseHash   string
-	CurrentResponseHash    string
+	InvalidInput            bool
+	Branches                int
+	Busy                    int
+	NotExtendable           int
+	RequestPrefixMismatch   int
+	ResponsePrefixMismatch  int
+	Extendable              int
+	ExpectedResponseShape   string
+	CurrentResponseShape    string
+	ExpectedResponseHash    string
+	CurrentResponseHash     string
+	SlidingSuffixMatches    int
+	SlidingCandidateOverlap int
+	SlidingMatchedPrefix    int
+	SlidingExpectedShape    string
+	SlidingCurrentShape     string
+	SlidingExpectedHash     string
+	SlidingCurrentHash      string
 }
 
 func NewStore(ttl time.Duration, maxBranches int) *Store {
@@ -106,19 +114,18 @@ func (s *Store) PrepareWithMaxTurns(scope Scope, messages []any, maxTurns int) (
 
 	var selected *entry
 	selectedConsumed := -1
+	selectedMode := ""
 	for _, candidate := range s.entries[key] {
 		if candidate.busy || candidate.scope != scope || candidate.parentMessageID <= 0 || strings.TrimSpace(candidate.sessionID) == "" {
 			continue
 		}
-		consumed := len(candidate.requestMessages) + len(candidate.responseMessages)
-		if consumed <= selectedConsumed || len(current) <= consumed {
-			continue
-		}
-		if !messagePrefixEqual(current, candidate.requestMessages, 0) || !messagePrefixEqual(current, candidate.responseMessages, len(candidate.requestMessages)) {
+		consumed, mode, matched := matchBranchExtension(current, candidate)
+		if !matched || consumed < selectedConsumed || (consumed == selectedConsumed && selectedMode == "strict_prefix") {
 			continue
 		}
 		selected = candidate
 		selectedConsumed = consumed
+		selectedMode = mode
 	}
 	if selected == nil {
 		return nil, false
@@ -134,6 +141,7 @@ func (s *Store) PrepareWithMaxTurns(scope Scope, messages []any, maxTurns int) (
 		DeltaMessages:   delta,
 		TurnCount:       selected.turns,
 		Rotate:          maxTurns > 0 && selected.turns >= maxTurns,
+		MatchMode:       selectedMode,
 	}, true
 }
 
@@ -166,6 +174,21 @@ func (s *Store) Diagnose(scope Scope, messages []any) MatchDiagnostics {
 			diagnostics.Busy++
 			continue
 		}
+		if _, mode, matched := matchBranchExtension(current, candidate); matched {
+			diagnostics.Extendable++
+			if mode == "sliding_suffix" {
+				diagnostics.SlidingSuffixMatches++
+			}
+			continue
+		}
+		if sliding := diagnoseSlidingSuffix(current, candidate); sliding.candidateOverlap > 0 && sliding.matchedPrefix >= diagnostics.SlidingMatchedPrefix {
+			diagnostics.SlidingCandidateOverlap = sliding.candidateOverlap
+			diagnostics.SlidingMatchedPrefix = sliding.matchedPrefix
+			diagnostics.SlidingExpectedShape = canonicalMessageShape(sliding.expected)
+			diagnostics.SlidingCurrentShape = canonicalMessageShape(sliding.current)
+			diagnostics.SlidingExpectedHash = canonicalMessageHash(sliding.expected)
+			diagnostics.SlidingCurrentHash = canonicalMessageHash(sliding.current)
+		}
 		consumed := len(candidate.requestMessages) + len(candidate.responseMessages)
 		if len(current) <= consumed {
 			diagnostics.NotExtendable++
@@ -192,7 +215,6 @@ func (s *Store) Diagnose(scope Scope, messages []any) MatchDiagnostics {
 			}
 			continue
 		}
-		diagnostics.Extendable++
 	}
 	return diagnostics
 }
@@ -220,7 +242,7 @@ func (s *Store) Record(scope Scope, requestMessages, responseMessages []any, ses
 		parentMessageID:  parentMessageID,
 		requestMessages:  requestCanonical,
 		responseMessages: responseCanonical,
-		turns:            countTurns(requestCanonical),
+		turns:            1,
 		updatedAt:        now,
 	}
 	items := append(s.entries[key], created)
@@ -259,30 +281,11 @@ func (l *Lease) Complete(scope Scope, requestMessages, responseMessages []any, s
 		candidate.parentMessageID = parentMessageID
 		candidate.requestMessages = requestCanonical
 		candidate.responseMessages = responseCanonical
-		candidate.turns = countTurns(requestCanonical)
+		candidate.turns++
 		candidate.updatedAt = now
 		candidate.busy = false
 		return
 	}
-}
-
-func countTurns(messages []json.RawMessage) int {
-	turns := 0
-	for _, raw := range messages {
-		var item map[string]any
-		if json.Unmarshal(raw, &item) != nil {
-			continue
-		}
-		role, _ := item["role"].(string)
-		switch strings.ToLower(strings.TrimSpace(role)) {
-		case "user":
-			turns++
-		}
-	}
-	if turns == 0 && len(messages) > 0 {
-		return 1
-	}
-	return turns
 }
 
 func (l *Lease) Invalidate() {
@@ -439,6 +442,136 @@ func messagePrefixEqual(current, expected []json.RawMessage, offset int) bool {
 		}
 	}
 	return true
+}
+
+// matchBranchExtension accepts either the full canonical prefix or a bounded
+// sliding window of it. Sliding matching is needed after explicit compaction:
+// the client can drop old turns while the pinned upstream session still holds
+// them. To avoid a coincidental-text branch hit, the overlap must preserve the
+// exact leading system prefix, at least one prior user message, and the entire
+// last assistant response before any new delta.
+func matchBranchExtension(current []json.RawMessage, candidate *entry) (int, string, bool) {
+	if candidate == nil {
+		return 0, "", false
+	}
+	strictConsumed := len(candidate.requestMessages) + len(candidate.responseMessages)
+	if len(current) > strictConsumed &&
+		messagePrefixEqual(current, candidate.requestMessages, 0) &&
+		messagePrefixEqual(current, candidate.responseMessages, len(candidate.requestMessages)) {
+		return strictConsumed, "strict_prefix", true
+	}
+
+	requestSystemCount := leadingSystemCount(candidate.requestMessages)
+	currentSystemCount := leadingSystemCount(current)
+	if requestSystemCount != currentSystemCount || !messagePrefixEqual(current, candidate.requestMessages[:requestSystemCount], 0) {
+		return 0, "", false
+	}
+	storedConversation := make([]json.RawMessage, 0, len(candidate.requestMessages)-requestSystemCount+len(candidate.responseMessages))
+	storedConversation = append(storedConversation, candidate.requestMessages[requestSystemCount:]...)
+	storedConversation = append(storedConversation, candidate.responseMessages...)
+	currentConversation := current[currentSystemCount:]
+	maxOverlap := len(storedConversation)
+	if len(currentConversation)-1 < maxOverlap {
+		maxOverlap = len(currentConversation) - 1
+	}
+	minimumOverlap := len(candidate.responseMessages) + 1
+	for overlap := maxOverlap; overlap >= minimumOverlap; overlap-- {
+		storedStart := len(storedConversation) - overlap
+		if !rawMessagesEqual(currentConversation[:overlap], storedConversation[storedStart:]) {
+			continue
+		}
+		requestOverlapEnd := len(storedConversation) - len(candidate.responseMessages)
+		if !rawMessagesContainRole(storedConversation[storedStart:requestOverlapEnd], "user") {
+			continue
+		}
+		return currentSystemCount + overlap, "sliding_suffix", true
+	}
+	return 0, "", false
+}
+
+func leadingSystemCount(messages []json.RawMessage) int {
+	count := 0
+	for _, raw := range messages {
+		if canonicalMessageRole(raw) != "system" {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func rawMessagesContainRole(messages []json.RawMessage, role string) bool {
+	for _, raw := range messages {
+		if canonicalMessageRole(raw) == role {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalMessageRole(raw json.RawMessage) string {
+	var item map[string]any
+	if json.Unmarshal(raw, &item) != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(stringField(item["role"])))
+}
+
+func rawMessagesEqual(left, right []json.RawMessage) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if string(left[i]) != string(right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+type slidingSuffixDiagnostic struct {
+	candidateOverlap int
+	matchedPrefix    int
+	expected         json.RawMessage
+	current          json.RawMessage
+}
+
+func diagnoseSlidingSuffix(current []json.RawMessage, candidate *entry) slidingSuffixDiagnostic {
+	if candidate == nil {
+		return slidingSuffixDiagnostic{}
+	}
+	requestSystemCount := leadingSystemCount(candidate.requestMessages)
+	currentSystemCount := leadingSystemCount(current)
+	if requestSystemCount != currentSystemCount || !messagePrefixEqual(current, candidate.requestMessages[:requestSystemCount], 0) {
+		return slidingSuffixDiagnostic{}
+	}
+	storedConversation := make([]json.RawMessage, 0, len(candidate.requestMessages)-requestSystemCount+len(candidate.responseMessages))
+	storedConversation = append(storedConversation, candidate.requestMessages[requestSystemCount:]...)
+	storedConversation = append(storedConversation, candidate.responseMessages...)
+	currentConversation := current[currentSystemCount:]
+	maxOverlap := len(storedConversation)
+	if len(currentConversation)-1 < maxOverlap {
+		maxOverlap = len(currentConversation) - 1
+	}
+	minimumOverlap := len(candidate.responseMessages) + 1
+	best := slidingSuffixDiagnostic{}
+	for overlap := maxOverlap; overlap >= minimumOverlap; overlap-- {
+		expected := storedConversation[len(storedConversation)-overlap:]
+		matched := 0
+		for matched < overlap && string(expected[matched]) == string(currentConversation[matched]) {
+			matched++
+		}
+		if matched < best.matchedPrefix || (matched == best.matchedPrefix && overlap <= best.candidateOverlap) {
+			continue
+		}
+		best.candidateOverlap = overlap
+		best.matchedPrefix = matched
+		if matched < overlap {
+			best.expected = expected[matched]
+			best.current = currentConversation[matched]
+		}
+	}
+	return best
 }
 
 func cloneAnyMessages(messages []any) []any {

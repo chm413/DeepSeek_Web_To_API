@@ -2,6 +2,7 @@ package client
 
 import (
 	dsprotocol "DeepSeek_Web_To_API/internal/deepseek/protocol"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 )
 
 const completionFailureBodyLimit = 4096
+const completionSSEPreludeLimit = 64 * 1024
 
 var errNoCompletionSwitchCandidate = errors.New("no completion switch candidate")
 
@@ -38,11 +40,11 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 	clients := c.requestClientsForAuth(ctx, a)
 	headers := c.authHeaders(a.DeepSeekToken)
 	headers["x-ds-pow-response"] = powResp
-	captureSession := c.capture.Start("deepseek_completion", dsprotocol.DeepSeekCompletionURL, a.AccountID, payload)
 	attempts := 0
 	refreshed := false
 	var lastErr error
 	for attempts < maxAttempts {
+		captureSession := c.capture.Start("deepseek_completion", dsprotocol.DeepSeekCompletionURL, a.AccountID, payload)
 		resp, err := c.streamPost(ctx, clients.stream, dsprotocol.DeepSeekCompletionURL, headers, payload)
 		if err != nil {
 			lastErr = transportFailure("completion", ctx, err)
@@ -71,6 +73,44 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 			resp.Body = c.wrapAccountHealthBody(a, resp.Body)
 			if captureSession != nil {
 				resp.Body = captureSession.WrapBody(resp.Body, resp.StatusCode)
+			}
+			healthErr, inspectErr := c.inspectCompletionSSEPrelude(a, resp)
+			if inspectErr != nil {
+				lastErr = transportFailure("completion", ctx, inspectErr)
+				config.Logger.Warn("[completion] SSE prelude inspection failed", "account", accountIDForLog(a), "failure_kind", requestFailureKind(lastErr), "error", inspectErr)
+				if resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				if !completionFailureRetryable(lastErr) {
+					return nil, lastErr
+				}
+				attempts++
+				if attempts >= maxAttempts {
+					break
+				}
+				if allowAccountSwitch {
+					if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
+						continue
+					} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
+						return nil, firstError(switchErr, lastErr)
+					}
+				}
+				continue
+			}
+			if healthErr != nil {
+				lastErr = healthErr
+				config.Logger.Warn("[completion] upstream SSE reported account health failure", "account", accountIDForLog(a), "state", healthErr.State, "code", healthErr.Code, "error", healthErr)
+				if resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				if allowAccountSwitch && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
+					if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
+						continue
+					} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
+						return nil, firstError(switchErr, lastErr)
+					}
+				}
+				break
 			}
 			resp = c.wrapCompletionWithAutoContinue(ctx, a, payload, powResp, resp)
 			return resp, nil
@@ -146,6 +186,63 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 	return nil, &RequestFailure{Op: "completion", Kind: FailureUnknown, Message: "completion failed"}
 }
 
+func (c *Client) inspectCompletionSSEPrelude(a *auth.RequestAuth, resp *http.Response) (*auth.AccountHealthError, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, nil
+	}
+	reader := bufio.NewReaderSize(resp.Body, completionSSEPreludeLimit)
+	var replay bytes.Buffer
+	for replay.Len() <= completionSSEPreludeLimit {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			replay.Write(line)
+		}
+		trimmed := strings.TrimSpace(string(line))
+		payload, candidate := completionPreludePayload(trimmed)
+		if candidate {
+			if payload != "" && payload != "[DONE]" {
+				var chunk map[string]any
+				if json.Unmarshal([]byte(payload), &chunk) == nil {
+					if healthErr := accountHealthErrorFromSSEChunk(chunk); healthErr != nil {
+						if c != nil && c.Auth != nil && a != nil && a.UseConfigToken && strings.TrimSpace(a.AccountID) != "" {
+							c.Auth.MarkAccountHealth(a.AccountID, healthErr)
+						}
+						resp.Body = &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(replay.Bytes()), reader), Closer: resp.Body}
+						return healthErr, nil
+					}
+				}
+			}
+			resp.Body = &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(replay.Bytes()), reader), Closer: resp.Body}
+			return nil, nil
+		}
+		if err != nil {
+			resp.Body = &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(replay.Bytes()), reader), Closer: resp.Body}
+			if errors.Is(err, io.EOF) {
+				return nil, nil
+			}
+			return nil, err
+		}
+	}
+	resp.Body = &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(replay.Bytes()), reader), Closer: resp.Body}
+	return nil, nil
+}
+
+func completionPreludePayload(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "data:") {
+		return strings.TrimSpace(strings.TrimPrefix(line, "data:")), true
+	}
+	if strings.HasPrefix(line, "{") {
+		return line, true
+	}
+	return "", false
+}
+
+type replayReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
 func (c *Client) switchCompletionAccount(ctx context.Context, a *auth.RequestAuth, clients *requestClients, headers *map[string]string, payload map[string]any) error {
 	if c == nil || c.Auth == nil || a == nil || !a.UseConfigToken {
 		return errNoCompletionSwitchCandidate
@@ -179,23 +276,18 @@ func (c *Client) hasCompletionSwitchCandidate(a *auth.RequestAuth) bool {
 	if c == nil || c.Store == nil || a == nil {
 		return true
 	}
-	accounts := c.Store.Accounts()
-	enabled := 0
-	for _, acc := range accounts {
-		if !acc.Disabled {
-			enabled++
+	current := strings.TrimSpace(a.AccountID)
+	for _, acc := range c.Store.Accounts() {
+		candidate := strings.TrimSpace(acc.Identifier())
+		if candidate == "" || candidate == current || acc.Disabled {
+			continue
 		}
-	}
-	if enabled <= 1 {
-		return false
-	}
-	tried := len(a.TriedAccounts)
-	if current := strings.TrimSpace(a.AccountID); current != "" {
-		if a.TriedAccounts == nil || !a.TriedAccounts[current] {
-			tried++
+		if a.TriedAccounts != nil && a.TriedAccounts[candidate] {
+			continue
 		}
+		return true
 	}
-	return tried < enabled
+	return false
 }
 
 func (c *Client) createCompletionRetrySession(ctx context.Context, a *auth.RequestAuth, clients requestClients) (string, error) {

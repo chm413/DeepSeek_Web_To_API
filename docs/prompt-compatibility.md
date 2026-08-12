@@ -42,6 +42,14 @@
 **章节来源**
 - [AGENTS.md](file://AGENTS.md)
 
+### Codex / Responses compact recovery
+
+- `compress_keep_recent` is counted by user-message boundaries. Each retained user instruction keeps its complete following assistant/tool chain, and all leading system messages are preserved.
+- Incremental upstream-session rollover remains a separate transport rule: it keeps the immediately preceding assistant result plus the current input and always resends the forced response-format prompt.
+- When a process-local Responses compaction handle has expired but the client supplies a fresh tail after that handle, the tail is treated as an explicit compact recovery request. It may be compacted even while ordinary `prompt_limit.auto_compress_enabled` remains disabled. Every recovered request rebuilds and budgets the actual incremental payload, including the forced response-format prompt, before it is sent upstream.
+- The pinned-session cache accepts a constrained sliding compact window only inside the exact caller/session/account/surface/variant scope. It must match the leading system prefix, at least one previous user message, and the complete latest assistant response. Rotation counts actual upstream calls rather than the number of replayed user messages in a recovered window.
+- Responses empty-output retries propagate the final switched account's replacement upstream session into the incremental branch. Subsequent turns therefore never combine one account with another account's `chat_session_id`; logs expose only fingerprints for this state.
+
 ## Live boundary and protocol notes
 
 The live DeepSeek Web frontend was tested through the normal browser login
@@ -66,13 +74,21 @@ created.
 OpenAI Responses compaction is handled locally and conservatively.
 `previous_response_id` is reconstructed from a per-caller in-process input
 snapshot with the stored visible output appended. `POST /v1/responses/compact`
-and the current Responses `compaction_trigger` both return a single
+returns a canonical next context window containing retained recent items and a
 `type: "compaction"` item whose `encrypted_content` is a random, opaque local
-handle. The handle resolves only for the same caller, is held only for the
-normal Responses-store TTL, and becomes unavailable after expiry or a process
-restart; it is not OpenAI/provider-owned ciphertext and cannot be transferred
-to another proxy. A v2 trigger stream emits exactly one completed compaction
-output item before `response.completed`.
+handle. The current Responses `compaction_trigger` compatibility path returns
+the same window through normal Responses output events. Explicit compact uses
+a real Flash completion to merge older turns into one rolling summary even
+when the request is below the model hard limit; a result is stored only when
+both its serialized state and rebuilt UTF-16 prompt are strictly smaller. A single
+indivisible user/tool turn returns HTTP 422 instead of a misleading no-op
+handle. Logs report wire bytes, before/after message counts, state bytes,
+prompt units, summary source/output units, duration, attempts, and reduction
+percentages. The handle resolves only for the same
+caller, uses a sliding process-local idle TTL of at least 24 hours, and becomes
+unavailable after expiry or a process restart; it is not OpenAI/provider-owned
+ciphertext and cannot be transferred to another proxy. Standalone compact
+output must be passed to the next request as-is.
 
 On a later request, a recognized local handle expands back to its canonical
 locally compacted message window before prompt normalization. Unknown provider
@@ -84,12 +100,28 @@ supports the real `clear_thinking*` operation and its `keep` policy (`all`,
 Thinking and non-thinking requests continue to use separate upstream flags
 throughout these paths.
 
-For ordinary Responses requests, a numeric
-`context_management.compact_threshold` strictly between 0 and 1 lowers that
-request's local history-compression budget to the corresponding fraction of
-the dynamically resolved model limit when local automatic compression is
-enabled. Triggered compaction stores that locally reduced window behind the
-opaque handle; it does not mint provider-owned encrypted state.
+For ordinary Responses requests, the official shape is
+`context_management: [{"type":"compaction","compact_threshold":200000}]`.
+The threshold is a positive rendered-token count, measured with the service's
+tokenizer; it never changes the model's UTF-16 hard input limit. Once crossed,
+the service runs the Flash summary before the main completion and prepends the
+opaque compaction item to the same non-stream response or SSE stream. The item
+is stored in `previous_response_id` snapshots and can also be used for
+stateless array chaining. The independent operator setting
+`prompt_limit.summary_compaction_threshold` remains a model-window ratio for
+background automatic summaries and is disabled by default.
+
+The summary request always places `--- COMPACTION OUTPUT REQUIREMENTS ---`
+after the source transcript, so the required output contract is the final
+instruction seen by the upstream model. DeepSeek completion failures are also
+checked before normal SSE parsing: the Web API can return HTTP 200 with a bare
+JSON business error such as `data.biz_code=5` and `data.biz_msg="user is
+muted"`. Such responses are not treated as empty model output. Managed
+accounts are marked `temporarily_muted` and skipped immediately; explicit ban
+messages are persisted as `upstream_banned`. Each retry capture records the
+actual routed account. Active mute/rate-limit cooldowns are retained until
+their expiry and are not cleared early by a weaker periodic health-check
+success.
 
 ## Incremental upstream session continuation
 
@@ -475,7 +507,7 @@ prompt，最终字节数只有此刻才能确定，可能在压缩后仍然超�
 - `ReasoningEffortPrompt` 被重复注入多次：检查 `AppendThinkingInjectionPromptToLatestUser` 的幂等检测是否生效（依赖 `ThinkingInjectionMarker` 字符串检测）；若 user message 内容不是 string 类型而是 content block 数组，确认 `NormalizeOpenAIContentForPrompt` 能正确合并文本。
 - `ToolChainPlaybookPrompt` 每请求都被插入：检查 `PrependPlaybookToSystem` 的幂等检测；函数通过 `strings.Contains(existing, playbook)` 检测已有 playbook，若 playbook 内容版本不一致（旧版 playbook 和新版 playbook 字符串不同）会造成重复插入，升级时需确认历史 system message 不含旧版 playbook 残留。
 - 专家模式（`deepseek-v4-pro*`）长文本报错而 flash 档正常：这是 `prompt_limit.max_chars_expert`（默认 150000）比 `max_chars_default`（默认 380000）更紧导致的预期行为，两个默认值均来自生产数据校准。确认档位判定正确（`config.GetModelType` 应对 pro 返回 `"expert"`）；确需更大上限时调高 `prompt_limit.max_chars_expert`，但生产数据显示 expert 档在 150k 以上成功率从 100% 跌至 ~37%，且失败为上游空输出（重试耗尽）而非本地 413——调高上限会把失败点从本地压缩推迟到上游空输出重试，不会真正提升成功率。
-- 上下文超限时默认不会自动压缩：这是 `prompt_limit.auto_compress_enabled=false` 的预期行为，服务会返回带实际 UTF-16 units 和溢出量的 413；需要自动裁剪时显式开启该开关。Responses 的 `context_management.compact_threshold` 和 `/v1/responses/compact` 属于用户明确请求，仍会执行一次本地 compact；② 若已开启自动压缩，确认压缩调用位于 `applyCurrentInputFile` **之前**——放在 CIF 之后时 `Messages` 已被折叠为单条，`CompressMessages` 因 `len(nonSystem) <= window` 恒成立而空转；③ 对话轮数本身不足 `compress_keep_recent * 2` 条时无可丢弃，此时超限来自单条巨型消息，压缩无解，只能由调用方缩短输入。
+- 上下文超限时默认不会执行旧式静默裁剪：这是 `prompt_limit.auto_compress_enabled=false` 的预期行为，服务会返回带实际 UTF-16 units 和溢出量的 413。Responses 的 `context_management: [{"type":"compaction","compact_threshold":200000}]`（token 数）和 `/v1/responses/compact` 属于用户明确请求，会调用 Flash 生成滚动摘要；后台自动摘要由独立的 `summary_compaction_enabled` 与比例阈值控制，默认关闭。若已开启旧式自动裁剪，确认裁剪调用位于 `applyCurrentInputFile` **之前**；放在 CIF 之后时 `Messages` 已折叠为单条，无法再按完整回合裁剪。单个不可分割用户/工具回合无法摘要时明确返回 422，不创建误导性的 compact handle。
 - 压缩后返回 `413 prompt_too_large`：`CompressToFit` 已折半到最小窗口仍超限，通常是单条消息（或 CIF 内联后的 transcript + 指令块）自身超过档位上限。检查 `dropped_messages` 与 `prompt_units` 日志字段确认压缩确实生效，再决定是调高上限还是缩短单条输入。
 - 压缩后模型报工具调用配对错误：确认 `dropLeadingOrphanToolResults` 生效。按轮次裁剪可能切在 assistant `tool_calls` 与其 `tool` 结果之间，留下孤儿结果；该函数会剥掉窗口开头的孤儿串。若客户端使用非标准 role 名承载工具结果（非 `tool` / `function`），孤儿检测不会识别，需要扩展 `isToolResultRole`。
 

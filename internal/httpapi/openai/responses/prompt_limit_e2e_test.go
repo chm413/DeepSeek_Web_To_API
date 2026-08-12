@@ -2,6 +2,8 @@ package responses
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -26,6 +28,35 @@ func (responsesAutoCompressConfigStub) PromptLimitSnapshot() config.PromptLimitS
 type responsesPromptLimitDSStub struct {
 	responsesIncrementalDSStub
 	limitCalls int
+}
+
+type responsesSummaryConfigStub struct{ responsesHistoryConfigStub }
+
+func (responsesSummaryConfigStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.MaxCharsDefault = 8000
+	cfg.MaxCharsDefaultConfigured = true
+	cfg.SummaryCompactionEnable = true
+	cfg.SummaryCompactionThreshold = 0.5
+	cfg.KeepRecentTurns = 1
+	return cfg
+}
+
+type responsesSummaryDSStub struct {
+	responsesIncrementalDSStub
+}
+
+func (s *responsesSummaryDSStub) GetModelInputLimits(context.Context, *auth.RequestAuth) (config.ModelInputLimits, error) {
+	return config.ModelInputLimits{Default: 2621440, Expert: 163840}, nil
+}
+
+func (s *responsesSummaryDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, payload map[string]any, _ string, _ int) (*http.Response, error) {
+	s.normal = append(s.normal, cloneResponsesPayload(payload))
+	prompt, _ := payload["prompt"].(string)
+	if strings.Contains(prompt, "CONVERSATION TO COMPACT") {
+		return responsesIncrementalSSE(301, "Preserve the project requirements and completed decisions."), nil
+	}
+	return responsesIncrementalSSE(401, "main response"), nil
 }
 
 func (s *responsesPromptLimitDSStub) GetModelInputLimits(context.Context, *auth.RequestAuth) (config.ModelInputLimits, error) {
@@ -77,5 +108,105 @@ func TestResponsesExpertOverflowAutoCompressesBeforeUpstream(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "newest-marker") || !strings.Contains(prompt, "retain system instructions") {
 		t.Fatal("automatic compression dropped required recent or system content")
+	}
+}
+
+func TestResponsesServerThresholdRunsSummaryBeforeMainCompletion(t *testing.T) {
+	ds := &responsesSummaryDSStub{}
+	h := &Handler{
+		Store: responsesSummaryConfigStub{},
+		Auth:  responsesIncrementalAuthStub{},
+		DS:    ds,
+	}
+	response := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": []any{
+			map[string]any{"role": "user", "content": "old-marker " + strings.Repeat("old requirement ", 160)},
+			map[string]any{"role": "assistant", "content": strings.Repeat("old answer ", 160)},
+			map[string]any{"role": "user", "content": "latest-marker continue implementation"},
+		},
+	})
+	if len(ds.normal) != 2 {
+		t.Fatalf("expected summary plus main completion, got %d", len(ds.normal))
+	}
+	summaryPrompt, _ := ds.normal[0]["prompt"].(string)
+	mainPrompt, _ := ds.normal[1]["prompt"].(string)
+	if !strings.Contains(summaryPrompt, "CONVERSATION TO COMPACT") || !strings.Contains(summaryPrompt, "old-marker") {
+		t.Fatalf("unexpected summary request: %q", summaryPrompt)
+	}
+	if strings.Contains(mainPrompt, "old-marker") || !strings.Contains(mainPrompt, "latest-marker") || !strings.Contains(mainPrompt, "ds2api_summary_v1") {
+		t.Fatalf("main request did not use compacted context: %q", mainPrompt)
+	}
+	assertCompactionPrecedesAssistant(t, response)
+}
+
+func TestResponsesRequestTokenThresholdRunsSummaryAndEmitsCompaction(t *testing.T) {
+	ds := &responsesSummaryDSStub{}
+	h := &Handler{
+		Store: responsesHistoryConfigStub{},
+		Auth:  responsesIncrementalAuthStub{},
+		DS:    ds,
+	}
+	response := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"context_management": []any{
+			map[string]any{"type": "compaction", "compact_threshold": 100},
+		},
+		"input": []any{
+			map[string]any{"role": "user", "content": "old-marker " + strings.Repeat("old requirement ", 160)},
+			map[string]any{"role": "assistant", "content": strings.Repeat("old answer ", 160)},
+			map[string]any{"role": "user", "content": "latest-marker continue implementation"},
+		},
+	})
+	if len(ds.normal) != 2 {
+		t.Fatalf("expected summary plus main completion, got %d", len(ds.normal))
+	}
+	assertCompactionPrecedesAssistant(t, response)
+}
+
+func TestResponsesRequestTokenThresholdStreamEmitsCompactionBeforeAssistant(t *testing.T) {
+	ds := &responsesSummaryDSStub{}
+	h := &Handler{
+		Store: responsesHistoryConfigStub{},
+		Auth:  responsesIncrementalAuthStub{},
+		DS:    ds,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+  "model":"deepseek-v4-flash",
+  "stream":true,
+  "context_management":[{"type":"compaction","compact_threshold":100}],
+  "input":[
+    {"role":"user","content":"`+strings.Repeat("old requirement ", 160)+`"},
+    {"role":"assistant","content":"`+strings.Repeat("old answer ", 160)+`"},
+    {"role":"user","content":"latest-marker continue implementation"}
+  ]
+}`))
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	h.Responses(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	compactionAt := strings.Index(body, `"type":"compaction"`)
+	assistantAt := strings.Index(body, `"role":"assistant"`)
+	if compactionAt < 0 || assistantAt < 0 || compactionAt >= assistantAt {
+		t.Fatalf("compaction item did not precede assistant output: %s", body)
+	}
+	if !strings.Contains(body, `"output_index":0`) || !strings.Contains(body, `"output_index":1`) {
+		t.Fatalf("stream output indices did not reserve index zero for compaction: %s", body)
+	}
+}
+
+func assertCompactionPrecedesAssistant(t *testing.T, response map[string]any) {
+	t.Helper()
+	output, _ := response["output"].([]any)
+	if len(output) < 2 {
+		t.Fatalf("expected compaction and assistant output, got %#v", response)
+	}
+	first, _ := output[0].(map[string]any)
+	second, _ := output[1].(map[string]any)
+	if first["type"] != "compaction" || second["role"] != "assistant" {
+		t.Fatalf("unexpected output order: %#v", output)
 	}
 }

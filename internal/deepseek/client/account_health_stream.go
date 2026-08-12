@@ -110,21 +110,20 @@ func accountHealthErrorFromSSEChunk(chunk map[string]any) *auth.AccountHealthErr
 		}
 	}
 
-	switch code {
-	case upstreamMutedCode:
+	healthErr := accountHealthErrorFromCodes(code, 0, message, "", false)
+	if healthErr == nil {
+		return nil
+	}
+	switch healthErr.State {
+	case account.HealthTemporarilyMuted:
 		until := unixSeconds(valueFromMaps("mute_until", data, chunk))
 		if until.IsZero() {
 			until = unixSeconds(valueFromMaps("end_at", data, chunk))
 		}
-		if message == "" {
-			message = defaultMuteMessage
-		}
-		return &auth.AccountHealthError{State: account.HealthTemporarilyMuted, Until: until, Code: code, Message: message}
-	case upstreamUserBannedCode:
-		if message == "" {
-			message = defaultBannedMessage
-		}
-		return &auth.AccountHealthError{State: account.HealthPermanentlyBanned, Code: code, Message: message}
+		healthErr.Until = until
+		return healthErr
+	case account.HealthPermanentlyBanned:
+		return healthErr
 	default:
 		return nil
 	}

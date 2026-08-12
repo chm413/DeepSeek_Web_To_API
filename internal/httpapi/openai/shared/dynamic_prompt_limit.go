@@ -2,8 +2,8 @@ package shared
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"DeepSeek_Web_To_API/internal/auth"
@@ -50,65 +50,74 @@ func ResolveDynamicPromptLimits(ctx context.Context, ds any, a *auth.RequestAuth
 	return cfg, true, nil
 }
 
-// ApplyResponsesCompactThreshold turns OpenAI Responses' per-request
-// compact_threshold into a temporary local compression budget. It does not
-// emit a provider-owned encrypted compaction item; it only asks the existing
-// history compressor to compact earlier than the hard upstream ceiling.
-func ApplyResponsesCompactThreshold(req map[string]any, cfg config.PromptLimitSettings, model string) (config.PromptLimitSettings, bool) {
-	if !cfg.Enabled {
-		return cfg, false
+// ResponsesCompactThreshold reads the official Responses API shape:
+//
+//	"context_management": [{"type":"compaction","compact_threshold":200000}]
+//
+// compact_threshold is a rendered-token count. It must not be interpreted as
+// a fraction of DeepSeek Web's UTF-16 input_character_limit.
+func ResponsesCompactThreshold(req map[string]any) (int, bool, error) {
+	raw, exists := req["context_management"]
+	if !exists || raw == nil {
+		return 0, false, nil
 	}
-	management, _ := req["context_management"].(map[string]any)
-	if management == nil {
-		return cfg, false
+	items, ok := raw.([]any)
+	if !ok {
+		return 0, false, fmt.Errorf("context_management must be an array")
 	}
-	threshold, ok := numericFraction(management["compact_threshold"])
-	if !ok || threshold <= 0 || threshold >= 1 {
-		return cfg, false
-	}
-	limit := configLimitForModel(cfg, model)
-	target := int(float64(limit) * threshold)
-	if target <= 0 || target >= limit {
-		return cfg, false
-	}
-	if isExpertModel(model) {
-		cfg.MaxCharsExpert = target
-	} else {
-		cfg.MaxCharsDefault = target
-	}
-	// A client-provided compact_threshold is an explicit compaction request;
-	// it is allowed even when silent over-limit auto-compression is disabled.
-	cfg.AutoCompressEnable = true
-	if cfg.ProFlashCompressionTarget > target && isExpertModel(model) {
-		cfg.ProFlashCompressionTarget = target
-	}
-	return cfg, true
-}
-
-func numericFraction(value any) (float64, bool) {
-	switch v := value.(type) {
-	case float64:
-		return v, true
-	case float32:
-		return float64(v), true
-	case int:
-		return float64(v), true
-	case string:
-		if n, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
-			return n, true
+	threshold := 0
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			return 0, false, fmt.Errorf("context_management entries must be objects")
+		}
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprintf("%v", item["type"])), "compaction") {
+			continue
+		}
+		rawThreshold, exists := item["compact_threshold"]
+		if !exists || rawThreshold == nil {
+			continue
+		}
+		value, ok := positiveJSONInteger(rawThreshold)
+		if !ok {
+			return 0, false, fmt.Errorf("context_management.compact_threshold must be a positive integer token count")
+		}
+		if threshold == 0 || value < threshold {
+			threshold = value
 		}
 	}
-	return 0, false
+	return threshold, threshold > 0, nil
 }
 
-func configLimitForModel(cfg config.PromptLimitSettings, model string) int {
-	if isExpertModel(model) {
-		return cfg.MaxCharsExpert
+func positiveJSONInteger(value any) (int, bool) {
+	var n int64
+	switch v := value.(type) {
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		n = parsed
+	case float64:
+		if v != float64(int64(v)) {
+			return 0, false
+		}
+		n = int64(v)
+	case float32:
+		if v != float32(int64(v)) {
+			return 0, false
+		}
+		n = int64(v)
+	case int:
+		n = int64(v)
+	case int64:
+		n = v
+	default:
+		return 0, false
 	}
-	return cfg.MaxCharsDefault
-}
-
-func isExpertModel(model string) bool {
-	modelType, ok := config.GetModelType(model)
-	return ok && modelType == "expert"
+	maxInt := int64(^uint(0) >> 1)
+	if n <= 0 || n > maxInt {
+		return 0, false
+	}
+	return int(n), true
 }

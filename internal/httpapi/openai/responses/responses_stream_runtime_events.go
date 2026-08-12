@@ -2,10 +2,13 @@ package responses
 
 import (
 	"encoding/json"
+	"strings"
 
 	openaifmt "DeepSeek_Web_To_API/internal/format/openai"
 	"DeepSeek_Web_To_API/internal/sse"
 	"DeepSeek_Web_To_API/internal/toolstream"
+
+	"github.com/google/uuid"
 )
 
 func (s *responsesStreamRuntime) nextSequence() int {
@@ -32,6 +35,23 @@ func (s *responsesStreamRuntime) sendEvent(event string, payload map[string]any)
 
 func (s *responsesStreamRuntime) sendCreated() {
 	s.sendEvent("response.created", openaifmt.BuildResponsesCreatedPayload(s.responseID, s.model))
+}
+
+func (s *responsesStreamRuntime) emitOutputPrefix() {
+	for _, rawItem := range s.outputPrefix {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemID := strings.TrimSpace(responseString(item["id"]))
+		if itemID == "" {
+			itemID = "item_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+			item["id"] = itemID
+		}
+		outputIndex := s.allocateOutputIndex()
+		s.sendEvent("response.output_item.added", openaifmt.BuildResponsesOutputItemAddedPayload(s.responseID, itemID, outputIndex, item))
+		s.sendEvent("response.output_item.done", openaifmt.BuildResponsesOutputItemDonePayload(s.responseID, itemID, outputIndex, item))
+	}
 }
 
 func (s *responsesStreamRuntime) sendDone() {

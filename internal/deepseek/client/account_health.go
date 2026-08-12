@@ -39,7 +39,7 @@ func accountHealthErrorFromCodes(code, bizCode int, msg, bizMsg string, includeL
 		message = strings.TrimSpace(msg)
 	}
 	switch {
-	case (includeLoginBan && (code == loginUserBannedCode || bizCode == loginUserBannedCode)) || code == upstreamUserBannedCode || bizCode == upstreamUserBannedCode:
+	case (includeLoginBan && (code == loginUserBannedCode || bizCode == loginUserBannedCode)) || code == upstreamUserBannedCode || bizCode == upstreamUserBannedCode || explicitPermanentBanMessage(message):
 		if message == "" {
 			message = defaultBannedMessage
 		}
@@ -49,7 +49,7 @@ func accountHealthErrorFromCodes(code, bizCode int, msg, bizMsg string, includeL
 			message = defaultInvalidCredentialsMessage
 		}
 		return &auth.AccountHealthError{State: account.HealthInvalidCredentials, Code: firstNonZero(bizCode, code), Message: message}
-	case code == upstreamMutedCode || bizCode == upstreamMutedCode:
+	case code == upstreamMutedCode || bizCode == upstreamMutedCode || explicitMuteMessage(message):
 		if message == "" {
 			message = defaultMuteMessage
 		}
@@ -57,6 +57,48 @@ func accountHealthErrorFromCodes(code, bizCode int, msg, bizMsg string, includeL
 	default:
 		return nil
 	}
+}
+
+func explicitPermanentBanMessage(message string) bool {
+	normalized := normalizedAccountFailureMessage(message)
+	patterns := []string{
+		"user is banned",
+		"account is banned",
+		"user has been banned",
+		"account has been banned",
+		"用户已被封禁",
+		"账号已被封禁",
+		"账户已被封禁",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(normalized, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitMuteMessage(message string) bool {
+	normalized := normalizedAccountFailureMessage(message)
+	patterns := []string{
+		"user is muted",
+		"account is muted",
+		"user has been muted",
+		"account has been muted",
+		"用户已被禁言",
+		"账号已被禁言",
+		"账户已被禁言",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(normalized, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedAccountFailureMessage(message string) string {
+	return strings.ToLower(strings.TrimSpace(strings.NewReplacer("_", " ", "-", " ").Replace(message)))
 }
 
 func loginCredentialsRejected(msg, bizMsg string) bool {

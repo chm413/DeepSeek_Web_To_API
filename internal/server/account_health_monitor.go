@@ -98,13 +98,24 @@ func checkAccountHealth(parent context.Context, store *config.Store, pool *accou
 		config.Logger.Warn("[account_health_monitor] check failed", "account_fingerprint", accountFingerprint, "error", err, "elapsed_ms", time.Since(started).Milliseconds())
 		return
 	}
-	pool.ClearHealth(acc.Identifier())
+	if current, ok := pool.AccountHealth(acc.Identifier()); ok && preserveMonitorTransientHealth(current, time.Now()) {
+		config.Logger.Info("[account_health_monitor] healthy endpoint did not clear active runtime cooldown", "account_fingerprint", accountFingerprint, "state", current.State, "until", current.Until, "elapsed_ms", time.Since(started).Milliseconds())
+	} else {
+		pool.ClearHealth(acc.Identifier())
+	}
 	if token != "" && token != acc.Token {
 		if err := store.UpdateAccountToken(acc.Identifier(), token); err != nil {
 			config.Logger.Warn("[account_health_monitor] token persistence failed", "account_fingerprint", accountFingerprint, "error", err)
 		}
 	}
 	config.Logger.Info("[account_health_monitor] healthy", "account_fingerprint", accountFingerprint, "elapsed_ms", time.Since(started).Milliseconds())
+}
+
+func preserveMonitorTransientHealth(health account.Health, now time.Time) bool {
+	if health.State != account.HealthTemporarilyMuted && health.State != account.HealthRateLimited {
+		return false
+	}
+	return health.Until.After(now)
 }
 
 func accountHealthFingerprint(accountID string) string {

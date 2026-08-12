@@ -39,9 +39,12 @@ Codex CLI **从 2026 年 2 月起已完全移除** `chat/completions` 支持：
   "store": true,           // 是否在服务端存储对话，用于 previous_response_id
   "max_output_tokens": 32768,
   "truncation": "auto",    // 自动截断上下文
-  "context_management": {
-    "compact_threshold": 0.85
-  },
+  "context_management": [
+    {
+      "type": "compaction",
+      "compact_threshold": 200000
+    }
+  ],
   "previous_response_id": "resp_xxx" // 上下文链接（可选）
 }
 ```
@@ -335,14 +338,15 @@ Codex CLI 使用 Responses API 的两种上下文延续模式，可根据配置�
 
 ### 7.2 自动上下文压缩（Compaction）
 
-OpenAI 原生服务可在 `context_management.compact_threshold` 设置后（如 0.85）生成 provider-owned compaction state。ds2api 将该字段解释为本次请求的提前压缩预算：按当前模型的动态有效输入上限乘以阈值，调用已有的本地历史压缩流程。当前 Codex 的 v2 `compaction_trigger` 也会被识别，并返回一个本代理可解析的本地 compaction handle；该 handle 不是 OpenAI provider-owned ciphertext。
+OpenAI 官方协议使用 `context_management: [{"type":"compaction","compact_threshold":200000}]`；阈值是渲染后的 token 数，不是模型窗口比例。ds2api 使用现有 tokenizer 统计最终提示词，达到阈值后先调用 Flash 把旧回合合并为一个滚动摘要，再执行主模型请求，并把本地 opaque `compaction` item 插入同一次普通响应或 SSE 流。当前 Codex 的 v2 `compaction_trigger` 也会被识别；该 handle 只由本代理解析，不是 OpenAI provider-owned ciphertext。
 
 独立压缩端点：`POST /v1/responses/compact`，发送完整上下文，返回压缩后的上下文窗口供下轮使用。
 
 **ds2api 适配**：
 - `previous_response_id`：ds2api 在进程内按调用方保存 canonical input，并追加上一响应的可见 output；过期或不存在的 ID 返回 404。provider-owned encrypted reasoning/compaction 状态不会被伪造。
-- 自动 compaction：本地自动压缩启用且 `compact_threshold` 为 `(0,1)` 时，按模型的动态有效输入上限计算本次压缩预算；非法值被容忍且不报 400/500。`compaction_trigger` 的 SSE 响应只发出一个已完成的 `compaction` output item，再发 `response.completed`。
-- `/v1/responses/compact` 端点：返回 `{ "output": [{ "type": "compaction", "encrypted_content": "ds2api_compact_..." }] }`。该值是按调用方隔离、受 Responses store TTL 约束的本地不透明句柄；进程重启、TTL 过期或换调用方后不可使用。它不是可迁移或可由 OpenAI 验证的密文。
+- 自动 compaction：官方数组中的 `compact_threshold` 必须是正整数 token 数；非法形状返回 400。不可安全压缩返回 422；账号 muted/banned 分别返回结构化 429/403，其他上游错误保留对应状态。任何摘要失败都不会继续发送原始长历史并伪装为已压缩。SSE 先发 `compaction` 的 added/done，再继续 assistant 输出。
+- `/v1/responses/compact` 端点：返回 `object: "response.compaction"`，其 `output` 是下一轮的规范上下文窗口，通常包含最近保留项和 `{"type":"compaction","encrypted_content":"ds2api_compact_..."}`。调用方必须原样使用完整 `output`，不得只摘取 handle。该值按调用方隔离、受 Responses compaction TTL 约束；进程重启、TTL 过期或换调用方后不可使用，也不是可迁移或可由 OpenAI 验证的密文。
+- 摘要上游错误：DeepSeek 可能以 HTTP 200 + 裸 JSON 返回 `biz_code=5 / user is muted`。ds2api 会在 SSE 解析前识别该业务错误，实时冷却账号并切换到下一个账号；不会把它误报为 `upstream_empty_output`。明确封禁会自动持久化禁用。账号状态和开发捕获按每次实际路由更新。
 
 ### 7.3 增量上游会话复用
 
@@ -457,7 +461,7 @@ provider-owned 的可迁移状态。
 | 编号 | 检查项 | 涉及文件 | 状态 |
 |------|--------|---------|------|
 | C-09 | `previous_response_id` 字段被识别，能查询存储的响应并重建 `input` 历史 | `internal/httpapi/openai/responses/previous_response.go` | 确认（进程内、按调用方、TTL 内） |
-| C-10 | `context_management.compact_threshold` 为 `(0,1)` 时触发本地提前压缩预算，非法值被容忍 | `internal/httpapi/openai/shared/dynamic_prompt_limit.go` | 确认（本地句柄，不伪造 provider state） |
+| C-10 | 官方 `context_management[]` 中正整数 token `compact_threshold` 触发 Flash 滚动摘要，并在同次响应输出本地 compaction item | `internal/httpapi/openai/shared/dynamic_prompt_limit.go` | 确认（本地句柄，不伪造 provider state） |
 | C-11 | `compaction` / `context_compaction` / `compaction_trigger` 输入状态不会泄漏为提示词；本代理句柄在 TTL 内可展开 | `internal/httpapi/openai/responses/compact.go` | 确认 |
 | C-12 | `reasoning` 字段（`effort`, `summary`）被静默忽略或转换为思维链提示，不报 400 | `internal/promptcompat/thinking_injection.go` | 确认 |
 
@@ -468,7 +472,7 @@ provider-owned 的可迁移状态。
 | C-13 | 工具定义中未知额外字段（如 `outputSchema`）被忽略，不影响 schema 规范化 | `internal/toolcall/toolcalls_schema_normalize.go` | 确认 |
 | C-14 | `parallel_tool_calls: true` 字段被容忍（不报错，行为上串行执行亦可） | `internal/httpapi/openai/shared/handler_toolcall_policy.go` | 确认 |
 | C-15 | `model` 字段透传给翻译层，不做硬编码模型名校验 | `internal/promptcompat/standard_request.go` | 确认 |
-| C-16 | `POST /v1/responses/compact` 返回单个本地 opaque compaction item；Codex v2 trigger 流返回一个完成 item 后结束 | `internal/httpapi/openai/responses/compact.go` | 确认（仅进程内 TTL 状态） |
+| C-16 | `POST /v1/responses/compact` 返回可原样续接的规范窗口（保留项 + 本地 opaque compaction item）；Codex v2 trigger 使用相同窗口事件 | `internal/httpapi/openai/responses/compact.go` | 确认（仅进程内 TTL 状态） |
 | C-17 | `include: ["reasoning.encrypted_content"]` 等 `include` 数组字段被容忍 | `internal/promptcompat/standard_request.go` | 确认 |
 
 ---

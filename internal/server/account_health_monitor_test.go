@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"testing"
+	"time"
 
 	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/auth"
@@ -64,5 +65,37 @@ func TestAccountHealthFingerprintIsStableAndDoesNotExposeIdentifier(t *testing.T
 	}
 	if first == identifier {
 		t.Fatalf("account fingerprint must not expose the account identifier")
+	}
+}
+
+func TestHealthMonitorDoesNotClearActiveCompletionMute(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"accounts":[{"email":"muted@example.com","token":"token-1"}]
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+	until := time.Now().Add(time.Hour)
+	pool.MarkTemporaryMute("muted@example.com", until, "completion returned user is muted")
+	checker := accountHealthCheckerFunc(func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+
+	runAccountHealthChecksOnce(context.Background(), store, pool, resolver, checker)
+	health, ok := pool.AccountHealth("muted@example.com")
+	if !ok || health.State != account.HealthTemporarilyMuted || !health.Until.Equal(until) {
+		t.Fatalf("expected active completion mute to survive monitor check, got %#v, %v", health, ok)
+	}
+}
+
+func TestPreserveMonitorTransientHealthRejectsExpiredCooldown(t *testing.T) {
+	now := time.Now()
+	if preserveMonitorTransientHealth(account.Health{State: account.HealthTemporarilyMuted, Until: now.Add(-time.Second)}, now) {
+		t.Fatal("expired mute must not be preserved")
+	}
+	if preserveMonitorTransientHealth(account.Health{State: account.HealthPermanentlyBanned}, now) {
+		t.Fatal("permanent states are managed by persistent disable, not transient cooldown preservation")
 	}
 }

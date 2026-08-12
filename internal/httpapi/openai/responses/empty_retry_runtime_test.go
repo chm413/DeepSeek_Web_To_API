@@ -8,9 +8,59 @@ import (
 	"strings"
 	"testing"
 
+	"DeepSeek_Web_To_API/internal/auth"
+	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
 	"DeepSeek_Web_To_API/internal/promptcompat"
 	"DeepSeek_Web_To_API/internal/stream"
 )
+
+type responsesEmptyRetryAuthStub struct{}
+
+func (responsesEmptyRetryAuthStub) Determine(_ *http.Request) (*auth.RequestAuth, error) {
+	return nil, nil
+}
+
+func (responsesEmptyRetryAuthStub) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error) {
+	return nil, nil
+}
+
+func (responsesEmptyRetryAuthStub) DetermineWithSession(_ *http.Request, _ []byte) (*auth.RequestAuth, error) {
+	return nil, nil
+}
+
+func (responsesEmptyRetryAuthStub) Release(_ *auth.RequestAuth) {}
+
+func (responsesEmptyRetryAuthStub) SwitchAccount(_ context.Context, a *auth.RequestAuth) bool {
+	a.AccountID = "retry-account"
+	a.DeepSeekToken = "retry-token"
+	return true
+}
+
+type responsesEmptyRetryDSStub struct{}
+
+func (responsesEmptyRetryDSStub) CreateSession(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "session-" + a.AccountID, nil
+}
+
+func (responsesEmptyRetryDSStub) GetPow(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "pow-" + a.AccountID, nil
+}
+
+func (responsesEmptyRetryDSStub) UploadFile(_ context.Context, _ *auth.RequestAuth, _ dsclient.UploadFileRequest, _ int) (*dsclient.UploadFileResult, error) {
+	return nil, nil
+}
+
+func (responsesEmptyRetryDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, _ map[string]any, _ string, _ int) (*http.Response, error) {
+	return nil, nil
+}
+
+func (responsesEmptyRetryDSStub) DeleteSessionForToken(_ context.Context, _, _ string) (*dsclient.DeleteSessionResult, error) {
+	return nil, nil
+}
+
+func (responsesEmptyRetryDSStub) DeleteAllSessionsForToken(_ context.Context, _ string) error {
+	return nil
+}
 
 func makeResponsesOpenAISSEHTTPResponse(lines ...string) *http.Response {
 	body := strings.Join(lines, "\n")
@@ -66,5 +116,28 @@ func TestConsumeResponsesStreamAttemptMarksContextCancelledState(t *testing.T) {
 	}
 	if streamRuntime.finalErrorMessage == "" {
 		t.Fatalf("expected cancelled final error message to be preserved")
+	}
+}
+
+func TestPrepareResponsesEmptyOutputRetryUpdatesActiveSession(t *testing.T) {
+	h := &Handler{Auth: responsesEmptyRetryAuthStub{}, DS: responsesEmptyRetryDSStub{}}
+	a := &auth.RequestAuth{
+		UseConfigToken: true,
+		AccountID:      "initial-account",
+		DeepSeekToken:  "initial-token",
+		TriedAccounts:  map[string]bool{},
+	}
+	base := map[string]any{"chat_session_id": "session-initial-account", "prompt": "request"}
+	retry := clonePayloadForEmptyOutputRetry(base, 101)
+	activeSessionID := "session-initial-account"
+	pow, ok := h.prepareResponsesEmptyOutputRetry(context.Background(), a, base, retry, "pow-initial", 1, false, nil, &activeSessionID)
+	if !ok {
+		t.Fatal("expected managed retry preparation to succeed")
+	}
+	if activeSessionID != "session-retry-account" || base["chat_session_id"] != activeSessionID || retry["chat_session_id"] != activeSessionID {
+		t.Fatalf("retry session state was not propagated: active=%q base=%#v retry=%#v", activeSessionID, base, retry)
+	}
+	if pow != "pow-retry-account" || a.AccountID != "retry-account" {
+		t.Fatalf("retry did not use switched account: pow=%q account=%q", pow, a.AccountID)
 	}
 }

@@ -71,8 +71,9 @@ end
 | HTTP 头 | `User-Agent`、Authorization、`anthropic-beta`、`OpenAI-Beta` 等 |
 | 模型名约定 | 默认值、是否硬编码、可否覆盖 |
 | 推理字段 | `reasoning` / `reasoning_effort` / `thinking.budget_tokens` 等 |
-| 上下文管理 | `previous_response_id` 进程内续接；`compact_threshold` 触发本地提前压缩；standalone compact 返回同调用方 TTL 内有效的本地 opaque handle |
+| 上下文管理 | `previous_response_id` 进程内续接；官方 token `compact_threshold` 触发 Flash 滚动摘要并在同次响应输出 compaction item；standalone compact 返回可原样续接的规范窗口 |
 | 增量上游会话 | Chat / Responses / Claude Messages / Gemini 均可在 `auto_delete.mode=none` 下严格复用同一 DeepSeek session；每轮固定输出格式提示词 + 新增 role blocks，失败自动完整重放 |
+| 账号业务错误 | HTTP 200 裸 JSON 的 `biz_code=5 / user is muted` 在 SSE 前识别，实时冷却并切换账号；明确封禁自动持久化禁用 |
 | 已知代理不兼容 | LiteLLM / OpenRouter / ds2api 用户报告的具体失败模式 |
 
 末尾「ds2api 适配 checklist」按 P0/P1/P2 标注每项的状态（已实现 / 待实现 / 需确认）。
@@ -102,7 +103,7 @@ end
 | 改动 | 来源报告 | 落地版本 | 关键文件 |
 |---|---|---|---|
 | `mcp_servers` 字段展开为虚拟工具描述 | claude-coding-clients / opencode | v1.0.5 | `internal/httpapi/claude/standard_request.go` |
-| `/v1/responses/compact` 与 v2 `compaction_trigger` 返回本地 opaque compaction handle | codex | 当前 | `internal/httpapi/openai/responses/compact.go` |
+| `/v1/responses/compact` 与 v2 `compaction_trigger` 返回保留项 + 本地 opaque compaction handle 的规范窗口 | codex | 当前 | `internal/httpapi/openai/responses/compact.go` |
 | Codex `compaction` / `reasoning` input item 静默跳过 | codex | v1.0.12 | `internal/promptcompat/responses_input_items.go` |
 | `/api/messages` + `/api/messages/count_tokens` 路由别名 | opencode / claude-coding-clients | v1.0.12 | `internal/httpapi/claude/handler_routes.go` |
 | `/chat/completions` 无 `/v1` 前缀别名 | cherry-studio (#13192) | 历史版本 | `internal/server/router.go` |

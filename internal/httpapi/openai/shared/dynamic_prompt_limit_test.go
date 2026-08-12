@@ -95,78 +95,48 @@ func TestEnforcePromptLimitBeforeCIFOnlyRejectsInlineOverflow(t *testing.T) {
 	}
 }
 
-func TestApplyResponsesCompactThresholdUsesExpertBudget(t *testing.T) {
-	cfg := config.DefaultPromptLimitSettings()
-	cfg.MaxCharsExpert = 163840
-	cfg.ProFlashCompressionTarget = 150000
+func TestResponsesCompactThresholdUsesOfficialArrayAndTokenCount(t *testing.T) {
 	req := map[string]any{
-		"context_management": map[string]any{"compact_threshold": 0.85},
+		"context_management": []any{
+			map[string]any{"type": "retention"},
+			map[string]any{"type": "compaction", "compact_threshold": float64(200000)},
+		},
 	}
 
-	got, applied := ApplyResponsesCompactThreshold(req, cfg, "deepseek-v4-pro")
-	if !applied {
-		t.Fatal("expected compact threshold to apply")
-	}
-	if got.MaxCharsExpert != 139264 {
-		t.Fatalf("expert threshold mismatch: got %d want %d", got.MaxCharsExpert, 139264)
-	}
-	if got.MaxCharsDefault != cfg.MaxCharsDefault {
-		t.Fatalf("default limit changed: got %d want %d", got.MaxCharsDefault, cfg.MaxCharsDefault)
-	}
-	if got.ProFlashCompressionTarget != 139264 {
-		t.Fatalf("pro-to-flash target was not clamped: got %d want %d", got.ProFlashCompressionTarget, 139264)
+	got, applied, err := ResponsesCompactThreshold(req)
+	if err != nil || !applied || got != 200000 {
+		t.Fatalf("threshold=(%d,%v,%v), want (200000,true,nil)", got, applied, err)
 	}
 }
 
-func TestApplyResponsesCompactThresholdUsesDefaultBudget(t *testing.T) {
-	cfg := config.DefaultPromptLimitSettings()
-	cfg.MaxCharsDefault = 200000
-	cfg.MaxCharsExpert = 100000
+func TestResponsesCompactThresholdUsesLowestCompactionThreshold(t *testing.T) {
 	req := map[string]any{
-		"context_management": map[string]any{"compact_threshold": "0.5"},
+		"context_management": []any{
+			map[string]any{"type": "compaction", "compact_threshold": float64(300000)},
+			map[string]any{"type": "compaction", "compact_threshold": float64(180000)},
+		},
 	}
-
-	got, applied := ApplyResponsesCompactThreshold(req, cfg, "deepseek-v4-flash")
-	if !applied {
-		t.Fatal("expected compact threshold to apply")
-	}
-	if got.MaxCharsDefault != 100000 {
-		t.Fatalf("default threshold mismatch: got %d want %d", got.MaxCharsDefault, 100000)
-	}
-	if got.MaxCharsExpert != cfg.MaxCharsExpert {
-		t.Fatalf("expert limit changed: got %d want %d", got.MaxCharsExpert, cfg.MaxCharsExpert)
+	got, applied, err := ResponsesCompactThreshold(req)
+	if err != nil || !applied || got != 180000 {
+		t.Fatalf("threshold=(%d,%v,%v), want (180000,true,nil)", got, applied, err)
 	}
 }
 
-func TestApplyResponsesCompactThresholdRejectsInvalidValues(t *testing.T) {
-	cfg := config.DefaultPromptLimitSettings()
-	values := []any{nil, 0, -0.5, 1, 1.1, "0.5trailing", "not-a-number"}
+func TestResponsesCompactThresholdRejectsInvalidValues(t *testing.T) {
+	values := []any{0, -1, 0.85, "200000", "not-a-number"}
 	for _, value := range values {
 		req := map[string]any{
-			"context_management": map[string]any{"compact_threshold": value},
+			"context_management": []any{map[string]any{"type": "compaction", "compact_threshold": value}},
 		}
-		got, applied := ApplyResponsesCompactThreshold(req, cfg, "deepseek-v4-pro")
-		if applied {
-			t.Fatalf("invalid threshold %v was applied", value)
-		}
-		if got != cfg {
-			t.Fatalf("invalid threshold %v changed settings: got=%+v want=%+v", value, got, cfg)
+		if _, applied, err := ResponsesCompactThreshold(req); applied || err == nil {
+			t.Fatalf("invalid threshold %v was accepted: applied=%v err=%v", value, applied, err)
 		}
 	}
 }
 
-func TestApplyResponsesCompactThresholdIsExplicitWhenAutoCompressionIsDisabled(t *testing.T) {
-	cfg := config.DefaultPromptLimitSettings()
-	cfg.AutoCompressEnable = false
-	req := map[string]any{
-		"context_management": map[string]any{"compact_threshold": 0.5},
-	}
-
-	got, applied := ApplyResponsesCompactThreshold(req, cfg, "deepseek-v4-pro")
-	if !applied {
-		t.Fatal("explicit compact_threshold should apply when automatic compression is disabled")
-	}
-	if got.MaxCharsExpert != cfg.MaxCharsExpert/2 || !got.AutoCompressEnable {
-		t.Fatalf("explicit compact threshold did not create a one-request budget: got=%+v", got)
+func TestResponsesCompactThresholdRejectsLegacyRatioObject(t *testing.T) {
+	req := map[string]any{"context_management": map[string]any{"compact_threshold": 0.85}}
+	if _, applied, err := ResponsesCompactThreshold(req); applied || err == nil {
+		t.Fatalf("legacy ratio object must not be interpreted as official token threshold: applied=%v err=%v", applied, err)
 	}
 }

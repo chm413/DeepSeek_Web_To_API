@@ -49,6 +49,44 @@ export default function BehaviorSection({ t, form, setForm }) {
                 <label className="flex items-start gap-3 rounded-lg border border-border bg-background/60 p-4">
                     <input
                         type="checkbox"
+                        checked={Boolean(form.prompt_limit?.summary_compaction_enabled)}
+                        disabled={!form.prompt_limit?.enabled}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            prompt_limit: {
+                                ...prev.prompt_limit,
+                                summary_compaction_enabled: e.target.checked,
+                            },
+                        }))}
+                        className="mt-1 h-4 w-4 rounded border-border disabled:opacity-50"
+                    />
+                    <div className="space-y-1">
+                        <span className="text-sm font-medium block">{t('settings.summaryCompactionEnabled')}</span>
+                        <span className="text-xs text-muted-foreground block">{t('settings.summaryCompactionDesc')}</span>
+                    </div>
+                </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.summaryCompactionThreshold')}</span>
+                    <input
+                        type="number"
+                        min={0.5}
+                        max={0.95}
+                        step={0.05}
+                        value={form.prompt_limit?.summary_compaction_threshold || 0.8}
+                        disabled={!form.prompt_limit?.enabled || !form.prompt_limit?.summary_compaction_enabled}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            prompt_limit: {
+                                ...prev.prompt_limit,
+                                summary_compaction_threshold: Number(e.target.value || 0.8),
+                            },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
+                    />
+                </label>
+                <label className="flex items-start gap-3 rounded-lg border border-border bg-background/60 p-4">
+                    <input
+                        type="checkbox"
                         checked={Boolean(form.prompt_limit?.enabled ?? true)}
                         onChange={(e) => setForm((prev) => ({
                             ...prev,

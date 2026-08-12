@@ -131,7 +131,8 @@ func (s *responsesStreamRuntime) buildCompletedResponseObject(finalThinking, fin
 	sort.SliceStable(indexed, func(i, j int) bool {
 		return indexed[i].index < indexed[j].index
 	})
-	output := make([]any, 0, len(indexed))
+	output := make([]any, 0, len(s.outputPrefix)+len(indexed))
+	output = append(output, cloneAnySlice(s.outputPrefix)...)
 	for _, it := range indexed {
 		output = append(output, it.item)
 	}

@@ -90,7 +90,14 @@ func PrepareIncrementalRequestWithSettings(store *upstreamsession.Store, ds any,
 			"expected_response_shape", diagnostics.ExpectedResponseShape,
 			"current_response_shape", diagnostics.CurrentResponseShape,
 			"expected_response_hash", diagnostics.ExpectedResponseHash,
-			"current_response_hash", diagnostics.CurrentResponseHash)
+			"current_response_hash", diagnostics.CurrentResponseHash,
+			"sliding_suffix_matches", diagnostics.SlidingSuffixMatches,
+			"sliding_candidate_overlap", diagnostics.SlidingCandidateOverlap,
+			"sliding_matched_prefix", diagnostics.SlidingMatchedPrefix,
+			"sliding_expected_shape", diagnostics.SlidingExpectedShape,
+			"sliding_current_shape", diagnostics.SlidingCurrentShape,
+			"sliding_expected_hash", diagnostics.SlidingExpectedHash,
+			"sliding_current_hash", diagnostics.SlidingCurrentHash)
 		return nil, "", false
 	}
 	if lease.Rotate {
@@ -126,7 +133,7 @@ func ApplyIncrementalSessionRotation(req *promptcompat.StandardRequest, lease *u
 	if keepRecent <= 0 {
 		keepRecent = 1
 	}
-	rotatedMessages, changed := promptcompat.CompressMessages(req.Messages, cfg.KeepSystemMessage, keepRecent)
+	rotatedMessages, changed := promptcompat.CompressMessagesForIncrementalRotation(req.Messages, cfg.KeepSystemMessage, keepRecent)
 	if !changed {
 		rotatedMessages = req.Messages
 	}

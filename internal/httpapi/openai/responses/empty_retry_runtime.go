@@ -37,7 +37,7 @@ type responsesCompletionOutcome struct {
 	responseMessages  []any
 }
 
-func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx context.Context, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) responsesCompletionOutcome {
+func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx context.Context, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, outputPrefix []any, traceID string, historySession *historycapture.Session, activeSessionID *string) responsesCompletionOutcome {
 	attempts := 0
 	currentResp := resp
 	usagePrompt := finalPrompt
@@ -57,6 +57,7 @@ func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx c
 		result.toolDetectionThinking = accumulatedToolDetectionThinking
 		result.parsed = detectAssistantToolCalls(result.rawText, result.text, result.rawThinking, result.toolDetectionThinking, toolNames)
 		result.body = openaifmt.BuildResponseObjectWithToolCalls(responseID, model, usagePrompt, result.thinking, result.text, result.parsed.Calls, toolsRaw)
+		prependResponsesOutputItems(result.body, outputPrefix)
 		addRefFileTokensToUsage(result.body, refFileTokens)
 
 		if !shouldRetryResponsesNonStream(result, attempts) {
@@ -69,7 +70,7 @@ func (h *Handler) handleResponsesNonStreamWithRetry(w http.ResponseWriter, ctx c
 		attempts++
 		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "responses", "stream", false, "retry_attempt", attempts, "parent_message_id", result.responseMessageID)
 		retryPayload := clonePayloadForEmptyOutputRetry(payload, result.responseMessageID)
-		retryPow, prepared := h.prepareResponsesEmptyOutputRetry(ctx, a, payload, retryPayload, pow, attempts, false, historySession)
+		retryPow, prepared := h.prepareResponsesEmptyOutputRetry(ctx, a, payload, retryPayload, pow, attempts, false, historySession, activeSessionID)
 		if !prepared {
 			if h.finishResponsesNonStreamResult(w, result, attempts, owner, responseID, toolChoice, traceID, historySession, usagePrompt, refFileTokens) {
 				return responsesOutcomeFromBody(result.body, result.responseMessageID)
@@ -177,8 +178,8 @@ func shouldRetryResponsesNonStream(result responsesNonStreamResult, attempts int
 		strings.TrimSpace(result.thinking) == ""
 }
 
-func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) responsesCompletionOutcome {
-	streamRuntime, initialType, ok := h.prepareResponsesStreamRuntime(w, resp, owner, responseID, model, finalPrompt, refFileTokens, thinkingEnabled, searchEnabled, toolNames, toolsRaw, toolChoice, traceID)
+func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, outputPrefix []any, traceID string, historySession *historycapture.Session, activeSessionID *string) responsesCompletionOutcome {
+	streamRuntime, initialType, ok := h.prepareResponsesStreamRuntime(w, resp, owner, responseID, model, finalPrompt, refFileTokens, thinkingEnabled, searchEnabled, toolNames, toolsRaw, toolChoice, outputPrefix, traceID)
 	if !ok {
 		if historySession != nil {
 			historySession.Error(resp.StatusCode, "upstream response error", "error", "", "")
@@ -203,7 +204,7 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 		attempts++
 		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "responses", "stream", true, "retry_attempt", attempts, "parent_message_id", streamRuntime.responseMessageID)
 		retryPayload := clonePayloadForEmptyOutputRetry(payload, streamRuntime.responseMessageID)
-		retryPow, prepared := h.prepareResponsesEmptyOutputRetry(r.Context(), a, payload, retryPayload, pow, attempts, true, historySession)
+		retryPow, prepared := h.prepareResponsesEmptyOutputRetry(r.Context(), a, payload, retryPayload, pow, attempts, true, historySession, activeSessionID)
 		if !prepared {
 			streamRuntime.finalize("stop", false)
 			recordResponsesStreamHistory(streamRuntime, historySession)
@@ -234,15 +235,15 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 	}
 }
 
-func (h *Handler) prepareResponsesEmptyOutputRetry(ctx context.Context, a *auth.RequestAuth, basePayload, retryPayload map[string]any, originalPow string, retryAttempt int, stream bool, historySession *historycapture.Session) (string, bool) {
+func (h *Handler) prepareResponsesEmptyOutputRetry(ctx context.Context, a *auth.RequestAuth, basePayload, retryPayload map[string]any, originalPow string, retryAttempt int, stream bool, historySession *historycapture.Session, activeSessionID *string) (string, bool) {
 	var bindAuth func(*auth.RequestAuth)
 	if historySession != nil {
 		bindAuth = historySession.BindAuth
 	}
-	return shared.PrepareEmptyOutputRetry(ctx, h.Auth, h.DS, a, basePayload, retryPayload, originalPow, "responses", stream, retryAttempt, bindAuth, nil)
+	return shared.PrepareEmptyOutputRetry(ctx, h.Auth, h.DS, a, basePayload, retryPayload, originalPow, "responses", stream, retryAttempt, bindAuth, activeSessionID)
 }
 
-func (h *Handler) prepareResponsesStreamRuntime(w http.ResponseWriter, resp *http.Response, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string) (*responsesStreamRuntime, string, bool) {
+func (h *Handler) prepareResponsesStreamRuntime(w http.ResponseWriter, resp *http.Response, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, outputPrefix []any, traceID string) (*responsesStreamRuntime, string, bool) {
 	if resp.StatusCode != http.StatusOK {
 		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
@@ -268,8 +269,21 @@ func (h *Handler) prepareResponsesStreamRuntime(w http.ResponseWriter, resp *htt
 		},
 	)
 	streamRuntime.refFileTokens = refFileTokens
+	streamRuntime.outputPrefix = cloneAnySlice(outputPrefix)
 	streamRuntime.sendCreated()
+	streamRuntime.emitOutputPrefix()
 	return streamRuntime, initialType, true
+}
+
+func prependResponsesOutputItems(response map[string]any, prefix []any) {
+	if response == nil || len(prefix) == 0 {
+		return
+	}
+	output, _ := response["output"].([]any)
+	combined := make([]any, 0, len(prefix)+len(output))
+	combined = append(combined, cloneAnySlice(prefix)...)
+	combined = append(combined, output...)
+	response["output"] = combined
 }
 
 func (h *Handler) consumeResponsesStreamAttempt(r *http.Request, resp *http.Response, streamRuntime *responsesStreamRuntime, initialType string, thinkingEnabled bool, allowDeferEmpty bool, historySession *historycapture.Session) (bool, bool) {

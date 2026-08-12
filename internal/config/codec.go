@@ -11,7 +11,8 @@ func promptLimitConfigured(p PromptLimitConfig) bool {
 	return p.Enabled != nil || p.MaxCharsDefault > 0 || p.MaxCharsExpert > 0 ||
 		p.AutoCompressEnabled != nil || p.CompressKeepRecent > 0 ||
 		p.CompressKeepSystem != nil || p.ProFlashCompressionEnabled != nil ||
-		p.ProFlashCompressionTargetChars > 0 || p.IncrementalMaxTurns != nil ||
+		p.ProFlashCompressionTargetChars > 0 || p.SummaryCompactionEnabled != nil ||
+		p.SummaryCompactionThreshold > 0 || p.IncrementalMaxTurns != nil ||
 		p.IncrementalRotationKeepRecent > 0
 }
 
@@ -314,6 +315,8 @@ func (c Config) Clone() Config {
 			CompressKeepSystem:             cloneBoolPtr(c.PromptLimit.CompressKeepSystem),
 			ProFlashCompressionEnabled:     cloneBoolPtr(c.PromptLimit.ProFlashCompressionEnabled),
 			ProFlashCompressionTargetChars: c.PromptLimit.ProFlashCompressionTargetChars,
+			SummaryCompactionEnabled:       cloneBoolPtr(c.PromptLimit.SummaryCompactionEnabled),
+			SummaryCompactionThreshold:     c.PromptLimit.SummaryCompactionThreshold,
 			IncrementalMaxTurns:            cloneIntPtr(c.PromptLimit.IncrementalMaxTurns),
 			IncrementalRotationKeepRecent:  c.PromptLimit.IncrementalRotationKeepRecent,
 		},

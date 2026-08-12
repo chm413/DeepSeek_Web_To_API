@@ -26,6 +26,12 @@ func TestAccountHealthErrorFromResponseUsesExplicitCodes(t *testing.T) {
 	if err := accountHealthErrorFromResponse(0, 50006, "", ""); err == nil || err.State != account.HealthTemporarilyMuted {
 		t.Fatalf("expected temporary mute error, got %#v", err)
 	}
+	if err := accountHealthErrorFromResponse(0, 5, "", "user is muted"); err == nil || err.State != account.HealthTemporarilyMuted {
+		t.Fatalf("expected message-classified temporary mute error, got %#v", err)
+	}
+	if err := accountHealthErrorFromResponse(0, 5, "", "user is banned"); err == nil || err.State != account.HealthPermanentlyBanned {
+		t.Fatalf("expected message-classified permanent ban error, got %#v", err)
+	}
 	if err := accountHealthErrorFromResponse(429, 0, "rate limited", ""); err != nil {
 		t.Fatalf("429 must not be treated as account health, got %#v", err)
 	}

@@ -163,3 +163,29 @@ func TestParsePromptLimitUpdateRejectsInvalidProFlashTarget(t *testing.T) {
 		t.Fatal("expected invalid Pro Flash target error")
 	}
 }
+
+func TestParsePromptLimitUpdateSupportsSummaryCompaction(t *testing.T) {
+	cfg, err := parsePromptLimitUpdate(map[string]any{
+		"prompt_limit": map[string]any{
+			"summary_compaction_enabled":   true,
+			"summary_compaction_threshold": float64(0.72),
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse prompt limit: %v", err)
+	}
+	if cfg == nil || cfg.SummaryCompactionEnabled == nil || !*cfg.SummaryCompactionEnabled || cfg.SummaryCompactionThreshold != 0.72 {
+		t.Fatalf("unexpected summary compaction config: %#v", cfg)
+	}
+}
+
+func TestParsePromptLimitUpdateRejectsInvalidSummaryThreshold(t *testing.T) {
+	for _, threshold := range []float64{0.49, 0.96} {
+		_, err := parsePromptLimitUpdate(map[string]any{
+			"prompt_limit": map[string]any{"summary_compaction_threshold": threshold},
+		})
+		if err == nil {
+			t.Fatalf("expected threshold %v to be rejected", threshold)
+		}
+	}
+}

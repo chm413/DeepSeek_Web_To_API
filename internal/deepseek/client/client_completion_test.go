@@ -127,6 +127,142 @@ func TestCallCompletionSwitchesAccountAfterFailedAttempt(t *testing.T) {
 	}
 }
 
+func TestCallCompletionSwitchesAccountAfterHTTP200BusinessMute(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"acc1@example.com","password":"pwd","token":"token-1"},
+			{"email":"acc2@example.com","password":"pwd","token":"token-2"}
+		],
+		"runtime":{"account_max_inflight":1}
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+	doer := &completionSwitchDoer{}
+	doerResponse := encodedBodyDoerFunc(func(req *http.Request) (*http.Response, error) {
+		doer.seenTokens = append(doer.seenTokens, strings.TrimSpace(req.Header.Get("authorization")))
+		if strings.Contains(req.Header.Get("authorization"), "token-1") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("{\"code\":0,\"msg\":\"\",\"data\":{\"biz_code\":5,\"biz_msg\":\"user is muted\",\"biz_data\":null}}")),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: {\"p\":\"response/content\",\"v\":\"ok\"}\n" + "data: [DONE]\n")),
+			Request:    req,
+		}, nil
+	})
+	client := &Client{
+		Auth:       resolver,
+		Store:      store,
+		regular:    completionSwitchRegularDoer{},
+		stream:     doerResponse,
+		fallbackS:  &http.Client{},
+		fallback:   &http.Client{},
+		maxRetries: 3,
+	}
+	first, ok := store.FindAccount("acc1@example.com")
+	if !ok {
+		t.Fatal("missing first account")
+	}
+	a := &auth.RequestAuth{
+		UseConfigToken: true,
+		DeepSeekToken:  "token-1",
+		AccountID:      "acc1@example.com",
+		Account:        first,
+		TriedAccounts:  map[string]bool{},
+	}
+	resp, err := client.CallCompletion(context.Background(), a, map[string]any{"chat_session_id": "s"}, "pow", 2)
+	if err != nil {
+		t.Fatalf("CallCompletion returned error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read completion body: %v", err)
+	}
+	if !strings.Contains(string(body), `"v":"ok"`) {
+		t.Fatalf("unexpected replayed completion body: %q", body)
+	}
+	if a.AccountID != "acc2@example.com" {
+		t.Fatalf("expected switched account, got %q", a.AccountID)
+	}
+	health, ok := pool.AccountHealth("acc1@example.com")
+	if !ok || health.State != account.HealthTemporarilyMuted {
+		t.Fatalf("expected first account to be temporarily muted, got %#v, %v", health, ok)
+	}
+	if len(doer.seenTokens) != 2 {
+		t.Fatalf("expected two completion attempts, got %#v", doer.seenTokens)
+	}
+}
+
+func TestCallCompletionDisablesAndSwitchesAfterHTTP200BusinessBan(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"banned@example.com","password":"pwd","token":"token-1"},
+			{"email":"healthy@example.com","password":"pwd","token":"token-2"}
+		],
+		"runtime":{"account_max_inflight":1}
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+	completionDoer := encodedBodyDoerFunc(func(req *http.Request) (*http.Response, error) {
+		body := "data: {\"p\":\"response/content\",\"v\":\"ok\"}\n" + "data: [DONE]\n"
+		if strings.Contains(req.Header.Get("authorization"), "token-1") {
+			body = "{\"code\":0,\"data\":{\"biz_code\":5,\"biz_msg\":\"user is banned\"}}"
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	client := &Client{
+		Auth:       resolver,
+		Store:      store,
+		regular:    completionSwitchRegularDoer{},
+		stream:     completionDoer,
+		fallbackS:  &http.Client{},
+		fallback:   &http.Client{},
+		maxRetries: 3,
+	}
+	first, ok := store.FindAccount("banned@example.com")
+	if !ok {
+		t.Fatal("missing first account")
+	}
+	a := &auth.RequestAuth{
+		UseConfigToken: true,
+		DeepSeekToken:  "token-1",
+		AccountID:      first.Identifier(),
+		Account:        first,
+		TriedAccounts:  map[string]bool{},
+	}
+	resp, err := client.CallCompletion(context.Background(), a, map[string]any{"chat_session_id": "s"}, "pow", 2)
+	if err != nil {
+		t.Fatalf("CallCompletion returned error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if a.AccountID != "healthy@example.com" {
+		t.Fatalf("expected healthy account after ban, got %q", a.AccountID)
+	}
+	updated, ok := store.FindAccount("banned@example.com")
+	if !ok || !updated.Disabled || updated.DisabledReason != config.AccountDisabledUpstreamBanned {
+		t.Fatalf("expected banned account to be persistently disabled, got %#v, %v", updated, ok)
+	}
+}
+
 func TestCallCompletionReturnsUpstreamStatusFailure(t *testing.T) {
 	t.Parallel()
 

@@ -1,5 +1,28 @@
 # 更新日志
 
+## 2026-08-13 (1.1.2)
+
+v1.1.2 完整实现 OpenAI Responses Compact 与长上下文增量续接：官方 `context_management[]` token 阈值会在同一次响应中产出 compaction item，独立 `/v1/responses/compact` 返回可原样续接的规范窗口；旧式超限自动裁剪继续默认关闭。同步修复 DeepSeek HTTP 200 业务错误被误判为空输出、账号状态回滚和重试捕获账号不真实的问题。
+
+### Compact 与长上下文
+
+- **官方 Compact 协议**：解析 `context_management: [{"type":"compaction","compact_threshold":200000}]`，阈值按渲染 token 统计，不再误当模型窗口比例。达到阈值后先调用 Flash 生成单一滚动摘要，再执行主模型；非流式和 SSE 都把 `compaction` 放在 assistant 前，SSE 输出索引固定为 0/1。
+- **独立压缩端点**：`POST /v1/responses/compact` 返回 `response.compaction`、规范 `output` 窗口和摘要 token usage。调用方可把完整 `output` 原样追加下一条 user input；本地 opaque handle 按调用方隔离，使用至少 24 小时滑动空闲 TTL。
+- **强制格式与增量输入**：增量命中只发送本次新增 role blocks，并在每一轮重新发送输出格式与工具契约。固定上游 session 达到轮次上限后自动轮换，保留最近完整上下文；失败时使用最终切换账号的新 session 完整重放，避免跨账号复用旧 `chat_session_id`。
+- **默认策略**：旧式 `prompt_limit.auto_compress_enabled` 仍默认关闭；新增 `summary_compaction_enabled`（默认关闭）和比例阈值设置，用于服务端后台自动摘要。显式 Compact 与官方请求阈值不受该默认开关影响。
+
+### 账号状态与日志
+
+- **HTTP 200 业务错误识别**：completion 在 SSE 解析前同时检查 `data:` 首帧和裸 JSON。`biz_code=5 / user is muted` 会实时标记 `temporarily_muted` 并切换账号；明确 banned 文本会持久化为 `upstream_banned` 自动禁用。
+- **状态不回滚**：一分钟账号健康巡检的普通成功不会提前清除仍未到期的 muted/rate-limit 冷却。每次 completion 尝试单独建立开发捕获，WebUI 和日志显示实际路由账号，而不是重试前账号。
+- **详细 Compact 日志**：记录 wire bytes、压缩前后消息数/状态字节/UTF-16 prompt units、摘要输入输出 token、保留回合、尝试次数、耗时、缩减率和 hidden-output fallback，不记录代理或账号凭据。
+
+### 验证
+
+- `go test ./... -count=1` 全部通过；WebUI `npm run build` 通过。
+- 输入边界测试覆盖 1,000,000 UTF-16 units、2,621,440 精确 Flash 上限和 `limit+1` 拒绝。
+- Windows 实验实例通过认证代理完成真实请求：37,149 字节上下文 Compact 返回 200；完整 `output` 原样续接并严格返回 `NEXT_OK`；自动 Compact 非流式返回 `compaction,message`，SSE 确认 compaction 在 assistant 前且 output index 为 0/1。
+
 ## 2026-05-08 (1.0.20)
 
 v1.0.20 修复 v1.0.19 release-artifacts CI 在 lint 阶段失败：① v1.0.19 新加的 `RunSafetyCheckAndBlock` 留了一个空 `if err != nil { /* ... */ }` 分支被 staticcheck SA9003 报错；② v1.0.14 删除内置违禁清单时遗留的 6 处死代码（`policy` 结构体的 `bannedContent` / `bannedRegex` / `jailbreakEnabled` / `jailbreakPatterns` 字段、`defaultJailbreakPatterns` 全局变量、`isContentScanExempt` 函数）被 unused linter 报错——这些自 v1.0.14 起就堆积在 `internal/requestguard/guard.go` 内，但 release-artifacts 工作流升级 golangci-lint 后才暴露。VERSION 从 `1.0.19` 升到 `1.0.20`。

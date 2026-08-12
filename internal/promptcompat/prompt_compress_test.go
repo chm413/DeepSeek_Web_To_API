@@ -125,6 +125,44 @@ func TestCompressMessagesNoOpWhenAlreadyShort(t *testing.T) {
 	}
 }
 
+func TestCompactMessagesShrinksConversationInsideConfiguredWindow(t *testing.T) {
+	t.Parallel()
+
+	messages := buildConversation(6, 8)
+	out, ok := CompactMessages(messages, true, 25)
+	if !ok {
+		t.Fatal("explicit compaction must shrink a multi-turn conversation")
+	}
+	if len(out) >= len(messages) {
+		t.Fatalf("explicit compact did not shrink: before=%d after=%d", len(messages), len(out))
+	}
+	if messageRole(out[0]) != "system" {
+		t.Fatal("explicit compact lost the leading system message")
+	}
+	if got, want := messageContent(out[len(out)-1]), messageContent(messages[len(messages)-1]); got != want {
+		t.Fatalf("explicit compact lost latest response: got=%q want=%q", got, want)
+	}
+}
+
+func TestCompactMessagesRejectsSingleIndivisibleTurn(t *testing.T) {
+	t.Parallel()
+
+	messages := []any{
+		systemMsg("system"),
+		userMsg("current request"),
+		assistantMsg("tool call"),
+		toolResultMsg("tool result"),
+		assistantMsg("final response"),
+	}
+	out, ok := CompactMessages(messages, true, 25)
+	if ok {
+		t.Fatal("single user turn must not be partially compacted")
+	}
+	if len(out) != len(messages) {
+		t.Fatalf("single user turn changed: before=%d after=%d", len(messages), len(out))
+	}
+}
+
 func TestCompressMessagesDropsSystemWhenNotKept(t *testing.T) {
 	t.Parallel()
 
@@ -144,13 +182,14 @@ func TestCompressMessagesDropsSystemWhenNotKept(t *testing.T) {
 // slicing history at a fixed offset can land on a `tool` result whose
 // originating assistant tool_calls fell outside the window. Emitting that
 // orphan produces a malformed exchange, so the leading run must be dropped.
-func TestCompressMessagesDropsOrphanedToolResult(t *testing.T) {
+func TestCompressMessagesKeepsCurrentUserToolChain(t *testing.T) {
 	t.Parallel()
 
-	// Window of 2 (keepRecent=1) lands exactly on the tool result.
 	messages := []any{
 		systemMsg("sys"),
-		userMsg("first"),
+		userMsg("old turn"),
+		assistantMsg("old answer"),
+		userMsg("continue development"),
 		assistantMsg("calling a tool"),
 		toolResultMsg("tool output"),
 		assistantMsg("final answer"),
@@ -159,38 +198,74 @@ func TestCompressMessagesDropsOrphanedToolResult(t *testing.T) {
 	if !ok {
 		t.Fatal("expected compression")
 	}
-	for i, item := range out {
-		if isToolResultRole(messageRole(item)) {
-			// Only valid if an assistant message precedes it inside the window.
-			if i == 0 || (i == 1 && messageRole(out[0]) == "system") {
-				t.Fatalf("out[%d] is an orphaned tool result: %v", i, out)
-			}
-		}
+	if got := ExtractLatestUserText(out); got != "continue development" {
+		t.Fatalf("latest user instruction was lost: got %q", got)
 	}
-	if len(out) == 0 {
-		t.Fatal("compression must never produce an empty conversation")
+	if len(out) != 5 {
+		t.Fatalf("current user turn was truncated: %#v", out)
 	}
 }
 
-func TestCompressMessagesNeverReturnsEmpty(t *testing.T) {
+func TestCompressMessagesKeepsLongCurrentToolChain(t *testing.T) {
 	t.Parallel()
 
-	// Every message in the trailing window is a tool result, so orphan-dropping
-	// would otherwise empty the slice.
 	messages := []any{
-		userMsg("first"),
-		assistantMsg("calls"),
-		toolResultMsg("r1"),
-		toolResultMsg("r2"),
-		toolResultMsg("r3"),
-		toolResultMsg("r4"),
+		systemMsg("sys"),
+		userMsg("old"),
+		assistantMsg("old answer"),
+		userMsg("continue development"),
 	}
-	out, ok := CompressMessages(messages, false, 1)
+	for i := 0; i < 40; i++ {
+		messages = append(messages, assistantMsg("tool call"), toolResultMsg("large tool output"))
+	}
+	messages = append(messages, assistantMsg("working"))
+
+	out, ok := CompressMessages(messages, true, 1)
 	if !ok {
 		t.Fatal("expected compression")
 	}
-	if len(out) == 0 {
-		t.Fatal("must retain at least one message")
+	if got := ExtractLatestUserText(out); got != "continue development" {
+		t.Fatalf("latest user instruction was lost: got %q", got)
+	}
+	if len(out) != len(messages)-2 {
+		t.Fatalf("current turn tool chain was truncated: len(out)=%d len(messages)=%d", len(out), len(messages))
+	}
+}
+
+func TestCompressMessagesKeepsAllSystemMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := []any{
+		systemMsg("base instructions"),
+		systemMsg("format instructions"),
+		userMsg("old"), assistantMsg("old answer"),
+		userMsg("latest"), assistantMsg("latest answer"),
+	}
+	out, ok := CompressMessages(messages, true, 1)
+	if !ok {
+		t.Fatal("expected compression")
+	}
+	if len(out) != 4 || messageContent(out[0]) != "base instructions" || messageContent(out[1]) != "format instructions" {
+		t.Fatalf("system instructions were not preserved: %#v", out)
+	}
+}
+
+func TestCompressMessagesDoesNotMoveMidConversationSystemMessage(t *testing.T) {
+	t.Parallel()
+
+	messages := []any{
+		systemMsg("base instructions"),
+		userMsg("oldest"), assistantMsg("oldest answer"),
+		map[string]any{"role": "system", "content": "mid-conversation note"},
+		userMsg("older"), assistantMsg("older answer"),
+		userMsg("latest"), assistantMsg("latest answer"),
+	}
+	out, ok := CompressMessages(messages, true, 1)
+	if !ok {
+		t.Fatal("expected compression")
+	}
+	if len(out) != 3 || messageContent(out[0]) != "base instructions" || messageContent(out[1]) != "latest" {
+		t.Fatalf("mid-conversation system message was reordered into the prefix: %#v", out)
 	}
 }
 

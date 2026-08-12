@@ -42,6 +42,22 @@ func int64From(v any) int64 {
 	}
 }
 
+func float64From(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case string:
+		n, _ := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return n
+	default:
+		return 0
+	}
+}
+
 func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *config.RuntimeConfig, *config.CompatConfig, *config.ResponsesConfig, *config.EmbeddingsConfig, *config.CacheConfig, *config.AutoDeleteConfig, *config.CurrentInputFileConfig, *config.ThinkingInjectionConfig, *config.SafetyConfig, map[string]string, error) {
 	var (
 		adminCfg        *config.AdminConfig
@@ -387,6 +403,17 @@ func parsePromptLimitUpdate(req map[string]any) (*config.PromptLimitConfig, erro
 			return nil, err
 		}
 		cfg.ProFlashCompressionTargetChars = n
+	}
+	if v, exists := raw["summary_compaction_enabled"]; exists {
+		b := boolFrom(v)
+		cfg.SummaryCompactionEnabled = &b
+	}
+	if v, exists := raw["summary_compaction_threshold"]; exists {
+		n := float64From(v)
+		if n < 0.5 || n > 0.95 {
+			return nil, fmt.Errorf("prompt_limit.summary_compaction_threshold must be between 0.5 and 0.95")
+		}
+		cfg.SummaryCompactionThreshold = n
 	}
 	if v, exists := raw["incremental_max_turns"]; exists {
 		n := intFrom(v)

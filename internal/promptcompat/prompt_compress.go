@@ -99,9 +99,11 @@ func dropLeadingOrphanToolResults(messages []any) []any {
 	return messages[i:]
 }
 
-// CompressMessages keeps the leading system message (when keepSystem) plus the
-// most recent keepRecent turns, where a turn is approximated as a user +
-// assistant pair. Returns the trimmed slice and whether anything was dropped.
+// CompressMessages keeps leading system messages (when keepSystem) plus the
+// most recent keepRecent user turns. A turn starts at a user message and
+// includes every following assistant/tool item until the next user message.
+// Agent clients can emit dozens of tool messages for one user turn, so raw
+// message-count windows can otherwise discard the current user instruction.
 //
 // The input is []any of map[string]any, matching StandardRequest.Messages.
 func CompressMessages(messages []any, keepSystem bool, keepRecent int) ([]any, bool) {
@@ -109,35 +111,105 @@ func CompressMessages(messages []any, keepSystem bool, keepRecent int) ([]any, b
 		return messages, false
 	}
 
-	var systemMsg any
+	var systemMsgs []any
 	nonSystem := make([]any, 0, len(messages))
+	leadingSystem := true
 	for _, item := range messages {
-		if keepSystem && systemMsg == nil && messageRole(item) == "system" {
-			systemMsg = item
+		if keepSystem && leadingSystem && messageRole(item) == "system" {
+			systemMsgs = append(systemMsgs, item)
 			continue
 		}
+		leadingSystem = false
 		nonSystem = append(nonSystem, item)
 	}
 
-	window := keepRecent * 2 // ~2 messages per turn
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
+	turnStarts := make([]int, 0, keepRecent+1)
+	for i, item := range nonSystem {
+		if messageRole(item) == "user" {
+			turnStarts = append(turnStarts, i)
+		}
+	}
+	if len(turnStarts) <= keepRecent {
+		return messages, false
+	}
+
+	start := turnStarts[len(turnStarts)-keepRecent]
+	kept := dropLeadingOrphanToolResults(nonSystem[start:])
+	if len(kept) == 0 {
+		// Everything in the retained window was an orphan tool result; keep the final
+		// message so we never ship an empty conversation.
+		kept = nonSystem[len(nonSystem)-1:]
+	}
+
+	out := make([]any, 0, len(kept)+len(systemMsgs))
+	out = append(out, systemMsgs...)
+	out = append(out, kept...)
+	return out, true
+}
+
+// CompactMessages explicitly reduces a conversation even when it still fits
+// the model limit. It keeps at most the configured recent-turn window, and
+// when the conversation is already inside that window it retains the newest
+// half. A single user turn is indivisible here because dropping part of its
+// assistant/tool chain would produce an invalid or misleading compact state.
+func CompactMessages(messages []any, keepSystem bool, keepRecent int) ([]any, bool) {
+	turns := 0
+	for _, item := range messages {
+		if messageRole(item) == "user" {
+			turns++
+		}
+	}
+	if turns <= 1 {
+		return messages, false
+	}
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
+	if keepRecent >= turns {
+		keepRecent = turns / 2
+		if keepRecent < 1 {
+			keepRecent = 1
+		}
+	}
+	return CompressMessages(messages, keepSystem, keepRecent)
+}
+
+// CompressMessagesForIncrementalRotation preserves the established rollover
+// contract: keep the trailing assistant result(s) plus the current input. The
+// window is intentionally message-based because the replacement upstream
+// session needs the immediately preceding model state, not a replay of the
+// preceding user request.
+func CompressMessagesForIncrementalRotation(messages []any, keepSystem bool, keepRecent int) ([]any, bool) {
+	if len(messages) == 0 {
+		return messages, false
+	}
+	var systemMsgs []any
+	nonSystem := make([]any, 0, len(messages))
+	leadingSystem := true
+	for _, item := range messages {
+		if keepSystem && leadingSystem && messageRole(item) == "system" {
+			systemMsgs = append(systemMsgs, item)
+			continue
+		}
+		leadingSystem = false
+		nonSystem = append(nonSystem, item)
+	}
+	window := keepRecent * 2
 	if window < 2 {
 		window = 2
 	}
 	if len(nonSystem) <= window {
 		return messages, false
 	}
-
 	kept := dropLeadingOrphanToolResults(nonSystem[len(nonSystem)-window:])
 	if len(kept) == 0 {
-		// Everything in the window was an orphan tool result; keep the final
-		// message so we never ship an empty conversation.
 		kept = nonSystem[len(nonSystem)-1:]
 	}
-
-	out := make([]any, 0, len(kept)+1)
-	if systemMsg != nil {
-		out = append(out, systemMsg)
-	}
+	out := make([]any, 0, len(systemMsgs)+len(kept))
+	out = append(out, systemMsgs...)
 	out = append(out, kept...)
 	return out, true
 }

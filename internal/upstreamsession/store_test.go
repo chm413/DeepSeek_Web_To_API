@@ -1,6 +1,9 @@
 package upstreamsession
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestStorePrepareReturnsOnlyStrictExtensionDelta(t *testing.T) {
 	store := NewStore(0, 0)
@@ -170,6 +173,81 @@ func TestStoreMarksStrictExtensionForConfiguredTurnRotation(t *testing.T) {
 	}
 	if len(lease.DeltaMessages) != 1 {
 		t.Fatalf("rotation lease lost current delta: %#v", lease.DeltaMessages)
+	}
+	lease.Invalidate()
+}
+
+func TestStoreReusesSlidingCompactionWindow(t *testing.T) {
+	store := NewStore(0, 0)
+	scope := Scope{CallerID: "caller", SessionKey: "conversation", AccountID: "account", Surface: "responses", Variant: "v1"}
+	store.Record(
+		scope,
+		[]any{
+			map[string]any{"role": "system", "content": "format"},
+			map[string]any{"role": "user", "content": "first"},
+			map[string]any{"role": "assistant", "content": "first answer"},
+			map[string]any{"role": "user", "content": "second"},
+		},
+		[]any{map[string]any{"role": "assistant", "content": "second answer"}},
+		"session-1",
+		202,
+	)
+	current := []any{
+		map[string]any{"role": "system", "content": "format"},
+		map[string]any{"role": "user", "content": "second"},
+		map[string]any{"role": "assistant", "content": "second answer"},
+		map[string]any{"role": "user", "content": "third"},
+	}
+	lease, ok := store.Prepare(scope, current)
+	if !ok {
+		t.Fatal("expected a sliding compact window to reuse the pinned session")
+	}
+	if lease.MatchMode != "sliding_suffix" || len(lease.DeltaMessages) != 1 {
+		t.Fatalf("unexpected sliding lease: %#v", lease)
+	}
+	if got := lease.DeltaMessages[0].(map[string]any)["content"]; got != "third" {
+		t.Fatalf("unexpected sliding delta: %#v", lease.DeltaMessages)
+	}
+	lease.Invalidate()
+}
+
+func TestStoreRejectsAssistantOnlySlidingOverlap(t *testing.T) {
+	store := NewStore(0, 0)
+	scope := Scope{CallerID: "caller", SessionKey: "conversation", AccountID: "account", Surface: "responses", Variant: "v1"}
+	store.Record(
+		scope,
+		[]any{map[string]any{"role": "user", "content": "first"}},
+		[]any{map[string]any{"role": "assistant", "content": "same answer"}},
+		"session-1",
+		101,
+	)
+	current := []any{
+		map[string]any{"role": "assistant", "content": "same answer"},
+		map[string]any{"role": "user", "content": "unrelated continuation"},
+	}
+	if _, ok := store.Prepare(scope, current); ok {
+		t.Fatal("assistant-only overlap must not reuse a pinned branch")
+	}
+}
+
+func TestStoreRotationCountsUpstreamCallsInsteadOfReplayedTurns(t *testing.T) {
+	store := NewStore(0, 0)
+	scope := Scope{CallerID: "caller", SessionKey: "conversation", AccountID: "account", Surface: "responses", Variant: "v1"}
+	request := make([]any, 0, 60)
+	for i := 0; i < 30; i++ {
+		request = append(request,
+			map[string]any{"role": "user", "content": fmt.Sprintf("question-%d", i)},
+			map[string]any{"role": "assistant", "content": fmt.Sprintf("answer-%d", i)},
+		)
+	}
+	store.Record(scope, request, []any{map[string]any{"role": "assistant", "content": "latest answer"}}, "session-1", 301)
+	current := append(cloneAnyMessages(request), map[string]any{"role": "assistant", "content": "latest answer"}, map[string]any{"role": "user", "content": "next"})
+	lease, ok := store.PrepareWithMaxTurns(scope, current, 25)
+	if !ok {
+		t.Fatal("expected strict extension")
+	}
+	if lease.Rotate || lease.TurnCount != 1 {
+		t.Fatalf("replayed history must count as one upstream call: %#v", lease)
 	}
 	lease.Invalidate()
 }

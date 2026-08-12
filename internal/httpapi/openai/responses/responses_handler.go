@@ -3,6 +3,7 @@ package responses
 import (
 	"DeepSeek_Web_To_API/internal/toolcall"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/sse"
 	streamengine "DeepSeek_Web_To_API/internal/stream"
+	"DeepSeek_Web_To_API/internal/util"
 )
 
 func (h *Handler) GetResponseByID(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +80,8 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		inheritedSessionKey, _ = h.getResponseStore().getSessionKey(owner, previousResponseID)
 	}
 	compactTriggered := removeCompactionTriggers(req)
-	if err := h.expandLocalCompactionState(owner, req); err != nil {
+	recoveredCompaction, err := h.expandLocalCompactionStateWithRecovery(owner, req)
+	if err != nil {
 		writeOpenAIError(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -88,6 +91,11 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if compactTriggered {
 		h.serveLocalCompaction(w, r, rawBody, req, true)
+		return
+	}
+	compactThresholdTokens, compactThresholdApplied, compactThresholdErr := shared.ResponsesCompactThreshold(req)
+	if compactThresholdErr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, compactThresholdErr.Error())
 		return
 	}
 	traceID := requestTraceID(r)
@@ -174,22 +182,139 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	shared.LogIncrementalRequestContext("responses", a, stdReq, len(rawBody))
 	incrementalBaseReq := stdReq
 	promptLimit := h.Store.PromptLimitSnapshot()
-	if h.tryIncrementalResponses(w, r, a, owner, &stdReq, promptLimit, traceID, historySession, &sessionID) {
+	ordinaryAutoCompress := promptLimit.AutoCompressEnable
+	hardPromptLimit := promptLimit
+	dynamicLimitApplied := false
+	dynamicLimitResolved := false
+	summaryHardLimit := 0
+	var automaticCompactionItem map[string]any
+	if recoveredCompaction.Handle != "" {
+		promptLimit, dynamicLimitApplied, err = shared.ResolveDynamicPromptLimits(r.Context(), h.DS, a, promptLimit)
+		dynamicLimitResolved = true
+		if err != nil {
+			config.Logger.Warn("[prompt_limit] dynamic upstream limit lookup failed; using static settings", "surface", "responses.compact_recovery", "error", err)
+		}
+		hardPromptLimit = promptLimit
+		summaryHardLimit = promptcompat.LimitForModel(promptLimit, promptcompat.EffectiveModel(stdReq))
+		if compactThresholdApplied {
+			config.Logger.Info("[responses_compact] recognized request token threshold", "surface", "responses.compact_recovery", "model", stdReq.ResolvedModel, "compact_threshold_tokens", compactThresholdTokens)
+		}
+		if dropped, recovered := h.recoverExpiredCompaction(&stdReq, recoveredCompaction, promptLimit); recovered {
+			config.Logger.Info("[responses_compact] rebuilt expired local state from fresh input",
+				"surface", "responses", "model", stdReq.ResolvedModel,
+				"dropped_messages", dropped,
+				"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt),
+				"format_prompt_units", promptcompat.PromptUnits(stdReq.IncrementalFormatPrompt),
+				"format_prompt_present", strings.TrimSpace(stdReq.IncrementalFormatPrompt) != "")
+			incrementalBaseReq = stdReq
+		} else {
+			config.Logger.Warn("[responses_compact] fresh tail cannot fit after expired-state recovery",
+				"surface", "responses", "model", stdReq.ResolvedModel,
+				"message_count", len(stdReq.Messages),
+				"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt),
+				"format_prompt_units", promptcompat.PromptUnits(stdReq.IncrementalFormatPrompt),
+				"effective_limit_units", promptcompat.LimitForModel(promptLimit, promptcompat.EffectiveModel(stdReq)))
+		}
+	}
+	if !dynamicLimitResolved {
+		promptLimit, dynamicLimitApplied, err = shared.ResolveDynamicPromptLimits(r.Context(), h.DS, a, promptLimit)
+		if err != nil {
+			config.Logger.Warn("[prompt_limit] dynamic upstream limit lookup failed; using static settings", "surface", "responses", "error", err)
+		}
+		hardPromptLimit = promptLimit
+	}
+	if summaryHardLimit <= 0 {
+		summaryHardLimit = promptcompat.LimitForModel(promptLimit, promptcompat.EffectiveModel(stdReq))
+	}
+	summaryTarget := 0
+	summaryTrigger := ""
+	if compactThresholdApplied {
+		renderedTokens := util.CountPromptTokens(stdReq.FinalPrompt, stdReq.ResponseModel)
+		summaryTarget = promptcompat.PromptUnits(stdReq.FinalPrompt) * 75 / 100
+		config.Logger.Info("[responses_compact] evaluated request token threshold",
+			"surface", "responses", "model", stdReq.ResolvedModel,
+			"rendered_tokens", renderedTokens, "compact_threshold_tokens", compactThresholdTokens,
+			"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt))
+		if renderedTokens >= compactThresholdTokens {
+			summaryTrigger = "request_compact_threshold"
+		}
+	} else if promptLimit.SummaryCompactionEnable && summaryHardLimit > 0 {
+		threshold := promptLimit.SummaryCompactionThreshold
+		if threshold <= 0 || threshold >= 1 {
+			threshold = 0.8
+		}
+		triggerUnits := int(float64(summaryHardLimit) * threshold)
+		summaryTarget = triggerUnits * 75 / 100
+		if promptcompat.PromptUnits(stdReq.FinalPrompt) > triggerUnits {
+			summaryTrigger = "server_threshold"
+		}
+	}
+	if summaryTrigger != "" && !stdReq.IncrementalSessionRotated {
+		beforeUnits := promptcompat.PromptUnits(stdReq.FinalPrompt)
+		beforeBytes := responseStateSize(stdReq.Messages)
+		compactedReq, stats, compacted, compactErr := shared.TrySummaryCompactPrompt(r.Context(), h.DS, a, stdReq, hardPromptLimit, summaryTarget)
+		if compactErr != nil || !compacted {
+			if compactErr == nil {
+				compactErr = shared.ErrSummaryCompactionNotReducible
+			}
+			detail := summaryCompactionErrorDetail(compactErr)
+			config.Logger.Warn("[responses_compact] summary compaction failed",
+				"surface", "responses", "model", stdReq.ResolvedModel,
+				"trigger", summaryTrigger,
+				"target_units", summaryTarget,
+				"before_prompt_units", beforeUnits,
+				"before_state_bytes", beforeBytes,
+				"summary_attempts", stats.Attempts,
+				"summary_duration_ms", stats.Duration.Milliseconds(),
+				"error", compactErr)
+			var healthErr *auth.AccountHealthError
+			if summaryTrigger == "request_compact_threshold" || errors.As(compactErr, &healthErr) {
+				if historySession != nil {
+					historySession.Error(detail.Status, detail.Message, detail.FinishReason, "", "")
+				}
+				writeOpenAIErrorWithCode(w, detail.Status, detail.Message, detail.Code)
+				return
+			}
+			promptLimit = hardPromptLimit
+			promptLimit.AutoCompressEnable = ordinaryAutoCompress
+		} else {
+			stdReq = compactedReq
+			incrementalBaseReq = stdReq
+			handle := h.getResponseStore().putCompaction(owner, stdReq.Messages)
+			if handle == "" {
+				config.Logger.Error("[responses_compact] failed to persist automatic compaction state", "surface", "responses", "model", stdReq.ResolvedModel)
+				writeOpenAIError(w, http.StatusInternalServerError, "failed to store automatic compaction state")
+				return
+			}
+			automaticCompactionItem = newLocalCompactionItem(handle)
+			config.Logger.Info("[responses_compact] automatic summary compaction completed",
+				"surface", "responses", "model", stdReq.ResolvedModel,
+				"trigger", summaryTrigger,
+				"target_units", summaryTarget,
+				"before_messages", stats.BeforeMessages,
+				"after_messages", stats.AfterMessages,
+				"before_state_bytes", stats.BeforeStateBytes,
+				"after_state_bytes", stats.AfterStateBytes,
+				"state_reduction_percent", reductionPercent(stats.BeforeStateBytes, stats.AfterStateBytes),
+				"before_prompt_units", stats.BeforePromptUnits,
+				"after_prompt_units", stats.AfterPromptUnits,
+				"prompt_reduction_percent", reductionPercent(stats.BeforePromptUnits, stats.AfterPromptUnits),
+				"summary_source_units", stats.SourcePromptUnits,
+				"summary_output_units", stats.SummaryUnits,
+				"summary_input_tokens", stats.SummaryInputTokens,
+				"summary_output_tokens", stats.SummaryOutputTokens,
+				"summary_used_hidden_output", stats.UsedThinkingFallback,
+				"summary_retained_turns", stats.RetainedTurns,
+				"summary_attempts", stats.Attempts,
+				"summary_duration_ms", stats.Duration.Milliseconds())
+		}
+	}
+	if automaticCompactionItem == nil && h.tryIncrementalResponses(w, r, a, owner, &stdReq, promptLimit, nil, traceID, historySession, &sessionID) {
 		return
 	}
 	// Trim history BEFORE the current-input-file step: CIF folds the whole
 	// transcript into one message, so compressing afterwards has nothing
 	// left to drop. See shared.CompressPromptBeforeCIF.
-	dynamicLimitApplied := false
-	promptLimit, dynamicLimitApplied, err = shared.ResolveDynamicPromptLimits(r.Context(), h.DS, a, promptLimit)
-	if err != nil {
-		config.Logger.Warn("[prompt_limit] dynamic upstream limit lookup failed; using static settings", "surface", "responses", "error", err)
-	}
-	var compactThresholdApplied bool
-	promptLimit, compactThresholdApplied = shared.ApplyResponsesCompactThreshold(req, promptLimit, stdReq.ResolvedModel)
-	if compactThresholdApplied {
-		config.Logger.Info("[prompt_limit] applied Responses compact_threshold", "surface", "responses", "model", stdReq.ResolvedModel)
-	}
 	if !stdReq.IncrementalSessionRotated {
 		if dropped, ok := shared.CompressPromptBeforeCIF(promptLimit, &stdReq); ok {
 			config.Logger.Info("[prompt_limit] compressed history before CIF",
@@ -281,15 +406,16 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	h.getResponseStore().putSessionKey(owner, responseID, a.SessionKey)
 	refFileTokens := stdReq.RefFileTokens
 	var outcome responsesCompletionOutcome
+	responsePrefix := localCompactionOutputPrefix(automaticCompactionItem)
 	if stdReq.Stream {
-		outcome = h.handleResponsesStreamWithRetry(w, r, a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, traceID, historySession)
+		outcome = h.handleResponsesStreamWithRetry(w, r, a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, responsePrefix, traceID, historySession, &sessionID)
 	} else {
-		outcome = h.handleResponsesNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, traceID, historySession)
+		outcome = h.handleResponsesNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, responsePrefix, traceID, historySession, &sessionID)
 	}
 	h.recordFullResponsesIncrementalState(a, incrementalBaseReq, sessionID, outcome)
 }
 
-func (h *Handler) tryIncrementalResponses(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, owner string, stdReq *promptcompat.StandardRequest, promptLimit config.PromptLimitSettings, traceID string, historySession *historycapture.Session, activeSessionID *string) bool {
+func (h *Handler) tryIncrementalResponses(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, owner string, stdReq *promptcompat.StandardRequest, promptLimit config.PromptLimitSettings, compactionItem map[string]any, traceID string, historySession *historycapture.Session, activeSessionID *string) bool {
 	if stdReq == nil {
 		return false
 	}
@@ -328,6 +454,7 @@ func (h *Handler) tryIncrementalResponses(w http.ResponseWriter, r *http.Request
 	config.Logger.Info("[incremental] reused upstream session",
 		"surface", "responses", "session_key", a.SessionKey,
 		"parent_message_id", lease.ParentMessageID,
+		"match_mode", lease.MatchMode,
 		"retained_messages", len(stdReq.Messages)-len(lease.DeltaMessages),
 		"delta_messages", len(lease.DeltaMessages),
 		"full_prompt_units", promptcompat.PromptUnits(fullPrompt),
@@ -374,10 +501,11 @@ func (h *Handler) tryIncrementalResponses(w http.ResponseWriter, r *http.Request
 	h.getResponseStore().putInput(owner, responseID, stdReq.Messages)
 	h.getResponseStore().putSessionKey(owner, responseID, a.SessionKey)
 	var outcome responsesCompletionOutcome
+	responsePrefix := localCompactionOutputPrefix(compactionItem)
 	if stdReq.Stream {
-		outcome = h.handleResponsesStreamWithRetry(w, r, a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, traceID, historySession)
+		outcome = h.handleResponsesStreamWithRetry(w, r, a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, responsePrefix, traceID, historySession, activeSessionID)
 	} else {
-		outcome = h.handleResponsesNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, traceID, historySession)
+		outcome = h.handleResponsesNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, owner, responseID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice, responsePrefix, traceID, historySession, activeSessionID)
 	}
 	if outcome.success {
 		lease.Complete(shared.IncrementalScope(a, *stdReq), stdReq.Messages, outcome.responseMessages, lease.SessionID, outcome.responseMessageID)
@@ -394,6 +522,8 @@ func (h *Handler) recordFullResponsesIncrementalState(a *auth.RequestAuth, stdRe
 	h.Incremental.Record(scope, stdReq.Messages, outcome.responseMessages, sessionID, outcome.responseMessageID)
 	config.Logger.Info("[incremental] recorded upstream branch",
 		"surface", "responses", "session_key", scope.SessionKey,
+		"account_fingerprint", responseStateFingerprint(scope.AccountID),
+		"upstream_session_fingerprint", responseStateFingerprint(sessionID),
 		"variant", scope.Variant,
 		"parent_message_id", outcome.responseMessageID,
 		"request_messages", len(stdReq.Messages), "response_messages", len(outcome.responseMessages),

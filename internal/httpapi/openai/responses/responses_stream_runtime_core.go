@@ -66,6 +66,7 @@ type responsesStreamRuntime struct {
 	finalFinishReason     string
 	finalUsage            map[string]any
 	completedObject       map[string]any
+	outputPrefix          []any
 
 	persistResponse func(obj map[string]any)
 }

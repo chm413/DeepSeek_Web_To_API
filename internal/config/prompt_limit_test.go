@@ -30,6 +30,9 @@ func TestPromptLimitSnapshotAppliesDefaults(t *testing.T) {
 	if got.AutoCompressEnable {
 		t.Fatal("automatic prompt compression must default to disabled")
 	}
+	if got.SummaryCompactionEnable || got.SummaryCompactionThreshold != 0.8 {
+		t.Fatalf("summary compaction defaults = enabled:%v threshold:%v", got.SummaryCompactionEnable, got.SummaryCompactionThreshold)
+	}
 }
 
 func TestPromptLimitConfigRoundTripIncludesIncrementalRotation(t *testing.T) {
@@ -51,6 +54,25 @@ func TestPromptLimitConfigRoundTripIncludesIncrementalRotation(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"incremental_max_turns":64`) || !strings.Contains(string(b), `"incremental_rotation_keep_recent":8`) {
 		t.Fatalf("rotation config was lost during encode: %s", b)
+	}
+}
+
+func TestPromptLimitConfigRoundTripIncludesSummaryCompaction(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"prompt_limit":{"summary_compaction_enabled":true,"summary_compaction_threshold":0.75}}`), &cfg); err != nil {
+		t.Fatalf("decode prompt_limit: %v", err)
+	}
+	store := &Store{cfg: cfg}
+	snapshot := store.PromptLimitSnapshot()
+	if !snapshot.SummaryCompactionEnable || snapshot.SummaryCompactionThreshold != 0.75 {
+		t.Fatalf("unexpected summary compaction snapshot: %+v", snapshot)
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode prompt_limit: %v", err)
+	}
+	if !strings.Contains(string(b), `"summary_compaction_enabled":true`) || !strings.Contains(string(b), `"summary_compaction_threshold":0.75`) {
+		t.Fatalf("summary compaction config was lost during encode: %s", b)
 	}
 }
 

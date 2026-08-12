@@ -265,6 +265,7 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 	config.Logger.Info("[incremental] reused upstream session",
 		"surface", "anthropic.messages", "session_key", a.SessionKey,
 		"parent_message_id", lease.ParentMessageID,
+		"match_mode", lease.MatchMode,
 		"retained_messages", len(norm.Standard.Messages)-len(lease.DeltaMessages),
 		"delta_messages", len(lease.DeltaMessages),
 		"full_prompt_units", promptcompat.PromptUnits(fullPrompt),

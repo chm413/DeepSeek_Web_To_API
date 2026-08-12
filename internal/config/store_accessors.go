@@ -303,6 +303,12 @@ func (s *Store) promptLimitLocked() PromptLimitSettings {
 	if pl.ProFlashCompressionTargetChars > 0 {
 		out.ProFlashCompressionTarget = pl.ProFlashCompressionTargetChars
 	}
+	if pl.SummaryCompactionEnabled != nil {
+		out.SummaryCompactionEnable = *pl.SummaryCompactionEnabled
+	}
+	if pl.SummaryCompactionThreshold > 0 && pl.SummaryCompactionThreshold < 1 {
+		out.SummaryCompactionThreshold = pl.SummaryCompactionThreshold
+	}
 	if pl.IncrementalMaxTurns != nil && *pl.IncrementalMaxTurns >= 0 {
 		out.IncrementalMaxTurns = *pl.IncrementalMaxTurns
 	}

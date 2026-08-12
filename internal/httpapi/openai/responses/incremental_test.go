@@ -18,6 +18,51 @@ import (
 
 type responsesIncrementalAuthStub struct{}
 
+type responsesSwitchingIncrementalAuthStub struct {
+	accountID string
+	switches  int
+}
+
+func (s *responsesSwitchingIncrementalAuthStub) requestAuth() *auth.RequestAuth {
+	accountID := s.accountID
+	if accountID == "" {
+		accountID = "account-initial"
+	}
+	return &auth.RequestAuth{
+		UseConfigToken: true,
+		DeepSeekToken:  "token-" + accountID,
+		CallerID:       "caller:responses-switch",
+		AccountID:      accountID,
+		SessionKey:     "responses-switch-session",
+		TriedAccounts:  map[string]bool{},
+	}
+}
+
+func (s *responsesSwitchingIncrementalAuthStub) Determine(_ *http.Request) (*auth.RequestAuth, error) {
+	return s.requestAuth(), nil
+}
+
+func (s *responsesSwitchingIncrementalAuthStub) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error) {
+	return s.requestAuth(), nil
+}
+
+func (s *responsesSwitchingIncrementalAuthStub) DetermineWithSession(_ *http.Request, _ []byte) (*auth.RequestAuth, error) {
+	return s.requestAuth(), nil
+}
+
+func (*responsesSwitchingIncrementalAuthStub) Release(_ *auth.RequestAuth) {}
+
+func (s *responsesSwitchingIncrementalAuthStub) SwitchAccount(_ context.Context, a *auth.RequestAuth) bool {
+	if s.switches > 0 {
+		return false
+	}
+	s.switches++
+	s.accountID = "account-retry"
+	a.AccountID = s.accountID
+	a.DeepSeekToken = "token-" + s.accountID
+	return true
+}
+
 type responsesBodyRecordingAuthStub struct {
 	bodies      [][]byte
 	sessionKeys []string
@@ -59,6 +104,17 @@ func (responsesRotationConfigStub) PromptLimitSnapshot() config.PromptLimitSetti
 	return cfg
 }
 
+type responsesCompactRecoveryConfigStub struct{ responsesHistoryConfigStub }
+
+func (responsesCompactRecoveryConfigStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.MaxCharsExpert = 1000
+	cfg.MaxCharsExpertConfigured = true
+	cfg.KeepRecentTurns = 2
+	cfg.IncrementalMaxTurns = 25
+	return cfg
+}
+
 func (responsesIncrementalAuthStub) requestAuth() *auth.RequestAuth {
 	return &auth.RequestAuth{DeepSeekToken: "token", CallerID: "caller:responses-inc", AccountID: "account-1", SessionKey: "responses-session", TriedAccounts: map[string]bool{}}
 }
@@ -81,6 +137,57 @@ type responsesIncrementalDSStub struct {
 	createCalls int
 	normal      []map[string]any
 	pinned      []map[string]any
+}
+
+type responsesSwitchingIncrementalDSStub struct {
+	normalAccounts []string
+	normalSessions []string
+	pinnedAccounts []string
+	pinnedSessions []string
+	pinnedParents  []int
+}
+
+func (s *responsesSwitchingIncrementalDSStub) CreateSession(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "session-" + a.AccountID, nil
+}
+
+func (*responsesSwitchingIncrementalDSStub) GetPow(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "pow-" + a.AccountID, nil
+}
+
+func (*responsesSwitchingIncrementalDSStub) UploadFile(_ context.Context, _ *auth.RequestAuth, _ dsclient.UploadFileRequest, _ int) (*dsclient.UploadFileResult, error) {
+	return &dsclient.UploadFileResult{ID: "file-1", Status: "uploaded"}, nil
+}
+
+func (s *responsesSwitchingIncrementalDSStub) CallCompletion(_ context.Context, a *auth.RequestAuth, payload map[string]any, _ string, _ int) (*http.Response, error) {
+	s.normalAccounts = append(s.normalAccounts, a.AccountID)
+	s.normalSessions = append(s.normalSessions, responseString(payload["chat_session_id"]))
+	if len(s.normalAccounts) == 1 {
+		return responsesIncrementalSSE(101, ""), nil
+	}
+	return responsesIncrementalSSE(202, "first response"), nil
+}
+
+func (s *responsesSwitchingIncrementalDSStub) CallCompletionPinned(_ context.Context, a *auth.RequestAuth, payload map[string]any, _ string) (*http.Response, error) {
+	s.pinnedAccounts = append(s.pinnedAccounts, a.AccountID)
+	s.pinnedSessions = append(s.pinnedSessions, responseString(payload["chat_session_id"]))
+	parent := 0
+	switch value := payload["parent_message_id"].(type) {
+	case int:
+		parent = value
+	case float64:
+		parent = int(value)
+	}
+	s.pinnedParents = append(s.pinnedParents, parent)
+	return responsesIncrementalSSE(303, "second response"), nil
+}
+
+func (*responsesSwitchingIncrementalDSStub) DeleteSessionForToken(_ context.Context, _, _ string) (*dsclient.DeleteSessionResult, error) {
+	return &dsclient.DeleteSessionResult{Success: true}, nil
+}
+
+func (*responsesSwitchingIncrementalDSStub) DeleteAllSessionsForToken(_ context.Context, _ string) error {
+	return nil
 }
 
 func (s *responsesIncrementalDSStub) CreateSession(_ context.Context, _ *auth.RequestAuth, _ int) (string, error) {
@@ -190,6 +297,80 @@ func TestResponsesIncrementalRotatesIntoFreshRootSession(t *testing.T) {
 	}
 	if strings.Contains(prompt, "first request") {
 		t.Fatalf("Responses rollover retained compacted history: %q", prompt)
+	}
+}
+
+func TestResponsesIncrementalRecordsRetryAccountSession(t *testing.T) {
+	authStub := &responsesSwitchingIncrementalAuthStub{}
+	ds := &responsesSwitchingIncrementalDSStub{}
+	h := &Handler{
+		Store:       responsesHistoryConfigStub{},
+		Auth:        authStub,
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+	first := serveResponsesIncremental(t, h, map[string]any{"model": "deepseek-v4-flash", "input": "first request"})
+	firstOutput, _ := first["output"].([]any)
+	secondInput := []any{map[string]any{"role": "user", "content": "first request"}}
+	secondInput = append(secondInput, firstOutput...)
+	secondInput = append(secondInput, map[string]any{"role": "user", "content": "second request"})
+	serveResponsesIncremental(t, h, map[string]any{"model": "deepseek-v4-flash", "input": secondInput})
+
+	if authStub.switches != 1 {
+		t.Fatalf("expected one empty-output account switch, got %d", authStub.switches)
+	}
+	if got := ds.normalAccounts; len(got) != 2 || got[0] != "account-initial" || got[1] != "account-retry" {
+		t.Fatalf("unexpected normal completion accounts: %#v", got)
+	}
+	if got := ds.normalSessions; len(got) != 2 || got[0] != "session-account-initial" || got[1] != "session-account-retry" {
+		t.Fatalf("retry did not move to its account session: %#v", got)
+	}
+	if len(ds.pinnedAccounts) != 1 || ds.pinnedAccounts[0] != "account-retry" || ds.pinnedSessions[0] != "session-account-retry" || ds.pinnedParents[0] != 202 {
+		t.Fatalf("incremental branch did not retain retry account/session state: accounts=%#v sessions=%#v parents=%#v", ds.pinnedAccounts, ds.pinnedSessions, ds.pinnedParents)
+	}
+}
+
+func TestResponsesExpiredCompactSlidingWindowReusesRecoveredSession(t *testing.T) {
+	ds := &responsesIncrementalDSStub{}
+	h := &Handler{
+		Store:       responsesCompactRecoveryConfigStub{},
+		Auth:        responsesIncrementalAuthStub{},
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+	expired := map[string]any{"type": "compaction", "encrypted_content": localCompactionHandlePrefix + "expired"}
+	oldUser := map[string]any{"role": "user", "content": strings.Repeat("old-user-", 250)}
+	oldAssistant := map[string]any{"role": "assistant", "content": strings.Repeat("old-answer-", 250)}
+	secondUser := map[string]any{"role": "user", "content": "second request"}
+	secondAssistant := map[string]any{"role": "assistant", "content": "second answer"}
+	thirdUser := map[string]any{"role": "user", "content": "third request"}
+
+	firstInput := []any{expired, oldUser, oldAssistant, secondUser, secondAssistant, thirdUser}
+	first := serveResponsesIncremental(t, h, map[string]any{"model": "deepseek-v4-pro", "input": firstInput})
+	firstOutput, _ := first["output"].([]any)
+	if len(firstOutput) == 0 {
+		t.Fatalf("missing recovered response output: %#v", first)
+	}
+
+	fourthUser := map[string]any{"role": "user", "content": "fourth request"}
+	secondInput := []any{expired, oldUser, oldAssistant, secondUser, secondAssistant, thirdUser}
+	secondInput = append(secondInput, firstOutput...)
+	secondInput = append(secondInput, fourthUser)
+	serveResponsesIncremental(t, h, map[string]any{"model": "deepseek-v4-pro", "input": secondInput})
+
+	if ds.createCalls != 1 || len(ds.normal) != 1 || len(ds.pinned) != 1 {
+		t.Fatalf("expired compact window must reuse the recovered session: creates=%d normal=%d pinned=%d", ds.createCalls, len(ds.normal), len(ds.pinned))
+	}
+	prompt, _ := ds.pinned[0]["prompt"].(string)
+	for _, expected := range []string{"Incremental response format requirements", "fourth request"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("recovered incremental prompt missing %q: %q", expected, prompt)
+		}
+	}
+	for _, replayed := range []string{"old-user-", "second request", "third request", "first response"} {
+		if strings.Contains(prompt, replayed) {
+			t.Fatalf("recovered incremental prompt replayed %q: %q", replayed, prompt)
+		}
 	}
 }
 

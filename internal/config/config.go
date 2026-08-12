@@ -397,16 +397,18 @@ type ThinkingInjectionConfig struct {
 // through a request without any further locking, and so the compress and
 // enforce phases of a request provably observe identical settings.
 type PromptLimitSettings struct {
-	Enabled                   bool
-	MaxCharsDefault           int
-	MaxCharsExpert            int
-	MaxCharsDefaultConfigured bool
-	MaxCharsExpertConfigured  bool
-	AutoCompressEnable        bool
-	KeepRecentTurns           int
-	KeepSystemMessage         bool
-	ProFlashCompressionEnable bool
-	ProFlashCompressionTarget int
+	Enabled                    bool
+	MaxCharsDefault            int
+	MaxCharsExpert             int
+	MaxCharsDefaultConfigured  bool
+	MaxCharsExpertConfigured   bool
+	AutoCompressEnable         bool
+	KeepRecentTurns            int
+	KeepSystemMessage          bool
+	ProFlashCompressionEnable  bool
+	ProFlashCompressionTarget  int
+	SummaryCompactionEnable    bool
+	SummaryCompactionThreshold float64
 	// IncrementalMaxTurns is an explicit local rollover policy for the
 	// process-local pinned-session cache. Zero means unlimited; it is not an
 	// assertion about an undocumented provider-side turn limit.
@@ -437,6 +439,8 @@ func DefaultPromptLimitSettings() PromptLimitSettings {
 		KeepSystemMessage:             true,
 		ProFlashCompressionEnable:     false,
 		ProFlashCompressionTarget:     defaultPromptMaxCharsExpert,
+		SummaryCompactionEnable:       false,
+		SummaryCompactionThreshold:    0.8,
 		IncrementalMaxTurns:           0,
 		IncrementalRotationKeepRecent: defaultPromptKeepRecentTurns,
 	}
@@ -448,14 +452,16 @@ func DefaultPromptLimitSettings() PromptLimitSettings {
 // automatically compressed by dropping older conversation turns while
 // preserving the system message and most recent turns.
 type PromptLimitConfig struct {
-	Enabled                        *bool `json:"enabled,omitempty"`
-	MaxCharsDefault                int   `json:"max_chars_default,omitempty"`                  // limit for flash/default models (default 380000, empirical)
-	MaxCharsExpert                 int   `json:"max_chars_expert,omitempty"`                   // limit for pro/expert models (default 150000, empirical reliability knee)
-	AutoCompressEnabled            *bool `json:"auto_compress_enabled,omitempty"`              // auto-compress when over limit
-	CompressKeepRecent             int   `json:"compress_keep_recent,omitempty"`               // recent turns to preserve (default 6)
-	CompressKeepSystem             *bool `json:"compress_keep_system,omitempty"`               // always keep system message (default true)
-	ProFlashCompressionEnabled     *bool `json:"pro_flash_compression_enabled,omitempty"`      // use a real Flash request to summarize oversized Pro history
-	ProFlashCompressionTargetChars int   `json:"pro_flash_compression_target_chars,omitempty"` // target UTF-16 units for the summarized Pro prompt
-	IncrementalMaxTurns            *int  `json:"incremental_max_turns,omitempty"`              // explicit local session rollover threshold; 0 disables
-	IncrementalRotationKeepRecent  int   `json:"incremental_rotation_keep_recent,omitempty"`   // recent turns retained after rollover
+	Enabled                        *bool   `json:"enabled,omitempty"`
+	MaxCharsDefault                int     `json:"max_chars_default,omitempty"`                  // limit for flash/default models (default 380000, empirical)
+	MaxCharsExpert                 int     `json:"max_chars_expert,omitempty"`                   // limit for pro/expert models (default 150000, empirical reliability knee)
+	AutoCompressEnabled            *bool   `json:"auto_compress_enabled,omitempty"`              // auto-compress when over limit
+	CompressKeepRecent             int     `json:"compress_keep_recent,omitempty"`               // recent turns to preserve (default 6)
+	CompressKeepSystem             *bool   `json:"compress_keep_system,omitempty"`               // always keep system message (default true)
+	ProFlashCompressionEnabled     *bool   `json:"pro_flash_compression_enabled,omitempty"`      // use a real Flash request to summarize oversized Pro history
+	ProFlashCompressionTargetChars int     `json:"pro_flash_compression_target_chars,omitempty"` // target UTF-16 units for the summarized Pro prompt
+	SummaryCompactionEnabled       *bool   `json:"summary_compaction_enabled,omitempty"`         // server-side Flash summary before the model limit
+	SummaryCompactionThreshold     float64 `json:"summary_compaction_threshold,omitempty"`       // fraction of the active model window that triggers a summary
+	IncrementalMaxTurns            *int    `json:"incremental_max_turns,omitempty"`              // explicit local session rollover threshold; 0 disables
+	IncrementalRotationKeepRecent  int     `json:"incremental_rotation_keep_recent,omitempty"`   // recent turns retained after rollover
 }
