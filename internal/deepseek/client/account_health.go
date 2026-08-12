@@ -15,6 +15,7 @@ import (
 const (
 	loginUserBannedCode              = 10
 	upstreamUserBannedCode           = 40012
+	upstreamAccountDisabledCode      = 90008
 	upstreamMutedCode                = 50006
 	defaultMuteMessage               = "account temporarily muted by upstream"
 	defaultBannedMessage             = "account permanently banned by upstream"
@@ -39,7 +40,10 @@ func accountHealthErrorFromCodes(code, bizCode int, msg, bizMsg string, includeL
 		message = strings.TrimSpace(msg)
 	}
 	switch {
-	case (includeLoginBan && (code == loginUserBannedCode || bizCode == loginUserBannedCode)) || code == upstreamUserBannedCode || bizCode == upstreamUserBannedCode || explicitPermanentBanMessage(message):
+	case (includeLoginBan && (code == loginUserBannedCode || bizCode == loginUserBannedCode)) ||
+		code == upstreamUserBannedCode || bizCode == upstreamUserBannedCode ||
+		code == upstreamAccountDisabledCode || bizCode == upstreamAccountDisabledCode ||
+		explicitPermanentBanMessage(message):
 		if message == "" {
 			message = defaultBannedMessage
 		}

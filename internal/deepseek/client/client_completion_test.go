@@ -203,7 +203,7 @@ func TestCallCompletionSwitchesAccountAfterHTTP200BusinessMute(t *testing.T) {
 	}
 }
 
-func TestCallCompletionDisablesAndSwitchesAfterHTTP200BusinessBan(t *testing.T) {
+func TestCallCompletionDisablesAndSwitchesAfterHTTP200BusinessCode90008(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
 		"keys":["managed-key"],
 		"accounts":[
@@ -220,7 +220,7 @@ func TestCallCompletionDisablesAndSwitchesAfterHTTP200BusinessBan(t *testing.T) 
 	completionDoer := encodedBodyDoerFunc(func(req *http.Request) (*http.Response, error) {
 		body := "data: {\"p\":\"response/content\",\"v\":\"ok\"}\n" + "data: [DONE]\n"
 		if strings.Contains(req.Header.Get("authorization"), "token-1") {
-			body = "{\"code\":0,\"data\":{\"biz_code\":5,\"biz_msg\":\"user is banned\"}}"
+			body = "{\"code\":0,\"data\":{\"biz_code\":90008,\"biz_msg\":\"\"}}"
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,

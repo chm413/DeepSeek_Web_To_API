@@ -23,6 +23,9 @@ func TestAccountHealthErrorFromResponseUsesExplicitCodes(t *testing.T) {
 	if err := accountHealthErrorFromResponse(10, 0, "", ""); err != nil {
 		t.Fatalf("generic code 10 must not imply a permanent ban, got %#v", err)
 	}
+	if err := accountHealthErrorFromResponse(0, 90008, "", ""); err == nil || err.State != account.HealthPermanentlyBanned || err.Code != 90008 {
+		t.Fatalf("expected 90008 to permanently disable the account, got %#v", err)
+	}
 	if err := accountHealthErrorFromResponse(0, 50006, "", ""); err == nil || err.State != account.HealthTemporarilyMuted {
 		t.Fatalf("expected temporary mute error, got %#v", err)
 	}
@@ -119,6 +122,40 @@ func TestCompletionBodyMarksSSEMuteWithoutChangingBytes(t *testing.T) {
 	}
 }
 
+func TestCompletionBodyCode90008PersistentlyDisablesAccountWithoutChangingBytes(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[{"email":"disabled@example.com","token":"token-1"}]
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+	client := &Client{Auth: resolver}
+	acc, ok := store.FindAccount("disabled@example.com")
+	if !ok {
+		t.Fatal("missing test account")
+	}
+	a := &auth.RequestAuth{UseConfigToken: true, AccountID: acc.Identifier(), Account: acc}
+	body := "data: {\"code\":90008}\n"
+	wrapped := client.wrapAccountHealthBody(a, io.NopCloser(strings.NewReader(body)))
+	got, err := io.ReadAll(wrapped)
+	if err != nil {
+		t.Fatalf("read wrapped body: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("health wrapper changed SSE bytes: %q", got)
+	}
+	updated, ok := store.FindAccount(acc.Identifier())
+	if !ok || !updated.Disabled || updated.DisabledReason != config.AccountDisabledUpstreamBanned {
+		t.Fatalf("expected 90008 account to be persistently disabled, got %#v, %v", updated, ok)
+	}
+	if _, ok := pool.Acquire(acc.Identifier(), nil); ok {
+		t.Fatal("account disabled by 90008 must not remain available in the pool")
+	}
+}
+
 func TestLoginReturnsPermanentBanForTopLevelCodeTen(t *testing.T) {
 	client := &Client{
 		regular: doerFunc(func(req *http.Request) (*http.Response, error) {
@@ -188,6 +225,45 @@ func TestCheckAccountHealthRejectsUnrefreshableInvalidToken(t *testing.T) {
 	var healthErr *auth.AccountHealthError
 	if !errors.As(err, &healthErr) || healthErr.State != account.HealthInvalidCredentials {
 		t.Fatalf("expected unrefreshable token to be invalid credentials, got %#v, %v", healthErr, err)
+	}
+}
+
+func TestCheckAccountHealthCode90008AutomaticallyDisablesManagedAccount(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"accounts":[{"email":"disabled@example.com","token":"token-1"}]
+	}`)
+	store := config.LoadStore()
+	if err := store.UpdateAccountToken("disabled@example.com", "token-1"); err != nil {
+		t.Fatalf("seed runtime token: %v", err)
+	}
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+	client := &Client{
+		Store: store,
+		Auth:  resolver,
+		regular: doerFunc(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":0,"data":{"biz_code":90008,"biz_msg":""}}`)),
+			}, nil
+		}),
+		fallback: &http.Client{},
+	}
+	acc, ok := store.FindAccount("disabled@example.com")
+	if !ok {
+		t.Fatal("missing test account")
+	}
+	_, err := client.CheckAccountHealth(context.Background(), acc)
+	var healthErr *auth.AccountHealthError
+	if !errors.As(err, &healthErr) || healthErr.State != account.HealthPermanentlyBanned || healthErr.Code != 90008 {
+		t.Fatalf("expected 90008 permanent health error, got %#v, %v", healthErr, err)
+	}
+	updated, ok := store.FindAccount(acc.Identifier())
+	if !ok || !updated.Disabled || updated.DisabledReason != config.AccountDisabledUpstreamBanned {
+		t.Fatalf("expected health check to persistently disable 90008 account, got %#v, %v", updated, ok)
 	}
 }
 

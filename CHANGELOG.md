@@ -14,6 +14,7 @@ v1.1.2 完整实现 OpenAI Responses Compact 与长上下文增量续接：官�
 ### 账号状态与日志
 
 - **HTTP 200 业务错误识别**：completion 在 SSE 解析前同时检查 `data:` 首帧和裸 JSON。`biz_code=5 / user is muted` 会实时标记 `temporarily_muted` 并切换账号；明确 banned 文本会持久化为 `upstream_banned` 自动禁用。
+- **`90008` 自动禁用**：上游 `code` 或 `biz_code=90008` 现在直接归类为永久不可用账号，不再依赖错误文案；普通 JSON、HTTP 200 业务错误和 SSE 流都会持久化 `upstream_banned`，立即从账号池剔除并切换可用账号。
 - **状态不回滚**：一分钟账号健康巡检的普通成功不会提前清除仍未到期的 muted/rate-limit 冷却。每次 completion 尝试单独建立开发捕获，WebUI 和日志显示实际路由账号，而不是重试前账号。
 - **详细 Compact 日志**：记录 wire bytes、压缩前后消息数/状态字节/UTF-16 prompt units、摘要输入输出 token、保留回合、尝试次数、耗时、缩减率和 hidden-output fallback，不记录代理或账号凭据。
 
