@@ -303,6 +303,18 @@ func (s *Store) promptLimitLocked() PromptLimitSettings {
 	if pl.ProFlashCompressionTargetChars > 0 {
 		out.ProFlashCompressionTarget = pl.ProFlashCompressionTargetChars
 	}
+	if pl.SessionChunkingEnabled != nil {
+		out.SessionChunkingEnable = *pl.SessionChunkingEnabled
+	}
+	if pl.SessionChunkingTargetRatio > 0 && pl.SessionChunkingTargetRatio < 1 {
+		out.SessionChunkingTargetRatio = pl.SessionChunkingTargetRatio
+	}
+	if pl.SessionChunkingMaxChunks > 0 {
+		out.SessionChunkingMaxChunks = pl.SessionChunkingMaxChunks
+	}
+	if pl.SessionChunkingCommitTimeoutSeconds > 0 {
+		out.SessionChunkingCommitTimeoutSeconds = pl.SessionChunkingCommitTimeoutSeconds
+	}
 	if pl.SummaryCompactionEnabled != nil {
 		out.SummaryCompactionEnable = *pl.SummaryCompactionEnabled
 	}

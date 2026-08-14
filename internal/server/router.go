@@ -212,7 +212,7 @@ func NewApp() (*App, error) {
 	app := &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}
 	proxyMonitorCtx, stopProxyMonitor := context.WithCancel(context.Background())
 	app.stopProxyMonitor = stopProxyMonitor
-	startProxyMonitor(proxyMonitorCtx, store, pool)
+	startProxyMonitor(proxyMonitorCtx, store, pool, dsClient)
 	if intervalMinutes := store.RuntimeAccountHealthCheckIntervalMinutes(); intervalMinutes > 0 {
 		monitorCtx, cancel := context.WithCancel(context.Background())
 		app.stopAccountHealthMonitor = cancel

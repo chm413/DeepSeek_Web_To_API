@@ -71,6 +71,25 @@ retries Pro if the result is within the configured target. A failed or still
 oversized summary returns the original 413; no local fake completion is
 created.
 
+`session_chunking_enabled` is a second, independent overflow strategy and is
+also disabled by default. It does not summarize or rewrite the original
+prompt. A Flash no-thinking planner selects a semantically safe UTF-16 split
+boundary, and the gateway validates that boundary before use. Each non-final
+fragment is sent on one fixed upstream session and branch. The gateway waits
+until both a `response_message_id` and the first reasoning/content fragment
+arrive, closes that response stream, sends a random probe, sends an explicit
+cancel/retain-context control turn, and then advances to the next fragment.
+Probe and cancellation turns are committed only when their response message ID
+actually advances beyond the current parent. Empty or prematurely closed
+control streams are retried up to four times with incremental backoff, so the
+final fragment is never attached to an unfinished parent response.
+The final fragment is sent to the originally requested model as a pinned child
+turn. Every fragment, probe, cancellation turn, and final turn repeats the
+request's forced response-format prompt. The original `StandardRequest`, usage
+text, and history snapshot remain unchanged. If both overflow switches are
+enabled, same-session chunking takes precedence and Flash summarization is not
+run.
+
 OpenAI Responses compaction is handled locally and conservatively.
 `previous_response_id` is reconstructed from a per-caller in-process input
 snapshot with the stored visible output appended. `POST /v1/responses/compact`
@@ -447,6 +466,10 @@ func currentInputPrefixKeyForMode(a *auth.RequestAuth, stdReq, modelType, mode) 
 | `prompt_limit.compress_keep_system` | `true` | 始终保留首条 system message |
 | `prompt_limit.pro_flash_compression_enabled` | `false` | Pro 超限时是否真实调用 Flash 总结早期历史 |
 | `prompt_limit.pro_flash_compression_target_chars` | `150000` | Flash 总结后要求 Pro prompt 不超过的 UTF-16 单元数 |
+| `prompt_limit.session_chunking_enabled` | `false` | 超限时是否保留原文并在同一固定上游会话中逐段提交；启用后优先于 Flash 摘要 |
+| `prompt_limit.session_chunking_target_ratio` | `0.85` | 每个分段相对当前模型 UTF-16 上限的目标比例；为协议封装与格式提示词预留空间 |
+| `prompt_limit.session_chunking_max_chunks` | `16` | 单个请求允许的最大分段数，超过时明确失败而不截断原文 |
+| `prompt_limit.session_chunking_commit_timeout_seconds` | `30` | 每个中间轮等待 `response_message_id` 与首个思考/正文片段的超时 |
 
 档位判定统一走 `config.GetModelType`，模型表是唯一事实来源；`prompt_limit` 可通过
 `config.json` / `DEEPSEEK_WEB_TO_API_CONFIG_JSON` 或 WebUI 的 `PUT /admin/settings` 配置。
@@ -459,7 +482,9 @@ NormalizeOpenAIChatRequest → ApplyThinkingInjection
   → CompressPromptBeforeCIF   ← 仅开关开启或显式 compact 时丢弃早期轮次
   → applyCurrentInputFile     ← CIF 把整段 transcript 折叠成 1 条 user message
   → RunSafetyCheckAndBlock
-  → EnforcePromptLimit        ← 终局兜底，超限则 413
+  → TryPrepareSessionChunking ← 可选：同会话逐段提交原文，最后一段固定父消息继续
+  → TryFlashCompressPrompt    ← 可选：仅在未使用同会话分段时总结较早历史
+  → EnforcePromptLimit        ← 两种方案均未启用或未能缩减时返回 413
 ```
 
 顺序不可交换。CIF 的两条路径（`applyCurrentInputStablePrefix` / `applyCurrentInputInlinePrefix`）

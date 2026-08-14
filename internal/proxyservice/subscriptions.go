@@ -85,6 +85,9 @@ func RefreshSubscription(ctx context.Context, store Store, subscriptionID string
 				proxy.LastLatencyMS = previous.LastLatencyMS
 				proxy.LastHTTPStatus = previous.LastHTTPStatus
 				proxy.LastTestError = previous.LastTestError
+				proxy.LastExitIP = previous.LastExitIP
+				proxy.LastCountry = previous.LastCountry
+				proxy.LastColo = previous.LastColo
 				if proxy.DisabledReason == config.ProxyDisabledSubscriptionRemoved {
 					proxy.Disabled = false
 					proxy.DisabledReason = ""

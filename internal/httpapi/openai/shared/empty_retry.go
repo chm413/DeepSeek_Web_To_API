@@ -33,6 +33,22 @@ func ClonePayloadForEmptyOutputRetry(payload map[string]any, parentMessageID int
 	return clone
 }
 
+func PayloadParentMessageID(payload map[string]any) int {
+	if payload == nil {
+		return 0
+	}
+	switch value := payload["parent_message_id"].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
+}
+
 func AppendEmptyOutputRetrySuffix(prompt string) string {
 	prompt = strings.TrimRight(prompt, "\r\n\t ")
 	if prompt == "" {

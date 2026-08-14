@@ -57,20 +57,24 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 
 func promptLimitResponse(s config.PromptLimitSettings) map[string]any {
 	return map[string]any{
-		"enabled":                            s.Enabled,
-		"max_chars_default":                  s.MaxCharsDefault,
-		"max_chars_expert":                   s.MaxCharsExpert,
-		"max_chars_default_configured":       s.MaxCharsDefaultConfigured,
-		"max_chars_expert_configured":        s.MaxCharsExpertConfigured,
-		"auto_compress_enabled":              s.AutoCompressEnable,
-		"compress_keep_recent":               s.KeepRecentTurns,
-		"compress_keep_system":               s.KeepSystemMessage,
-		"pro_flash_compression_enabled":      s.ProFlashCompressionEnable,
-		"pro_flash_compression_target_chars": s.ProFlashCompressionTarget,
-		"summary_compaction_enabled":         s.SummaryCompactionEnable,
-		"summary_compaction_threshold":       s.SummaryCompactionThreshold,
-		"incremental_max_turns":              s.IncrementalMaxTurns,
-		"incremental_rotation_keep_recent":   s.IncrementalRotationKeepRecent,
+		"enabled":                                 s.Enabled,
+		"max_chars_default":                       s.MaxCharsDefault,
+		"max_chars_expert":                        s.MaxCharsExpert,
+		"max_chars_default_configured":            s.MaxCharsDefaultConfigured,
+		"max_chars_expert_configured":             s.MaxCharsExpertConfigured,
+		"auto_compress_enabled":                   s.AutoCompressEnable,
+		"compress_keep_recent":                    s.KeepRecentTurns,
+		"compress_keep_system":                    s.KeepSystemMessage,
+		"pro_flash_compression_enabled":           s.ProFlashCompressionEnable,
+		"pro_flash_compression_target_chars":      s.ProFlashCompressionTarget,
+		"session_chunking_enabled":                s.SessionChunkingEnable,
+		"session_chunking_target_ratio":           s.SessionChunkingTargetRatio,
+		"session_chunking_max_chunks":             s.SessionChunkingMaxChunks,
+		"session_chunking_commit_timeout_seconds": s.SessionChunkingCommitTimeoutSeconds,
+		"summary_compaction_enabled":              s.SummaryCompactionEnable,
+		"summary_compaction_threshold":            s.SummaryCompactionThreshold,
+		"incremental_max_turns":                   s.IncrementalMaxTurns,
+		"incremental_rotation_keep_recent":        s.IncrementalRotationKeepRecent,
 	}
 }
 

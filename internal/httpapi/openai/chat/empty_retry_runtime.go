@@ -66,8 +66,8 @@ func (h *Handler) handleNonStreamWithRetry(w http.ResponseWriter, ctx context.Co
 		}
 
 		attempts++
-		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "chat.completions", "stream", false, "retry_attempt", attempts, "parent_message_id", result.responseMessageID)
 		retryPayload := clonePayloadForEmptyOutputRetry(payload, result.responseMessageID)
+		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "chat.completions", "stream", false, "retry_attempt", attempts, "parent_message_id", shared.PayloadParentMessageID(retryPayload))
 		retryPow, prepared := h.prepareChatEmptyOutputRetry(ctx, a, payload, retryPayload, pow, attempts, false, historySession, activeSessionID)
 		if !prepared {
 			if h.finishChatNonStreamResult(w, result, attempts, usagePrompt, refFileTokens, requireToolCall, historySession) {
@@ -214,8 +214,8 @@ func (h *Handler) handleStreamWithRetry(w http.ResponseWriter, r *http.Request, 
 			return chatCompletionOutcome{}
 		}
 		attempts++
-		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "chat.completions", "stream", true, "retry_attempt", attempts, "parent_message_id", streamRuntime.responseMessageID)
 		retryPayload := clonePayloadForEmptyOutputRetry(payload, streamRuntime.responseMessageID)
+		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "chat.completions", "stream", true, "retry_attempt", attempts, "parent_message_id", shared.PayloadParentMessageID(retryPayload))
 		retryPow, prepared := h.prepareChatEmptyOutputRetry(r.Context(), a, payload, retryPayload, pow, attempts, true, historySession, activeSessionID)
 		if !prepared {
 			streamRuntime.finalize("stop", false)

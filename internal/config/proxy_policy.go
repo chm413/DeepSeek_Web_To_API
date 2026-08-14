@@ -11,6 +11,10 @@ func (p ProxyPolicyConfig) HealthChecksEnabled() bool {
 	return p.HealthCheckEnabled == nil || *p.HealthCheckEnabled
 }
 
+func (p ProxyPolicyConfig) AutoRouteEnabled() bool {
+	return p.AutomaticRoutingEnabled != nil && *p.AutomaticRoutingEnabled
+}
+
 func (p ProxyPolicyConfig) HealthIntervalMinutes() int {
 	if p.HealthCheckIntervalMinutes > 0 {
 		return p.HealthCheckIntervalMinutes

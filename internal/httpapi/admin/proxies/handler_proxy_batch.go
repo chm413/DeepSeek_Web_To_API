@@ -24,6 +24,10 @@ func (h *Handler) testProxiesBatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
 	passed := 0
 	autoDisabled := 0
 	for _, result := range results {
@@ -117,7 +121,7 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}

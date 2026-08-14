@@ -153,14 +153,16 @@ export default function BehaviorSection({ t, form, setForm }) {
                     <input
                         type="checkbox"
                         checked={Boolean(form.prompt_limit?.pro_flash_compression_enabled)}
+                        disabled={!form.prompt_limit?.enabled}
                         onChange={(e) => setForm((prev) => ({
                             ...prev,
                             prompt_limit: {
                                 ...prev.prompt_limit,
                                 pro_flash_compression_enabled: e.target.checked,
+                                session_chunking_enabled: e.target.checked ? false : prev.prompt_limit?.session_chunking_enabled,
                             },
                         }))}
-                        className="mt-1 h-4 w-4 rounded border-border"
+                        className="mt-1 h-4 w-4 rounded border-border disabled:opacity-50"
                     />
                     <div className="space-y-1">
                         <span className="text-sm font-medium block">{t('settings.proFlashCompressionEnabled')}</span>
@@ -174,6 +176,7 @@ export default function BehaviorSection({ t, form, setForm }) {
                         min={1}
                         max={1000000}
                         value={form.prompt_limit?.pro_flash_compression_target_chars || 150000}
+                        disabled={!form.prompt_limit?.enabled || !form.prompt_limit?.pro_flash_compression_enabled}
                         onChange={(e) => setForm((prev) => ({
                             ...prev,
                             prompt_limit: {
@@ -181,7 +184,73 @@ export default function BehaviorSection({ t, form, setForm }) {
                                 pro_flash_compression_target_chars: Number(e.target.value || 150000),
                             },
                         }))}
-                        className="w-full bg-background border border-border rounded-lg px-3 py-2"
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
+                    />
+                </label>
+                <label className="flex items-start gap-3 rounded-lg border border-border bg-background/60 p-4">
+                    <input
+                        type="checkbox"
+                        checked={Boolean(form.prompt_limit?.session_chunking_enabled)}
+                        disabled={!form.prompt_limit?.enabled}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            prompt_limit: {
+                                ...prev.prompt_limit,
+                                session_chunking_enabled: e.target.checked,
+                                pro_flash_compression_enabled: e.target.checked ? false : prev.prompt_limit?.pro_flash_compression_enabled,
+                            },
+                        }))}
+                        className="mt-1 h-4 w-4 rounded border-border disabled:opacity-50"
+                    />
+                    <div className="space-y-1">
+                        <span className="text-sm font-medium block">{t('settings.sessionChunkingEnabled')}</span>
+                        <span className="text-xs text-muted-foreground block">{t('settings.sessionChunkingDesc')}</span>
+                    </div>
+                </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.sessionChunkingTargetRatio')}</span>
+                    <input
+                        type="number"
+                        min={0.5}
+                        max={0.95}
+                        step={0.05}
+                        value={form.prompt_limit?.session_chunking_target_ratio || 0.85}
+                        disabled={!form.prompt_limit?.enabled || !form.prompt_limit?.session_chunking_enabled}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            prompt_limit: { ...prev.prompt_limit, session_chunking_target_ratio: Number(e.target.value || 0.85) },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
+                    />
+                </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.sessionChunkingMaxChunks')}</span>
+                    <input
+                        type="number"
+                        min={2}
+                        max={64}
+                        value={form.prompt_limit?.session_chunking_max_chunks || 16}
+                        disabled={!form.prompt_limit?.enabled || !form.prompt_limit?.session_chunking_enabled}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            prompt_limit: { ...prev.prompt_limit, session_chunking_max_chunks: Number(e.target.value || 16) },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
+                    />
+                </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.sessionChunkingCommitTimeout')}</span>
+                    <input
+                        type="number"
+                        min={5}
+                        max={300}
+                        value={form.prompt_limit?.session_chunking_commit_timeout_seconds || 30}
+                        disabled={!form.prompt_limit?.enabled || !form.prompt_limit?.session_chunking_enabled}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            prompt_limit: { ...prev.prompt_limit, session_chunking_commit_timeout_seconds: Number(e.target.value || 30) },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
                     />
                 </label>
                 <label className="text-sm space-y-2">

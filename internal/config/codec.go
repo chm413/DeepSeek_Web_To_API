@@ -11,7 +11,9 @@ func promptLimitConfigured(p PromptLimitConfig) bool {
 	return p.Enabled != nil || p.MaxCharsDefault > 0 || p.MaxCharsExpert > 0 ||
 		p.AutoCompressEnabled != nil || p.CompressKeepRecent > 0 ||
 		p.CompressKeepSystem != nil || p.ProFlashCompressionEnabled != nil ||
-		p.ProFlashCompressionTargetChars > 0 || p.SummaryCompactionEnabled != nil ||
+		p.ProFlashCompressionTargetChars > 0 || p.SessionChunkingEnabled != nil ||
+		p.SessionChunkingTargetRatio > 0 || p.SessionChunkingMaxChunks > 0 ||
+		p.SessionChunkingCommitTimeoutSeconds > 0 || p.SummaryCompactionEnabled != nil ||
 		p.SummaryCompactionThreshold > 0 || p.IncrementalMaxTurns != nil ||
 		p.IncrementalRotationKeepRecent > 0
 }
@@ -23,7 +25,7 @@ func proxyCoreConfigured(c ProxyCoreConfig) bool {
 }
 
 func proxyPolicyConfigured(p ProxyPolicyConfig) bool {
-	return p.HealthCheckEnabled != nil || p.HealthCheckIntervalMinutes > 0 ||
+	return p.HealthCheckEnabled != nil || p.AutomaticRoutingEnabled != nil || p.HealthCheckIntervalMinutes > 0 ||
 		p.AutoDisableAfterFailures > 0 || p.AutoEnableOnRecovery != nil ||
 		strings.TrimSpace(p.FallbackProxyID) != "" || p.SubscriptionUpdateIntervalMinutes > 0 ||
 		p.TestConcurrency > 0
@@ -227,6 +229,7 @@ func (c Config) Clone() Config {
 		ProxyCore:          c.ProxyCore,
 		ProxyPolicy: ProxyPolicyConfig{
 			HealthCheckEnabled:                cloneBoolPtr(c.ProxyPolicy.HealthCheckEnabled),
+			AutomaticRoutingEnabled:           cloneBoolPtr(c.ProxyPolicy.AutomaticRoutingEnabled),
 			HealthCheckIntervalMinutes:        c.ProxyPolicy.HealthCheckIntervalMinutes,
 			AutoDisableAfterFailures:          c.ProxyPolicy.AutoDisableAfterFailures,
 			AutoEnableOnRecovery:              cloneBoolPtr(c.ProxyPolicy.AutoEnableOnRecovery),
@@ -307,18 +310,22 @@ func (c Config) Clone() Config {
 			Prompt:  c.ThinkingInjection.Prompt,
 		},
 		PromptLimit: PromptLimitConfig{
-			Enabled:                        cloneBoolPtr(c.PromptLimit.Enabled),
-			MaxCharsDefault:                c.PromptLimit.MaxCharsDefault,
-			MaxCharsExpert:                 c.PromptLimit.MaxCharsExpert,
-			AutoCompressEnabled:            cloneBoolPtr(c.PromptLimit.AutoCompressEnabled),
-			CompressKeepRecent:             c.PromptLimit.CompressKeepRecent,
-			CompressKeepSystem:             cloneBoolPtr(c.PromptLimit.CompressKeepSystem),
-			ProFlashCompressionEnabled:     cloneBoolPtr(c.PromptLimit.ProFlashCompressionEnabled),
-			ProFlashCompressionTargetChars: c.PromptLimit.ProFlashCompressionTargetChars,
-			SummaryCompactionEnabled:       cloneBoolPtr(c.PromptLimit.SummaryCompactionEnabled),
-			SummaryCompactionThreshold:     c.PromptLimit.SummaryCompactionThreshold,
-			IncrementalMaxTurns:            cloneIntPtr(c.PromptLimit.IncrementalMaxTurns),
-			IncrementalRotationKeepRecent:  c.PromptLimit.IncrementalRotationKeepRecent,
+			Enabled:                             cloneBoolPtr(c.PromptLimit.Enabled),
+			MaxCharsDefault:                     c.PromptLimit.MaxCharsDefault,
+			MaxCharsExpert:                      c.PromptLimit.MaxCharsExpert,
+			AutoCompressEnabled:                 cloneBoolPtr(c.PromptLimit.AutoCompressEnabled),
+			CompressKeepRecent:                  c.PromptLimit.CompressKeepRecent,
+			CompressKeepSystem:                  cloneBoolPtr(c.PromptLimit.CompressKeepSystem),
+			ProFlashCompressionEnabled:          cloneBoolPtr(c.PromptLimit.ProFlashCompressionEnabled),
+			ProFlashCompressionTargetChars:      c.PromptLimit.ProFlashCompressionTargetChars,
+			SessionChunkingEnabled:              cloneBoolPtr(c.PromptLimit.SessionChunkingEnabled),
+			SessionChunkingTargetRatio:          c.PromptLimit.SessionChunkingTargetRatio,
+			SessionChunkingMaxChunks:            c.PromptLimit.SessionChunkingMaxChunks,
+			SessionChunkingCommitTimeoutSeconds: c.PromptLimit.SessionChunkingCommitTimeoutSeconds,
+			SummaryCompactionEnabled:            cloneBoolPtr(c.PromptLimit.SummaryCompactionEnabled),
+			SummaryCompactionThreshold:          c.PromptLimit.SummaryCompactionThreshold,
+			IncrementalMaxTurns:                 cloneIntPtr(c.PromptLimit.IncrementalMaxTurns),
+			IncrementalRotationKeepRecent:       c.PromptLimit.IncrementalRotationKeepRecent,
 		},
 		AdditionalFields: map[string]any{},
 	}

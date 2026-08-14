@@ -72,6 +72,25 @@ func TestBatchAccountsUpdatePreservesOmittedCredentials(t *testing.T) {
 	}
 }
 
+func TestBatchAccountsUpdateAppliesDefaultAutomaticRoute(t *testing.T) {
+	h := newAdminTestHandler(t, `{
+		"proxies":[{"id":"node-a","type":"socks5","host":"127.0.0.1","port":1080}],
+		"accounts":[{"email":"one@example.com","password":"old-secret"}]
+	}`)
+	router := chi.NewRouter()
+	router.Post("/admin/accounts/batch", h.batchAccounts)
+	body := `{"on_duplicate":"update","defaults":{"proxy_id":"node-a","proxy_auto_route":true},"accounts":[{"email":"one@example.com"}]}`
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/admin/accounts/batch", []byte(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	acc, ok := h.Store.FindAccount("one@example.com")
+	if !ok || !acc.ProxyAutoRoute || acc.ProxyID != "node-a" || acc.Password != "old-secret" {
+		t.Fatalf("default automatic route was not applied safely: %#v, %v", acc, ok)
+	}
+}
+
 func TestBatchAccountsReportsPerItemValidation(t *testing.T) {
 	router := newHTTPAdminHarness(t, `{}`, &testingDSMock{})
 	body := `{"accounts":[{"email":"missing-credentials@example.com"},{"password":"secret"}]}`

@@ -64,7 +64,7 @@ func (h *Handler) updateProxyCore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	xrayproxy.Default().StopAll()
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -81,7 +81,7 @@ func (h *Handler) downloadProxyCore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}

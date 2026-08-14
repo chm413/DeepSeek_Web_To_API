@@ -30,6 +30,14 @@ export default function ProxyPolicyPanel({ t, policy, setPolicy, proxies, loadin
                 <label className="flex min-h-9 items-center gap-2 text-xs font-bold">
                     <input
                         type="checkbox"
+                        checked={Boolean(policy.auto_route_enabled)}
+                        onChange={event => setPolicy({ ...policy, auto_route_enabled: event.target.checked })}
+                    />
+                    {t('proxyManager.autoRouteEnabled')}
+                </label>
+                <label className="flex min-h-9 items-center gap-2 text-xs font-bold">
+                    <input
+                        type="checkbox"
                         checked={Boolean(policy.auto_enable_on_recovery)}
                         onChange={event => setPolicy({ ...policy, auto_enable_on_recovery: event.target.checked })}
                     />

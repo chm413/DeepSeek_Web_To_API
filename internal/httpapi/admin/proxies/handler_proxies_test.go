@@ -21,6 +21,7 @@ func newAdminProxyTestHandler(t *testing.T, raw string) *Handler {
 	return &Handler{
 		Store: store,
 		Pool:  account.NewPool(store),
+		DS:    &testingDSMock{},
 	}
 }
 
@@ -250,6 +251,78 @@ func TestUpdateAccountProxyAssignsProxyID(t *testing.T) {
 	}
 	if acc.ProxyID != "proxy-1" {
 		t.Fatalf("expected proxy assigned, got %#v", acc)
+	}
+	if acc.Token != "token" {
+		t.Fatalf("expected relogin token after egress change, got %#v", acc)
+	}
+}
+
+func TestUpdateAccountProxyEnablesAutomaticRouteAndRelogins(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_policy":{"auto_route_enabled":true},
+		"proxies":[{"id":"proxy-1","name":"Node 1","type":"socks5h","host":"127.0.0.1","port":1080,"last_test_at_unix":10,"last_test_success":true,"last_latency_ms":25}],
+		"accounts":[{"email":"u@example.com","password":"pwd"}]
+	}`)
+	r := chi.NewRouter()
+	r.Put("/admin/accounts/{identifier}/proxy", h.updateAccountProxy)
+	req := httptest.NewRequest(http.MethodPut, "/admin/accounts/u@example.com/proxy", bytes.NewBufferString(`{"proxy_id":"","auto_route":true}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	acc, ok := h.Store.FindAccount("u@example.com")
+	if !ok || !acc.ProxyAutoRoute || acc.ProxyID != "proxy-1" || acc.Token != "token" {
+		t.Fatalf("automatic route was not assigned and relogged: %#v", acc)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["proxy_id"] != "proxy-1" || payload["auto_route"] != true {
+		t.Fatalf("unexpected automatic route response: %#v", payload)
+	}
+}
+
+func TestUpdateAccountProxyKeepsHealthyRouteWhenEnablingAutomaticMode(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_policy":{"auto_route_enabled":true},
+		"proxies":[
+			{"id":"proxy-1","type":"socks5h","host":"127.0.0.1","port":1080,"last_test_at_unix":10,"last_test_success":true,"last_latency_ms":25},
+			{"id":"proxy-2","type":"socks5h","host":"127.0.0.1","port":1081,"last_test_at_unix":10,"last_test_success":true,"last_latency_ms":10}
+		],
+		"accounts":[{"email":"u@example.com","password":"pwd","proxy_id":"proxy-1","token":"keep-token"}]
+	}`)
+	if err := h.Store.UpdateAccountToken("u@example.com", "keep-token"); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	r := chi.NewRouter()
+	r.Put("/admin/accounts/{identifier}/proxy", h.updateAccountProxy)
+	req := httptest.NewRequest(http.MethodPut, "/admin/accounts/u@example.com/proxy", bytes.NewBufferString(`{"auto_route":true}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	acc, ok := h.Store.FindAccount("u@example.com")
+	if !ok || !acc.ProxyAutoRoute || acc.ProxyID != "proxy-1" || acc.Token != "keep-token" {
+		t.Fatalf("healthy route should remain sticky: %#v", acc)
+	}
+}
+
+func TestUpdateAccountProxyRejectsAutomaticRouteWithoutPassword(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_policy":{"auto_route_enabled":true},
+		"proxies":[{"id":"proxy-1","type":"socks5h","host":"127.0.0.1","port":1080,"last_test_at_unix":10,"last_test_success":true}],
+		"accounts":[{"email":"u@example.com","token":"token-only"}]
+	}`)
+	r := chi.NewRouter()
+	r.Put("/admin/accounts/{identifier}/proxy", h.updateAccountProxy)
+	req := httptest.NewRequest(http.MethodPut, "/admin/accounts/u@example.com/proxy", bytes.NewBufferString(`{"auto_route":true}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

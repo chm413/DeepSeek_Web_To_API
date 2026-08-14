@@ -361,7 +361,24 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	// the assembled prompt can exceed the ceiling even after the pre-CIF
 	// compression above. Nothing further can be trimmed at this point, so a
 	// still-oversized prompt is a 413 rather than a silent upstream failure.
-	if shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.ProFlashCompressionEnable {
+	var chunkedPrompt *shared.SessionChunkingPreparation
+	if shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.SessionChunkingEnable {
+		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, stdReq, promptLimit, "", 0)
+		if err != nil {
+			config.Logger.Error("[prompt_limit] same-session chunking failed",
+				"surface", "responses", "model", stdReq.ResolvedModel,
+				"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "error", err)
+			if historySession != nil {
+				historySession.Error(http.StatusBadGateway, err.Error(), "session_chunking_failed", "", "")
+			}
+			writeOpenAIError(w, http.StatusBadGateway, "same-session prompt chunking failed: "+err.Error())
+			return
+		}
+		if chunkedPrompt != nil {
+			sessionID = chunkedPrompt.SessionID
+		}
+	}
+	if chunkedPrompt == nil && shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.ProFlashCompressionEnable {
 		compressed, ok, compressErr := shared.TryFlashCompressPrompt(r.Context(), h.DS, a, stdReq, promptLimit, h.Store.AutoDeleteMode())
 		if compressErr != nil {
 			config.Logger.Warn("[prompt_limit] Flash compression failed; returning original overflow",
@@ -373,26 +390,44 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 				"thinking", stdReq.Thinking, "prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt))
 		}
 	}
-	if errMsg := shared.EnforcePromptLimit(promptLimit, stdReq); errMsg != "" {
-		if historySession != nil {
-			historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
+	if chunkedPrompt == nil {
+		if errMsg := shared.EnforcePromptLimit(promptLimit, stdReq); errMsg != "" {
+			if historySession != nil {
+				historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
+			}
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
+			return
 		}
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
-		return
 	}
 
-	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
+	if chunkedPrompt == nil {
+		sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
+	} else {
+		err = nil
+	}
 	if err != nil {
 		handleCreateSessionError(w, historySession, a, err)
 		return
 	}
-	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	var pow string
+	if chunkedPrompt != nil {
+		pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
+	} else {
+		pow, err = h.DS.GetPow(r.Context(), a, 3)
+	}
 	if err != nil {
 		handlePowError(w, historySession, a, err)
 		return
 	}
 	payload := stdReq.CompletionPayload(sessionID)
-	resp, err := h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	var resp *http.Response
+	if chunkedPrompt != nil {
+		payload["prompt"] = chunkedPrompt.FinalWirePrompt
+		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+		resp, err = shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+	} else {
+		resp, err = h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	}
 	if err != nil {
 		if !a.UseConfigToken && shared.CompletionErrorDetail(err).Status == http.StatusUnauthorized {
 			a.MarkDirectTokenInvalid()
@@ -473,20 +508,42 @@ func (h *Handler) tryIncrementalResponses(w http.ResponseWriter, r *http.Request
 	}) {
 		return true
 	}
-	if errMsg := shared.EnforcePromptLimit(promptLimit, *stdReq); errMsg != "" {
-		if historySession != nil {
-			historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
+	var chunkedPrompt *shared.SessionChunkingPreparation
+	if shared.EnforcePromptLimit(promptLimit, *stdReq) != "" && promptLimit.SessionChunkingEnable {
+		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, *stdReq, promptLimit, lease.SessionID, lease.ParentMessageID)
+		if err != nil {
+			if historySession != nil {
+				historySession.Error(http.StatusBadGateway, err.Error(), "session_chunking_failed", "", "")
+			}
+			writeOpenAIError(w, http.StatusBadGateway, "same-session prompt chunking failed: "+err.Error())
+			return true
 		}
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
-		return true
 	}
-	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	if chunkedPrompt == nil {
+		if errMsg := shared.EnforcePromptLimit(promptLimit, *stdReq); errMsg != "" {
+			if historySession != nil {
+				historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
+			}
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
+			return true
+		}
+	}
+	var pow string
+	if chunkedPrompt != nil {
+		pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
+	} else {
+		pow, err = h.DS.GetPow(r.Context(), a, 3)
+	}
 	if err != nil {
 		handlePowError(w, historySession, a, err)
 		return true
 	}
 	payload := stdReq.CompletionPayload(lease.SessionID)
 	payload["parent_message_id"] = lease.ParentMessageID
+	if chunkedPrompt != nil {
+		payload["prompt"] = chunkedPrompt.FinalWirePrompt
+		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+	}
 	resp, err := shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
 	if err != nil {
 		config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",

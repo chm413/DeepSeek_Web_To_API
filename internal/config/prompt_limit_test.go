@@ -76,6 +76,27 @@ func TestPromptLimitConfigRoundTripIncludesSummaryCompaction(t *testing.T) {
 	}
 }
 
+func TestPromptLimitConfigRoundTripIncludesSessionChunking(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"prompt_limit":{"session_chunking_enabled":true,"session_chunking_target_ratio":0.85,"session_chunking_max_chunks":24,"session_chunking_commit_timeout_seconds":45}}`), &cfg); err != nil {
+		t.Fatalf("decode prompt_limit: %v", err)
+	}
+	store := &Store{cfg: cfg}
+	snapshot := store.PromptLimitSnapshot()
+	if !snapshot.SessionChunkingEnable || snapshot.SessionChunkingTargetRatio != 0.85 || snapshot.SessionChunkingMaxChunks != 24 || snapshot.SessionChunkingCommitTimeoutSeconds != 45 {
+		t.Fatalf("unexpected session chunking snapshot: %+v", snapshot)
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode prompt_limit: %v", err)
+	}
+	for _, expected := range []string{`"session_chunking_enabled":true`, `"session_chunking_target_ratio":0.85`, `"session_chunking_max_chunks":24`, `"session_chunking_commit_timeout_seconds":45`} {
+		if !strings.Contains(string(b), expected) {
+			t.Fatalf("session chunking config lost %s: %s", expected, b)
+		}
+	}
+}
+
 // TestPromptLimitSnapshotOverlaysPartialConfig pins that setting one field
 // leaves the others at their defaults. The resolver uses `> 0` / `!= nil`
 // guards, so a partial operator config must not zero out neighbouring knobs.

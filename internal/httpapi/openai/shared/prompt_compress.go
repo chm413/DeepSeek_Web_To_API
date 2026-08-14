@@ -68,7 +68,7 @@ func EnforcePromptLimit(cfg config.PromptLimitSettings, stdReq promptcompat.Stan
 // prompt body with a short file reference, and Pro-to-Flash compression may
 // still intentionally reduce an oversized prompt later in the pipeline.
 func EnforcePromptLimitBeforeCIF(cfg config.PromptLimitSettings, stdReq promptcompat.StandardRequest, remoteFileUploadEnabled bool) string {
-	if remoteFileUploadEnabled || cfg.ProFlashCompressionEnable {
+	if remoteFileUploadEnabled || cfg.ProFlashCompressionEnable || cfg.SessionChunkingEnable {
 		return ""
 	}
 	return EnforcePromptLimit(cfg, stdReq)

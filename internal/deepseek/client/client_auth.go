@@ -186,6 +186,17 @@ func (c *Client) GetPow(ctx context.Context, a *auth.RequestAuth, maxAttempts in
 }
 
 func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targetPath string, maxAttempts int) (string, error) {
+	return c.getPowForTarget(ctx, a, targetPath, maxAttempts, true)
+}
+
+// GetPowPinned obtains a completion PoW without switching the selected
+// account. It is required after a chat_session_id has been created because a
+// session belongs to exactly one upstream account.
+func (c *Client) GetPowPinned(ctx context.Context, a *auth.RequestAuth) (string, error) {
+	return c.getPowForTarget(ctx, a, dsprotocol.DeepSeekCompletionTargetPath, 3, false)
+}
+
+func (c *Client) getPowForTarget(ctx context.Context, a *auth.RequestAuth, targetPath string, maxAttempts int, allowAccountSwitch bool) (string, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
 	}
@@ -225,7 +236,7 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 			return BuildPowHeader(challenge, answer)
 		}
 		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
-			if a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
+			if allowAccountSwitch && a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
 				clients = c.requestClientsForAuth(ctx, a)
 				refreshed = false
 				attempts++
@@ -247,7 +258,7 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 					continue
 				}
 			}
-			if c.Auth.SwitchAccount(ctx, a) {
+			if allowAccountSwitch && c.Auth.SwitchAccount(ctx, a) {
 				refreshed = false
 				attempts++
 				continue

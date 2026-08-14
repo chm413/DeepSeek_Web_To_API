@@ -49,10 +49,23 @@ func ValidateConfig(c Config) error {
 	if err := ValidateCurrentInputFileConfig(c.CurrentInputFile); err != nil {
 		return err
 	}
+	if err := ValidatePromptLimitConfig(c.PromptLimit); err != nil {
+		return err
+	}
 	if err := ValidateAccountProxyReferences(c.Accounts, c.Proxies); err != nil {
 		return err
 	}
 	return nil
+}
+
+func ValidatePromptLimitConfig(promptLimit PromptLimitConfig) error {
+	if promptLimit.SessionChunkingTargetRatio != 0 && (promptLimit.SessionChunkingTargetRatio < 0.5 || promptLimit.SessionChunkingTargetRatio > 0.95) {
+		return fmt.Errorf("prompt_limit.session_chunking_target_ratio must be between 0.5 and 0.95")
+	}
+	if err := ValidateIntRange("prompt_limit.session_chunking_max_chunks", promptLimit.SessionChunkingMaxChunks, 2, 64, false); err != nil {
+		return err
+	}
+	return ValidateIntRange("prompt_limit.session_chunking_commit_timeout_seconds", promptLimit.SessionChunkingCommitTimeoutSeconds, 5, 300, false)
 }
 
 func ValidateProxyConfig(proxies []Proxy) error {
@@ -149,6 +162,9 @@ func ValidateAccountProxyReferences(accounts []Account, proxies []Proxy) error {
 		ids[NormalizeProxy(proxy).ID] = struct{}{}
 	}
 	for _, acc := range accounts {
+		if acc.ProxyAutoRoute && strings.TrimSpace(acc.Password) == "" {
+			return fmt.Errorf("account %s requires a password for automatic proxy routing", acc.Identifier())
+		}
 		proxyID := strings.TrimSpace(acc.ProxyID)
 		if proxyID == "" {
 			continue

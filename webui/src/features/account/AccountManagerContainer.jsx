@@ -141,6 +141,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 totalPages={totalPages}
                 resolveAccountIdentifier={resolveAccountIdentifier}
                 proxies={config?.proxies || []}
+                autoRouteEnabled={Boolean(config?.proxy_policy?.auto_route_enabled)}
                 onTestAll={testAllAccounts}
                 onShowAddAccount={openAddAccount}
                 onShowBatchUpload={openBatchUpload}

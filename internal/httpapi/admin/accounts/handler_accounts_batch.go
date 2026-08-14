@@ -25,19 +25,21 @@ type batchAccountsRequest struct {
 }
 
 type batchAccountDefaults struct {
-	ProxyID string `json:"proxy_id,omitempty"`
-	Enabled *bool  `json:"enabled,omitempty"`
+	ProxyID        string `json:"proxy_id,omitempty"`
+	ProxyAutoRoute *bool  `json:"proxy_auto_route,omitempty"`
+	Enabled        *bool  `json:"enabled,omitempty"`
 }
 
 type batchAccountInput struct {
-	Name     *string `json:"name,omitempty"`
-	Remark   *string `json:"remark,omitempty"`
-	Email    string  `json:"email,omitempty"`
-	Mobile   string  `json:"mobile,omitempty"`
-	Password string  `json:"password,omitempty"`
-	Token    string  `json:"token,omitempty"`
-	ProxyID  *string `json:"proxy_id,omitempty"`
-	Enabled  *bool   `json:"enabled,omitempty"`
+	Name           *string `json:"name,omitempty"`
+	Remark         *string `json:"remark,omitempty"`
+	Email          string  `json:"email,omitempty"`
+	Mobile         string  `json:"mobile,omitempty"`
+	Password       string  `json:"password,omitempty"`
+	Token          string  `json:"token,omitempty"`
+	ProxyID        *string `json:"proxy_id,omitempty"`
+	ProxyAutoRoute *bool   `json:"proxy_auto_route,omitempty"`
+	Enabled        *bool   `json:"enabled,omitempty"`
 }
 
 type batchAccountResult struct {
@@ -166,7 +168,7 @@ func applyBatchAccounts(c *config.Config, req batchAccountsRequest) batchAccount
 	}
 
 	for itemIndex, input := range req.Accounts {
-		acc, enabledSpecified, err := normalizeBatchAccount(input, req.Defaults)
+		acc, enabledSpecified, autoRouteSpecified, err := normalizeBatchAccount(input, req.Defaults)
 		identifier := acc.Identifier()
 		if err != nil {
 			summary.Invalid++
@@ -188,7 +190,7 @@ func applyBatchAccounts(c *config.Config, req batchAccountsRequest) batchAccount
 				summary.Results = append(summary.Results, batchAccountResult{Index: itemIndex, Identifier: identifier, Status: "skipped", Code: "duplicate"})
 				continue
 			}
-			merged := mergeBatchAccount(c.Accounts[existingIndex], acc, input, enabledSpecified)
+			merged := mergeBatchAccount(c.Accounts[existingIndex], acc, input, enabledSpecified, autoRouteSpecified)
 			c.Accounts[existingIndex] = merged
 			summary.Updated++
 			summary.Results = append(summary.Results, batchAccountResult{Index: itemIndex, Identifier: merged.Identifier(), Status: "updated"})
@@ -212,7 +214,7 @@ func applyBatchAccounts(c *config.Config, req batchAccountsRequest) batchAccount
 	return summary
 }
 
-func normalizeBatchAccount(input batchAccountInput, defaults batchAccountDefaults) (config.Account, bool, error) {
+func normalizeBatchAccount(input batchAccountInput, defaults batchAccountDefaults) (config.Account, bool, bool, error) {
 	proxyID := ""
 	if input.ProxyID != nil {
 		proxyID = strings.TrimSpace(*input.ProxyID)
@@ -232,22 +234,30 @@ func normalizeBatchAccount(input batchAccountInput, defaults batchAccountDefault
 		Token:    strings.TrimSpace(input.Token),
 		ProxyID:  proxyID,
 	})
+	if input.ProxyAutoRoute != nil {
+		acc.ProxyAutoRoute = *input.ProxyAutoRoute
+	} else if defaults.ProxyAutoRoute != nil {
+		acc.ProxyAutoRoute = *defaults.ProxyAutoRoute
+	}
+	if acc.ProxyAutoRoute && strings.TrimSpace(input.Password) == "" && strings.TrimSpace(input.Token) != "" {
+		return acc, enabled != nil, input.ProxyAutoRoute != nil || defaults.ProxyAutoRoute != nil, fmt.Errorf("password is required for automatic proxy routing")
+	}
 	if acc.Identifier() == "" {
-		return acc, enabled != nil, fmt.Errorf("email or mobile is required")
+		return acc, enabled != nil, input.ProxyAutoRoute != nil || defaults.ProxyAutoRoute != nil, fmt.Errorf("email or mobile is required")
 	}
 	if len(input.Password) > 4096 {
-		return acc, enabled != nil, fmt.Errorf("password exceeds 4096 characters")
+		return acc, enabled != nil, input.ProxyAutoRoute != nil || defaults.ProxyAutoRoute != nil, fmt.Errorf("password exceeds 4096 characters")
 	}
 	if len(input.Token) > 65536 {
-		return acc, enabled != nil, fmt.Errorf("token exceeds 65536 characters")
+		return acc, enabled != nil, input.ProxyAutoRoute != nil || defaults.ProxyAutoRoute != nil, fmt.Errorf("token exceeds 65536 characters")
 	}
 	if enabled != nil {
 		acc.Disabled = !*enabled
 	}
-	return acc, enabled != nil, nil
+	return acc, enabled != nil, input.ProxyAutoRoute != nil || defaults.ProxyAutoRoute != nil, nil
 }
 
-func mergeBatchAccount(existing, incoming config.Account, input batchAccountInput, enabledSpecified bool) config.Account {
+func mergeBatchAccount(existing, incoming config.Account, input batchAccountInput, enabledSpecified, autoRouteSpecified bool) config.Account {
 	if input.Name != nil {
 		existing.Name = incoming.Name
 	}
@@ -262,6 +272,12 @@ func mergeBatchAccount(existing, incoming config.Account, input batchAccountInpu
 	}
 	if input.ProxyID != nil || incoming.ProxyID != "" {
 		existing.ProxyID = incoming.ProxyID
+	}
+	if autoRouteSpecified {
+		existing.ProxyAutoRoute = incoming.ProxyAutoRoute
+		if existing.ProxyAutoRoute && strings.TrimSpace(input.Password) == "" && strings.TrimSpace(existing.Password) == "" {
+			existing.ProxyAutoRoute = false
+		}
 	}
 	if enabledSpecified {
 		existing.Disabled = incoming.Disabled

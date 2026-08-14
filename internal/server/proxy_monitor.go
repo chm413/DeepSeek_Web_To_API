@@ -3,15 +3,17 @@ package server
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/config"
+	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
 	"DeepSeek_Web_To_API/internal/proxyservice"
 	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
-func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.Pool) {
+func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.Pool, ds *dsclient.Client) {
 	if store == nil {
 		return
 	}
@@ -33,7 +35,7 @@ func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.P
 		} else {
 			config.Logger.Warn("[proxy_monitor] xray unavailable", "error", status.Error)
 		}
-		syncAssignedProxyRoutes(ctx, store)
+		reconcileAndSyncProxyRoutes(ctx, store, pool, ds)
 
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -43,7 +45,7 @@ func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.P
 			case <-ctx.Done():
 				return
 			case <-syncRequests:
-				syncAssignedProxyRoutes(ctx, store)
+				reconcileAndSyncProxyRoutes(ctx, store, pool, ds)
 			case now := <-ticker.C:
 				refreshDueSubscriptions(ctx, store, pool, now)
 				policy := store.Snapshot().ProxyPolicy
@@ -59,6 +61,77 @@ func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.P
 			}
 		}
 	}()
+}
+
+func reconcileAndSyncProxyRoutes(parent context.Context, store *config.Store, pool *account.Pool, ds *dsclient.Client) {
+	changes, err := proxyservice.ReconcileAutoRoutes(store)
+	if err != nil {
+		config.Logger.Warn("[proxy_router] automatic route reconciliation failed", "error", err)
+	}
+	syncAssignedProxyRoutes(parent, store)
+	if len(changes) == 0 {
+		return
+	}
+	if pool != nil {
+		pool.Reset()
+	}
+	config.Logger.Info("[proxy_router] automatic routes changed", "accounts", len(changes), "available_nodes", len(proxyservice.AvailableRoutePool(store.Snapshot())))
+	reloginProxyRouteChanges(parent, store, pool, ds, changes)
+}
+
+func reloginProxyRouteChanges(parent context.Context, store *config.Store, pool *account.Pool, ds *dsclient.Client, changes []proxyservice.AutoRouteChange) {
+	if store == nil || ds == nil || len(changes) == 0 {
+		return
+	}
+	jobs := make(chan proxyservice.AutoRouteChange)
+	var workers sync.WaitGroup
+	workerCount := 4
+	if len(changes) < workerCount {
+		workerCount = len(changes)
+	}
+	for index := 0; index < workerCount; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for change := range jobs {
+				if strings.TrimSpace(change.ToProxyID) == "" {
+					config.Logger.Warn("[proxy_router] account is waiting for an available route", "account", change.AccountID, "from_proxy_id", change.FromProxyID, "reason", change.Reason)
+					continue
+				}
+				accountConfig, ok := store.FindAccount(change.AccountID)
+				if !ok || accountConfig.Disabled || strings.TrimSpace(accountConfig.Password) == "" {
+					config.Logger.Warn("[proxy_router] automatic relogin skipped", "account", change.AccountID, "proxy_id", change.ToProxyID, "account_found", ok)
+					continue
+				}
+				loginCtx, cancel := context.WithTimeout(parent, 45*time.Second)
+				token, loginErr := ds.Login(loginCtx, accountConfig)
+				cancel()
+				if loginErr != nil {
+					config.Logger.Warn("[proxy_router] relogin after route change failed", "account", change.AccountID, "from_proxy_id", change.FromProxyID, "to_proxy_id", change.ToProxyID, "reason", change.Reason, "error", loginErr)
+					continue
+				}
+				if err := store.UpdateAccountToken(change.AccountID, token); err != nil {
+					config.Logger.Warn("[proxy_router] persist relogin token failed", "account", change.AccountID, "proxy_id", change.ToProxyID, "error", err)
+					continue
+				}
+				config.Logger.Info("[proxy_router] relogin after route change succeeded", "account", change.AccountID, "from_proxy_id", change.FromProxyID, "to_proxy_id", change.ToProxyID, "reason", change.Reason)
+			}
+		}()
+	}
+	for _, change := range changes {
+		select {
+		case jobs <- change:
+		case <-parent.Done():
+			close(jobs)
+			workers.Wait()
+			return
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	if pool != nil {
+		pool.Reset()
+	}
 }
 
 func syncAssignedProxyRoutes(parent context.Context, store *config.Store) {

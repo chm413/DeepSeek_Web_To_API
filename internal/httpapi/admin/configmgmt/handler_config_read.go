@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/proxyservice"
 	"DeepSeek_Web_To_API/internal/proxyuri"
 )
 
@@ -30,6 +31,7 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 		},
 		"proxy_policy": map[string]any{
 			"health_check_enabled":                 snap.ProxyPolicy.HealthChecksEnabled(),
+			"auto_route_enabled":                   snap.ProxyPolicy.AutoRouteEnabled(),
 			"health_check_interval_minutes":        snap.ProxyPolicy.HealthIntervalMinutes(),
 			"auto_disable_after_failures":          snap.ProxyPolicy.DisableAfterFailures(),
 			"auto_enable_on_recovery":              snap.ProxyPolicy.EnableOnRecovery(),
@@ -43,41 +45,49 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 	for _, acc := range snap.Accounts {
 		token := strings.TrimSpace(acc.Token)
 		accounts = append(accounts, map[string]any{
-			"identifier":    acc.Identifier(),
-			"name":          acc.Name,
-			"remark":        acc.Remark,
-			"email":         acc.Email,
-			"mobile":        acc.Mobile,
-			"proxy_id":      acc.ProxyID,
-			"has_password":  strings.TrimSpace(acc.Password) != "",
-			"has_token":     token != "",
-			"token_preview": maskSecretPreview(token),
+			"identifier":       acc.Identifier(),
+			"name":             acc.Name,
+			"remark":           acc.Remark,
+			"email":            acc.Email,
+			"mobile":           acc.Mobile,
+			"proxy_id":         acc.ProxyID,
+			"proxy_auto_route": acc.ProxyAutoRoute,
+			"has_password":     strings.TrimSpace(acc.Password) != "",
+			"has_token":        token != "",
+			"token_preview":    maskSecretPreview(token),
 		})
 	}
 	safe["accounts"] = accounts
 	proxies := make([]map[string]any, 0, len(snap.Proxies))
+	assignedProxyAccounts, automaticProxyAccounts := proxyservice.ProxyAssignmentCounts(snap)
 	for _, proxy := range snap.Proxies {
 		proxy = config.NormalizeProxy(proxy)
 		proxies = append(proxies, map[string]any{
-			"id":                   proxy.ID,
-			"name":                 proxy.Name,
-			"type":                 proxy.Type,
-			"host":                 proxy.Host,
-			"port":                 proxy.Port,
-			"username":             proxy.Username,
-			"has_password":         strings.TrimSpace(proxy.Password) != "",
-			"has_uri":              strings.TrimSpace(proxy.URI) != "",
-			"core_managed":         proxyuri.IsCoreType(proxy.Type),
-			"subscription_id":      proxy.SubscriptionID,
-			"disabled":             proxy.Disabled,
-			"disabled_reason":      proxy.DisabledReason,
-			"disabled_at_unix":     proxy.DisabledAtUnix,
-			"consecutive_failures": proxy.ConsecutiveFailures,
-			"last_test_at_unix":    proxy.LastTestAtUnix,
-			"last_test_success":    proxy.LastTestSuccess,
-			"last_latency_ms":      proxy.LastLatencyMS,
-			"last_http_status":     proxy.LastHTTPStatus,
-			"last_test_error":      proxy.LastTestError,
+			"id":                        proxy.ID,
+			"name":                      proxy.Name,
+			"type":                      proxy.Type,
+			"host":                      proxy.Host,
+			"port":                      proxy.Port,
+			"username":                  proxy.Username,
+			"has_password":              strings.TrimSpace(proxy.Password) != "",
+			"has_uri":                   strings.TrimSpace(proxy.URI) != "",
+			"core_managed":              proxyuri.IsCoreType(proxy.Type),
+			"subscription_id":           proxy.SubscriptionID,
+			"disabled":                  proxy.Disabled,
+			"disabled_reason":           proxy.DisabledReason,
+			"disabled_at_unix":          proxy.DisabledAtUnix,
+			"consecutive_failures":      proxy.ConsecutiveFailures,
+			"last_test_at_unix":         proxy.LastTestAtUnix,
+			"last_test_success":         proxy.LastTestSuccess,
+			"last_latency_ms":           proxy.LastLatencyMS,
+			"last_http_status":          proxy.LastHTTPStatus,
+			"last_test_error":           proxy.LastTestError,
+			"last_exit_ip":              proxy.LastExitIP,
+			"last_country":              proxy.LastCountry,
+			"last_colo":                 proxy.LastColo,
+			"route_available":           !proxy.Disabled && proxy.LastTestAtUnix > 0 && proxy.LastTestSuccess,
+			"assigned_account_count":    assignedProxyAccounts[proxy.ID],
+			"auto_routed_account_count": automaticProxyAccounts[proxy.ID],
 		})
 	}
 	safe["proxies"] = proxies

@@ -50,6 +50,14 @@ func PrepareEmptyOutputRetry(ctx context.Context, resolver any, ds DeepSeekCalle
 	if ds == nil {
 		return originalPow, true
 	}
+	if IsPinnedCompletionPayload(basePayload) {
+		retryPow, powErr := GetPinnedPow(ctx, ds, a)
+		if powErr != nil {
+			config.Logger.Warn("[openai_empty_retry] pinned retry PoW fetch failed, falling back to original PoW", "surface", surface, "stream", stream, "retry_attempt", retryAttempt, "error", powErr)
+			return originalPow, true
+		}
+		return retryPow, true
+	}
 	if switcher, ok := resolver.(EmptyRetryAccountSwitcher); ok && a != nil && a.UseConfigToken && !IsPinnedCompletionPayload(basePayload) {
 		oldAccountID := strings.TrimSpace(a.AccountID)
 		for switchAttempt := 1; switchAttempt <= emptyOutputRetryAccountSwitchAttempts; switchAttempt++ {

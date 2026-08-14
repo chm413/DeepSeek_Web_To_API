@@ -13,8 +13,9 @@ func TestAccountSQLiteMigratesFileBackedAccountsAndKeepsConfigClean(t *testing.T
 	accountsPath := filepath.Join(dir, "accounts.sqlite")
 	body := `{
 		"keys":["k1"],
+		"proxies":[{"id":"node-a","type":"socks5","host":"127.0.0.1","port":1080}],
 		"accounts":[
-			{"email":"user@example.com","password":"p1","token":"persisted-token"},
+			{"email":"user@example.com","password":"p1","token":"persisted-token","proxy_id":"node-a","proxy_auto_route":true},
 			{"mobile":"13800000000","password":"p2","disabled":true,"disabled_reason":"manual","disabled_at_unix":1700000000}
 		],
 		"storage":{"accounts_sqlite_path":` + quoteJSON(accountsPath) + `}
@@ -59,6 +60,9 @@ func TestAccountSQLiteMigratesFileBackedAccountsAndKeepsConfigClean(t *testing.T
 	}
 	if acc.Token != "runtime-token" {
 		t.Fatalf("expected token from accounts sqlite, got %q", acc.Token)
+	}
+	if !acc.ProxyAutoRoute || acc.ProxyID != "node-a" {
+		t.Fatalf("expected automatic proxy route to persist in accounts sqlite, got %#v", acc)
 	}
 	disabled, ok := reloaded.FindAccount("13800000000")
 	if !ok || !disabled.Disabled || disabled.DisabledReason != AccountDisabledManual || disabled.DisabledAtUnix != 1700000000 {

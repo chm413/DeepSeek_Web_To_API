@@ -137,6 +137,9 @@ func toAccount(m map[string]any) config.Account {
 		Password: fieldString(m, "password"),
 		ProxyID:  fieldString(m, "proxy_id"),
 	})
+	if autoRoute, ok := fieldBoolOptional(m, "proxy_auto_route"); ok {
+		acc.ProxyAutoRoute = autoRoute
+	}
 	if enabled, ok := fieldBoolOptional(m, "enabled"); ok {
 		acc.Disabled = !enabled
 	} else if disabled, ok := fieldBoolOptional(m, "disabled"); ok {

@@ -164,6 +164,36 @@ func TestParsePromptLimitUpdateRejectsInvalidProFlashTarget(t *testing.T) {
 	}
 }
 
+func TestParsePromptLimitUpdateSupportsSessionChunking(t *testing.T) {
+	cfg, err := parsePromptLimitUpdate(map[string]any{
+		"prompt_limit": map[string]any{
+			"session_chunking_enabled":                true,
+			"session_chunking_target_ratio":           float64(0.85),
+			"session_chunking_max_chunks":             float64(24),
+			"session_chunking_commit_timeout_seconds": float64(45),
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse prompt limit: %v", err)
+	}
+	if cfg == nil || cfg.SessionChunkingEnabled == nil || !*cfg.SessionChunkingEnabled || cfg.SessionChunkingTargetRatio != 0.85 || cfg.SessionChunkingMaxChunks != 24 || cfg.SessionChunkingCommitTimeoutSeconds != 45 {
+		t.Fatalf("unexpected session chunking config: %#v", cfg)
+	}
+}
+
+func TestParsePromptLimitUpdateRejectsInvalidSessionChunkingSettings(t *testing.T) {
+	for name, value := range map[string]any{
+		"session_chunking_target_ratio":           float64(0.49),
+		"session_chunking_max_chunks":             float64(1),
+		"session_chunking_commit_timeout_seconds": float64(4),
+	} {
+		_, err := parsePromptLimitUpdate(map[string]any{"prompt_limit": map[string]any{name: value}})
+		if err == nil {
+			t.Fatalf("expected %s=%v to be rejected", name, value)
+		}
+	}
+}
+
 func TestParsePromptLimitUpdateSupportsSummaryCompaction(t *testing.T) {
 	cfg, err := parsePromptLimitUpdate(map[string]any{
 		"prompt_limit": map[string]any{

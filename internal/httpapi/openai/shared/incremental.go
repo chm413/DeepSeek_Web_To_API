@@ -18,6 +18,10 @@ type PinnedCompletionCaller interface {
 	CallCompletionPinned(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string) (*http.Response, error)
 }
 
+type PinnedPowCaller interface {
+	GetPowPinned(ctx context.Context, a *auth.RequestAuth) (string, error)
+}
+
 func LogIncrementalRequestContext(surface string, a *auth.RequestAuth, req promptcompat.StandardRequest, wireRequestBytes int) {
 	messageJSON, _ := json.Marshal(req.Messages)
 	sum := sha256.Sum256(messageJSON)
@@ -169,6 +173,14 @@ func CallPinnedCompletion(ctx context.Context, ds any, a *auth.RequestAuth, payl
 		return nil, &IncrementalUnavailableError{}
 	}
 	return pinned.CallCompletionPinned(ctx, a, payload, powResp)
+}
+
+func GetPinnedPow(ctx context.Context, ds any, a *auth.RequestAuth) (string, error) {
+	pinned, ok := ds.(PinnedPowCaller)
+	if !ok {
+		return "", &IncrementalUnavailableError{}
+	}
+	return pinned.GetPowPinned(ctx, a)
 }
 
 func IsPinnedCompletionPayload(payload map[string]any) bool {

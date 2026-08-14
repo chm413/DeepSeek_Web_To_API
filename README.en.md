@@ -4,7 +4,7 @@ Language: [中文](README.MD) | [English](README.en.md)
 
 DeepSeek Web To API is a self-hosted Go gateway that exposes DeepSeek Web sessions through OpenAI, Anthropic Claude, and Gemini-compatible APIs. It includes an admin console for accounts, sessions, caches, logs, and proxy routing.
 
-Current version: **v1.1.2**
+Current version: **v1.1.3**
 
 ## Features
 
@@ -14,7 +14,7 @@ Current version: **v1.1.2**
 - Managed account pool with concurrency slots, token refresh, health checks, ban/login-failure detection, automatic disable, and manual enable/disable controls.
 - Context handling with dynamic input-limit detection, Compact workflows, incremental sessions, mandatory output-format instructions, conversation rotation, and history compression.
 - Request logs covering processed context size, token usage, cache hit rate, per-account cost, and conversation history.
-- SOCKS5/SOCKS5H, VLESS, VMess, and Hysteria2/HY2 routing with subscriptions, scheduled updates, batch tests, automatic disable, and fallback routes.
+- SOCKS5/SOCKS5H, VLESS, VMess, and Hysteria2/HY2 routing with subscriptions, scheduled updates, batch tests, automatic disable, sticky automatic routing, and fallback routes.
 
 ## Shared Xray Architecture
 
@@ -29,7 +29,8 @@ Account C ─┘                 └─ inbound B -> HY2 node
 - Multiple accounts using one node share one route.
 - Nodes not referenced by enabled accounts do not remain in the resident Xray configuration.
 - Manual and batch tests temporarily add routes to the shared process, then restore the account route set.
-- Nodes are disabled after the configured consecutive-failure threshold. Traffic uses the configured fallback node, or a direct connection when no fallback is available.
+- The automatic route pool contains only nodes whose latest test passed. Accounts prefer the node with the fewest enabled-account assignments, move only when unassigned or when the current node fails, and log in again after a route change.
+- Manually routed nodes are disabled after the configured consecutive-failure threshold. They use the configured fallback node, or a direct connection when no fallback is available. Automatically routed accounts are blocked when no healthy node exists instead of silently leaking to a direct connection.
 - Missing Xray binaries can be downloaded from official XTLS/Xray-core releases into `data/xray`. In Docker this persists under `/app/data/xray`.
 
 See [Xray and proxy subscriptions](docs/xray-proxy.md).
@@ -75,7 +76,8 @@ The Proxy page in the admin console supports:
 - Manual or scheduled subscription refresh, with optional node testing after each update.
 - Single-node tests, batch tests, and batch enable, disable, and delete operations.
 - Configurable test interval, concurrency, consecutive-failure threshold, recovery enablement, and global fallback route.
-- Persistent latency, HTTP status, consecutive failures, last error, subscription ownership, and disable reason.
+- Optional sticky automatic routing that balances by enabled-account assignments; temporarily muted accounts continue to count so egress IPs do not churn unnecessarily.
+- Persistent availability, latency, exit IP, country/colo, HTTP status, assigned-account counts, consecutive failures, last error, subscription ownership, and disable reason.
 
 The management endpoints are under `/admin/proxies/*` and require administrator authentication.
 

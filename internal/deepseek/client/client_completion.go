@@ -23,14 +23,25 @@ const completionSSEPreludeLimit = 64 * 1024
 var errNoCompletionSwitchCandidate = errors.New("no completion switch candidate")
 
 func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int) (*http.Response, error) {
-	return c.callCompletion(ctx, a, payload, powResp, maxAttempts, true)
+	return c.callCompletion(ctx, a, payload, powResp, maxAttempts, true, true)
 }
 
 func (c *Client) CallCompletionPinned(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string) (*http.Response, error) {
-	return c.callCompletion(ctx, a, payload, powResp, 1, false)
+	return c.callCompletion(ctx, a, payload, powResp, 1, false, true)
 }
 
-func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int, allowAccountSwitch bool) (*http.Response, error) {
+// CallCompletionRaw returns the upstream completion stream without the
+// auto-continue pipe. Callers that deliberately interrupt generation need
+// Close on the returned body to reach the underlying HTTP stream immediately.
+func (c *Client) CallCompletionRaw(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int) (*http.Response, error) {
+	return c.callCompletion(ctx, a, payload, powResp, maxAttempts, true, false)
+}
+
+func (c *Client) CallCompletionPinnedRaw(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string) (*http.Response, error) {
+	return c.callCompletion(ctx, a, payload, powResp, 1, false, false)
+}
+
+func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int, allowAccountSwitch, autoContinue bool) (*http.Response, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
 	}
@@ -112,7 +123,9 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 				}
 				break
 			}
-			resp = c.wrapCompletionWithAutoContinue(ctx, a, payload, powResp, resp)
+			if autoContinue {
+				resp = c.wrapCompletionWithAutoContinue(ctx, a, payload, powResp, resp)
+			}
 			return resp, nil
 		}
 		if captureSession != nil {

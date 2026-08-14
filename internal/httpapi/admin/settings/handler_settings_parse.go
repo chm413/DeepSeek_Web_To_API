@@ -404,6 +404,31 @@ func parsePromptLimitUpdate(req map[string]any) (*config.PromptLimitConfig, erro
 		}
 		cfg.ProFlashCompressionTargetChars = n
 	}
+	if v, exists := raw["session_chunking_enabled"]; exists {
+		b := boolFrom(v)
+		cfg.SessionChunkingEnabled = &b
+	}
+	if v, exists := raw["session_chunking_target_ratio"]; exists {
+		n := float64From(v)
+		if n < 0.5 || n > 0.95 {
+			return nil, fmt.Errorf("prompt_limit.session_chunking_target_ratio must be between 0.5 and 0.95")
+		}
+		cfg.SessionChunkingTargetRatio = n
+	}
+	if v, exists := raw["session_chunking_max_chunks"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.session_chunking_max_chunks", n, 2, 64, true); err != nil {
+			return nil, err
+		}
+		cfg.SessionChunkingMaxChunks = n
+	}
+	if v, exists := raw["session_chunking_commit_timeout_seconds"]; exists {
+		n := intFrom(v)
+		if err := config.ValidateIntRange("prompt_limit.session_chunking_commit_timeout_seconds", n, 5, 300, true); err != nil {
+			return nil, err
+		}
+		cfg.SessionChunkingCommitTimeoutSeconds = n
+	}
 	if v, exists := raw["summary_compaction_enabled"]; exists {
 		b := boolFrom(v)
 		cfg.SummaryCompactionEnabled = &b

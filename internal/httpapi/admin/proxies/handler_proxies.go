@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -56,16 +57,30 @@ func proxyResponse(proxy config.Proxy) map[string]any {
 		"last_latency_ms":      proxy.LastLatencyMS,
 		"last_http_status":     proxy.LastHTTPStatus,
 		"last_test_error":      proxy.LastTestError,
+		"last_exit_ip":         proxy.LastExitIP,
+		"last_country":         proxy.LastCountry,
+		"last_colo":            proxy.LastColo,
 	}
 }
 
 func (h *Handler) listProxies(w http.ResponseWriter, _ *http.Request) {
-	proxies := h.Store.Snapshot().Proxies
+	snapshot := h.Store.Snapshot()
+	proxies := snapshot.Proxies
+	assigned, automatic := proxyservice.ProxyAssignmentCounts(snapshot)
 	items := make([]map[string]any, 0, len(proxies))
 	for _, proxy := range proxies {
-		items = append(items, proxyResponse(proxy))
+		item := proxyResponse(proxy)
+		normalized := config.NormalizeProxy(proxy)
+		item["route_available"] = !normalized.Disabled && normalized.LastTestAtUnix > 0 && normalized.LastTestSuccess
+		item["assigned_account_count"] = assigned[normalized.ID]
+		item["auto_routed_account_count"] = automatic[normalized.ID]
+		items = append(items, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"total":      len(items),
+		"route_pool": proxyservice.AvailableRoutePool(snapshot),
+	})
 }
 
 func (h *Handler) addProxy(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +95,7 @@ func (h *Handler) addProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -119,6 +134,9 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 			proxy.LastLatencyMS = existing.LastLatencyMS
 			proxy.LastHTTPStatus = existing.LastHTTPStatus
 			proxy.LastTestError = existing.LastTestError
+			proxy.LastExitIP = existing.LastExitIP
+			proxy.LastCountry = existing.LastCountry
+			proxy.LastColo = existing.LastColo
 			proxy = config.NormalizeProxy(proxy)
 			c.Proxies[i] = proxy
 			return validateProxyMutation(c)
@@ -133,7 +151,7 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -177,7 +195,7 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -211,6 +229,10 @@ func (h *Handler) testProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "代理不存在"})
 		return
 	}
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, results[0])
 }
 
@@ -222,7 +244,14 @@ func (h *Handler) updateAccountProxy(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	proxyID := fieldString(req, "proxy_id")
+	autoRoute, _ := req["auto_route"].(bool)
+	if autoRoute && !h.Store.Snapshot().ProxyPolicy.AutoRouteEnabled() {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "automatic proxy routing is disabled in proxy policy"})
+		return
+	}
 
+	proxyChanged := false
+	originalProxyID := ""
 	err := h.Store.Update(func(c *config.Config) error {
 		if proxyID != "" {
 			if _, ok := findProxyByID(*c, proxyID); !ok {
@@ -233,7 +262,22 @@ func (h *Handler) updateAccountProxy(w http.ResponseWriter, r *http.Request) {
 			if !accountMatchesIdentifier(acc, identifier) {
 				continue
 			}
+			originalProxyID = strings.TrimSpace(acc.ProxyID)
+			if autoRoute && proxyID == "" {
+				proxyID = originalProxyID
+			}
+			if autoRoute && strings.TrimSpace(acc.Password) == "" {
+				return newRequestError("account password is required for automatic proxy routing")
+			}
+			proxyChanged = strings.TrimSpace(acc.ProxyID) != proxyID
+			if proxyChanged && strings.TrimSpace(acc.Password) == "" {
+				return newRequestError("account password is required when changing the egress proxy")
+			}
 			c.Accounts[i].ProxyID = proxyID
+			c.Accounts[i].ProxyAutoRoute = autoRoute
+			if proxyChanged {
+				c.Accounts[i].Token = ""
+			}
 			return validateProxyMutation(c)
 		}
 		return newRequestError("账号不存在")
@@ -247,11 +291,112 @@ func (h *Handler) updateAccountProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Pool.Reset()
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	autoRelogins, err := h.reconcileAndSyncProxyRoutes(r.Context())
+	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "proxy_id": proxyID})
+	effective, _ := h.Store.FindAccount(identifier)
+	routeChanged := originalProxyID != strings.TrimSpace(effective.ProxyID)
+	response := map[string]any{"success": true, "proxy_id": effective.ProxyID, "auto_route": autoRoute, "route_changed": routeChanged}
+	if routeChanged && !autoRoute {
+		response["relogin"] = h.reloginAccountAfterRouteChange(r.Context(), identifier)
+	} else if autoRoute {
+		if relogin, ok := autoRelogins[effective.Identifier()]; ok {
+			response["relogin"] = relogin
+		} else {
+			response["relogin"] = map[string]any{"success": true, "changed": false}
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) reloginAccountAfterRouteChange(parent context.Context, identifier string) map[string]any {
+	accountConfig, ok := h.Store.FindAccount(identifier)
+	if !ok {
+		return map[string]any{"success": false, "reason": "account not found after proxy update"}
+	}
+	if h.DS == nil {
+		return map[string]any{"success": false, "reason": "DeepSeek login client is unavailable"}
+	}
+	loginCtx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+	token, err := h.DS.Login(loginCtx, accountConfig)
+	if err != nil {
+		config.Logger.Warn("[proxy_router] manual route relogin failed", "account", identifier, "proxy_id", accountConfig.ProxyID, "error", err)
+		return map[string]any{"success": false, "reason": err.Error()}
+	}
+	if err := h.Store.UpdateAccountToken(identifier, token); err != nil {
+		return map[string]any{"success": false, "reason": err.Error()}
+	}
+	h.Pool.Reset()
+	config.Logger.Info("[proxy_router] manual route relogin succeeded", "account", identifier, "proxy_id", accountConfig.ProxyID)
+	return map[string]any{"success": true}
+}
+
+func (h *Handler) reconcileAndSyncProxyRoutes(ctx context.Context) (map[string]map[string]any, error) {
+	changes, err := proxyservice.ReconcileAutoRoutes(h.Store)
+	if err != nil {
+		return nil, err
+	}
+	if err := syncProxyRoutes(ctx, h.Store.Snapshot()); err != nil {
+		return nil, err
+	}
+	results := h.reloginAutoRouteChanges(ctx, changes)
+	if len(changes) > 0 {
+		h.Pool.Reset()
+		config.Logger.Info("[proxy_router] admin route reconciliation completed", "accounts", len(changes), "available_nodes", len(proxyservice.AvailableRoutePool(h.Store.Snapshot())))
+	}
+	return results, nil
+}
+
+func (h *Handler) reloginAutoRouteChanges(ctx context.Context, changes []proxyservice.AutoRouteChange) map[string]map[string]any {
+	results := make(map[string]map[string]any, len(changes))
+	if len(changes) == 0 {
+		return results
+	}
+	type reloginResult struct {
+		accountID string
+		value     map[string]any
+	}
+	jobs := make(chan proxyservice.AutoRouteChange)
+	completed := make(chan reloginResult, len(changes))
+	workerCount := 4
+	if len(changes) < workerCount {
+		workerCount = len(changes)
+	}
+	var workers sync.WaitGroup
+	for index := 0; index < workerCount; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for change := range jobs {
+				if strings.TrimSpace(change.ToProxyID) == "" {
+					completed <- reloginResult{accountID: change.AccountID, value: map[string]any{"success": false, "reason": "no tested proxy node is currently available"}}
+					continue
+				}
+				completed <- reloginResult{accountID: change.AccountID, value: h.reloginAccountAfterRouteChange(ctx, change.AccountID)}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, change := range changes {
+			select {
+			case jobs <- change:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(completed)
+	}()
+	for result := range completed {
+		results[result.accountID] = result.value
+	}
+	return results
 }
 
 func syncProxyRoutes(ctx context.Context, cfg config.Config) error {

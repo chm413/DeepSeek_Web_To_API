@@ -31,6 +31,7 @@
     "download_version": ""
   },
   "proxy_policy": {
+    "auto_route_enabled": false,
     "health_check_enabled": true,
     "health_check_interval_minutes": 15,
     "auto_disable_after_failures": 3,
@@ -118,6 +119,12 @@
     "compress_keep_system": true,
     "pro_flash_compression_enabled": false,
     "pro_flash_compression_target_chars": 150000,
+    "session_chunking_enabled": false,
+    "session_chunking_target_ratio": 0.85,
+    "session_chunking_max_chunks": 16,
+    "session_chunking_commit_timeout_seconds": 30,
+    "summary_compaction_enabled": false,
+    "summary_compaction_threshold": 0.8,
     "incremental_max_turns": 0,
     "incremental_rotation_keep_recent": 6
   },

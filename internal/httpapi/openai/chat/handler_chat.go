@@ -162,7 +162,24 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// flash tier, and CIF inlines the whole transcript into one message, so the
 	// assembled prompt can still exceed the ceiling even after compression.
 	// Reject here rather than letting upstream return an opaque empty output.
-	if shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.ProFlashCompressionEnable {
+	var chunkedPrompt *shared.SessionChunkingPreparation
+	if shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.SessionChunkingEnable {
+		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, stdReq, promptLimit, "", 0)
+		if err != nil {
+			config.Logger.Error("[prompt_limit] same-session chunking failed",
+				"surface", "chat.completions", "model", stdReq.ResolvedModel,
+				"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "error", err)
+			if historySession != nil {
+				historySession.error(http.StatusBadGateway, err.Error(), "error", "session_chunking_failed", "")
+			}
+			writeOpenAIError(w, http.StatusBadGateway, "same-session prompt chunking failed: "+err.Error())
+			return
+		}
+		if chunkedPrompt != nil {
+			sessionID = chunkedPrompt.SessionID
+		}
+	}
+	if chunkedPrompt == nil && shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.ProFlashCompressionEnable {
 		compressed, ok, compressErr := shared.TryFlashCompressPrompt(r.Context(), h.DS, a, stdReq, promptLimit, h.Store.AutoDeleteMode())
 		if compressErr != nil {
 			config.Logger.Warn("[prompt_limit] Flash compression failed; returning original overflow",
@@ -174,15 +191,21 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"thinking", stdReq.Thinking, "prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt))
 		}
 	}
-	if errMsg := shared.EnforcePromptLimit(promptLimit, stdReq); errMsg != "" {
-		if historySession != nil {
-			historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+	if chunkedPrompt == nil {
+		if errMsg := shared.EnforcePromptLimit(promptLimit, stdReq); errMsg != "" {
+			if historySession != nil {
+				historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+			}
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
+			return
 		}
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
-		return
 	}
 
-	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
+	if chunkedPrompt == nil {
+		sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
+	} else {
+		err = nil
+	}
 	if err != nil {
 		sessionDetail := shared.SessionErrorDetail(err)
 		if sessionDetail.Stopped || sessionDetail.Status == http.StatusGatewayTimeout {
@@ -203,7 +226,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	var pow string
+	if chunkedPrompt != nil {
+		pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
+	} else {
+		pow, err = h.DS.GetPow(r.Context(), a, 3)
+	}
 	if err != nil {
 		powDetail := shared.PowErrorDetail(err)
 		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
@@ -220,7 +248,14 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := stdReq.CompletionPayload(sessionID)
-	resp, err := h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	var resp *http.Response
+	if chunkedPrompt != nil {
+		payload["prompt"] = chunkedPrompt.FinalWirePrompt
+		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+		resp, err = shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+	} else {
+		resp, err = h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	}
 	if nextSessionID := strings.TrimSpace(asString(payload["chat_session_id"])); nextSessionID != "" {
 		sessionID = nextSessionID
 	}
@@ -300,14 +335,32 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 	}) {
 		return true
 	}
-	if errMsg := shared.EnforcePromptLimit(promptLimit, *stdReq); errMsg != "" {
-		if historySession != nil {
-			historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+	var chunkedPrompt *shared.SessionChunkingPreparation
+	if shared.EnforcePromptLimit(promptLimit, *stdReq) != "" && promptLimit.SessionChunkingEnable {
+		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, *stdReq, promptLimit, lease.SessionID, lease.ParentMessageID)
+		if err != nil {
+			if historySession != nil {
+				historySession.error(http.StatusBadGateway, err.Error(), "error", "session_chunking_failed", "")
+			}
+			writeOpenAIError(w, http.StatusBadGateway, "same-session prompt chunking failed: "+err.Error())
+			return true
 		}
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
-		return true
 	}
-	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	if chunkedPrompt == nil {
+		if errMsg := shared.EnforcePromptLimit(promptLimit, *stdReq); errMsg != "" {
+			if historySession != nil {
+				historySession.error(http.StatusRequestEntityTooLarge, errMsg, "error", "prompt_too_large", "")
+			}
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, errMsg)
+			return true
+		}
+	}
+	var pow string
+	if chunkedPrompt != nil {
+		pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
+	} else {
+		pow, err = h.DS.GetPow(r.Context(), a, 3)
+	}
 	if err != nil {
 		powDetail := shared.PowErrorDetail(err)
 		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
@@ -325,6 +378,10 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 	}
 	payload := stdReq.CompletionPayload(lease.SessionID)
 	payload["parent_message_id"] = lease.ParentMessageID
+	if chunkedPrompt != nil {
+		payload["prompt"] = chunkedPrompt.FinalWirePrompt
+		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+	}
 	resp, err := shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
 	if err != nil {
 		config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",

@@ -21,7 +21,8 @@
   "dry_run": false,
   "defaults": {
     "enabled": true,
-    "proxy_id": "proxy-main"
+    "proxy_id": "proxy-main",
+    "proxy_auto_route": true
   },
   "accounts": [
     {
@@ -49,10 +50,12 @@
 | `dry_run` | boolean | 否 | 仅校验和计算结果，不写入配置 |
 | `defaults.enabled` | boolean | 否 | 条目未指定 enabled 时使用 |
 | `defaults.proxy_id` | string | 否 | 条目未指定 proxy_id 时使用 |
+| `defaults.proxy_auto_route` | boolean | 否 | 条目未指定 proxy_auto_route 时使用；update 模式也会应用 |
 | `email` / `mobile` | string | 至少一个 | 账号标识；email 去重不区分大小写，手机号按规范化值去重 |
 | `password` / `token` | string | 新账号至少一个 | 更新已有账号时可省略，省略即保留原凭据 |
 | `name` / `remark` | string | 否 | 管理端显示信息 |
 | `proxy_id` | string | 否 | 必须引用已存在的代理 ID |
+| `proxy_auto_route` | boolean | 否 | 由健康节点池粘性分配出口；启用时账号必须保存 password |
 | `enabled` | boolean | 否 | false 表示导入后保持手动停用 |
 
 `update` 模式不会用空 password 或空 token 覆盖已有凭据；未提供 name、remark 或 proxy_id 时也会保留原值。每个条目独立校验，有效条目仍可写入，无效条目通过 results 返回原因。

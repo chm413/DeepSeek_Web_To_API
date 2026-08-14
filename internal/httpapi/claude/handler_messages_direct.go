@@ -117,26 +117,6 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 	if incrementalAttemptNorm.Standard.IncrementalSessionRotated {
 		norm.Standard = incrementalAttemptNorm.Standard
 	}
-	if openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.ProFlashCompressionEnable {
-		compressed, ok, compressErr := openaishared.TryFlashCompressPrompt(r.Context(), h.DS, a, norm.Standard, promptLimit, autoDeleteMode)
-		if compressErr != nil {
-			config.Logger.Warn("[prompt_limit] Flash compression failed; returning original overflow",
-				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel, "error", compressErr)
-		} else if ok {
-			norm.Standard = compressed
-			config.Logger.Info("[prompt_limit] compressed Pro history with Flash",
-				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
-				"thinking", norm.Standard.Thinking, "prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt))
-		}
-	}
-	if errMsg := openaishared.EnforcePromptLimit(promptLimit, norm.Standard); errMsg != "" {
-		if historySession != nil {
-			historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
-		}
-		writeClaudeError(w, http.StatusRequestEntityTooLarge, errMsg)
-		return true
-	}
-
 	// v1.0.14: LLM-based binary safety check on the assembled standard
 	// prompt. Blocks return 403 with policy_blocked finish_reason; the
 	// caller's deferred AutoDeleteRemoteSession still fires cleanly.
@@ -148,7 +128,50 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 		return true
 	}
 
-	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
+	var chunkedPrompt *openaishared.SessionChunkingPreparation
+	if openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.SessionChunkingEnable {
+		chunkedPrompt, err = openaishared.TryPrepareSessionChunking(r.Context(), h.DS, a, norm.Standard, promptLimit, "", 0)
+		if err != nil {
+			config.Logger.Error("[prompt_limit] same-session chunking failed",
+				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
+				"prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt), "error", err)
+			if historySession != nil {
+				historySession.Error(http.StatusBadGateway, err.Error(), "session_chunking_failed", "", "")
+			}
+			writeClaudeError(w, http.StatusBadGateway, "same-session prompt chunking failed: "+err.Error())
+			return true
+		}
+		if chunkedPrompt != nil {
+			sessionID = chunkedPrompt.SessionID
+		}
+	}
+	if chunkedPrompt == nil && openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.ProFlashCompressionEnable {
+		compressed, ok, compressErr := openaishared.TryFlashCompressPrompt(r.Context(), h.DS, a, norm.Standard, promptLimit, autoDeleteMode)
+		if compressErr != nil {
+			config.Logger.Warn("[prompt_limit] Flash compression failed; returning original overflow",
+				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel, "error", compressErr)
+		} else if ok {
+			norm.Standard = compressed
+			config.Logger.Info("[prompt_limit] compressed Pro history with Flash",
+				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
+				"thinking", norm.Standard.Thinking, "prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt))
+		}
+	}
+	if chunkedPrompt == nil {
+		if errMsg := openaishared.EnforcePromptLimit(promptLimit, norm.Standard); errMsg != "" {
+			if historySession != nil {
+				historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
+			}
+			writeClaudeError(w, http.StatusRequestEntityTooLarge, errMsg)
+			return true
+		}
+	}
+
+	if chunkedPrompt == nil {
+		sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
+	} else {
+		err = nil
+	}
 	if err != nil {
 		sessionDetail := openaishared.SessionErrorDetail(err)
 		if sessionDetail.Stopped || sessionDetail.Status == http.StatusGatewayTimeout {
@@ -169,7 +192,12 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 		writeClaudeError(w, http.StatusUnauthorized, "Invalid token. If this should be a DeepSeek_Web_To_API key, add it to config.keys first.")
 		return true
 	}
-	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	var pow string
+	if chunkedPrompt != nil {
+		pow, err = openaishared.GetPinnedPow(r.Context(), h.DS, a)
+	} else {
+		pow, err = h.DS.GetPow(r.Context(), a, 3)
+	}
 	if err != nil {
 		powDetail := openaishared.PowErrorDetail(err)
 		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
@@ -186,7 +214,14 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 		return true
 	}
 	payload := norm.Standard.CompletionPayload(sessionID)
-	resp, err := h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	var resp *http.Response
+	if chunkedPrompt != nil {
+		payload["prompt"] = chunkedPrompt.FinalWirePrompt
+		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+		resp, err = openaishared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+	} else {
+		resp, err = h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	}
 	if err != nil {
 		config.Logger.Warn("[claude] completion request failed", "stream", norm.Standard.Stream, "error", err)
 		if !a.UseConfigToken && openaishared.CompletionErrorDetail(err).Status == http.StatusUnauthorized {
@@ -271,13 +306,6 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 		"full_prompt_units", promptcompat.PromptUnits(fullPrompt),
 		"format_prompt_units", promptcompat.PromptUnits(norm.Standard.IncrementalFormatPrompt),
 		"incremental_prompt_units", promptcompat.PromptUnits(incrementalPrompt))
-	if errMsg := openaishared.EnforcePromptLimit(promptLimit, norm.Standard); errMsg != "" {
-		if historySession != nil {
-			historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
-		}
-		writeClaudeError(w, http.StatusRequestEntityTooLarge, errMsg)
-		return true
-	}
 	if openaishared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, openaishared.PickAuditText(norm.Standard.LatestUserText, norm.Standard.FinalPrompt), w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
 		if historySession != nil {
 			historySession.Error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
@@ -285,13 +313,43 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 	}) {
 		return true
 	}
-	pow, err := h.DS.GetPow(r.Context(), a, 3)
+	var err error
+	var chunkedPrompt *openaishared.SessionChunkingPreparation
+	if openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.SessionChunkingEnable {
+		chunkedPrompt, err = openaishared.TryPrepareSessionChunking(r.Context(), h.DS, a, norm.Standard, promptLimit, lease.SessionID, lease.ParentMessageID)
+		if err != nil {
+			if historySession != nil {
+				historySession.Error(http.StatusBadGateway, err.Error(), "session_chunking_failed", "", "")
+			}
+			writeClaudeError(w, http.StatusBadGateway, "same-session prompt chunking failed: "+err.Error())
+			return true
+		}
+	}
+	if chunkedPrompt == nil {
+		if errMsg := openaishared.EnforcePromptLimit(promptLimit, norm.Standard); errMsg != "" {
+			if historySession != nil {
+				historySession.Error(http.StatusRequestEntityTooLarge, errMsg, "prompt_too_large", "", "")
+			}
+			writeClaudeError(w, http.StatusRequestEntityTooLarge, errMsg)
+			return true
+		}
+	}
+	var pow string
+	if chunkedPrompt != nil {
+		pow, err = openaishared.GetPinnedPow(r.Context(), h.DS, a)
+	} else {
+		pow, err = h.DS.GetPow(r.Context(), a, 3)
+	}
 	if err != nil {
 		writeClaudePowCallError(w, historySession, err)
 		return true
 	}
 	payload := norm.Standard.CompletionPayload(lease.SessionID)
 	payload["parent_message_id"] = lease.ParentMessageID
+	if chunkedPrompt != nil {
+		payload["prompt"] = chunkedPrompt.FinalWirePrompt
+		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+	}
 	resp, err := openaishared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
 	if err != nil {
 		config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",

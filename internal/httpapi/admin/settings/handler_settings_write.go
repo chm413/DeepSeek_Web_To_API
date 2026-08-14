@@ -160,6 +160,18 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			if promptLimitCfg.ProFlashCompressionTargetChars > 0 {
 				c.PromptLimit.ProFlashCompressionTargetChars = promptLimitCfg.ProFlashCompressionTargetChars
 			}
+			if promptLimitCfg.SessionChunkingEnabled != nil {
+				c.PromptLimit.SessionChunkingEnabled = promptLimitCfg.SessionChunkingEnabled
+			}
+			if promptLimitCfg.SessionChunkingTargetRatio > 0 {
+				c.PromptLimit.SessionChunkingTargetRatio = promptLimitCfg.SessionChunkingTargetRatio
+			}
+			if promptLimitCfg.SessionChunkingMaxChunks > 0 {
+				c.PromptLimit.SessionChunkingMaxChunks = promptLimitCfg.SessionChunkingMaxChunks
+			}
+			if promptLimitCfg.SessionChunkingCommitTimeoutSeconds > 0 {
+				c.PromptLimit.SessionChunkingCommitTimeoutSeconds = promptLimitCfg.SessionChunkingCommitTimeoutSeconds
+			}
 			if promptLimitCfg.IncrementalMaxTurns != nil {
 				c.PromptLimit.IncrementalMaxTurns = promptLimitCfg.IncrementalMaxTurns
 			}

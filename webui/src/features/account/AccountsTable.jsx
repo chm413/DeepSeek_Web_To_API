@@ -16,6 +16,8 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 
+const accountGridColumns = 'grid-cols-[minmax(200px,1.15fr)_minmax(215px,1fr)_70px_110px_minmax(220px,1.25fr)_170px]'
+
 function formatCompactTokens(value) {
     const count = Number(value) || 0
     if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`
@@ -36,6 +38,78 @@ function formatAccountCost(value, currency = 'USD') {
     } catch {
         return `$${amount.toFixed(fractionDigits)}`
     }
+}
+
+function proxyOptionLabel(proxy, t) {
+    const name = proxy.name || `${proxy.host}:${proxy.port}`
+    const state = proxy.route_available
+        ? t('accountManager.proxyAvailable')
+        : proxy.last_test_at_unix
+            ? t('accountManager.proxyUnavailable')
+            : t('accountManager.proxyUntested')
+    const latency = Number(proxy.last_latency_ms) > 0 ? `${proxy.last_latency_ms}ms` : '-'
+    const region = [proxy.last_country, proxy.last_colo].filter(Boolean).join('/') || '-'
+    const assigned = Number(proxy.assigned_account_count) || 0
+    return `${name} | ${state} | ${latency} | ${region} | ${t('accountManager.proxyAssigned', { count: assigned })}`
+}
+
+function AccountProxySelector({ acc, identifier, proxies, autoRouteEnabled, updating, onUpdate, t }) {
+    const assignedProxy = proxies.find(proxy => proxy.id === acc.proxy_id)
+    const selection = acc.proxy_auto_route ? '__auto__' : (acc.proxy_id || '')
+    const routeState = acc.proxy_auto_route
+        ? assignedProxy?.route_available
+            ? t('accountManager.proxyAutoActive')
+            : t('accountManager.proxyAutoWaiting')
+        : assignedProxy?.route_available
+            ? t('accountManager.proxyAvailable')
+            : assignedProxy
+                ? t('accountManager.proxyUnavailable')
+                : t('accountManager.proxyDirect')
+
+    return (
+        <div className="min-w-0">
+            <select
+                value={selection}
+                title={assignedProxy ? proxyOptionLabel(assignedProxy, t) : routeState}
+                onChange={event => {
+                    const value = event.target.value
+                    onUpdate(identifier, value === '__auto__' ? '' : value, value === '__auto__')
+                }}
+                disabled={updating}
+                className="input-field h-8 min-h-8 py-1 text-xs"
+            >
+                <option value="">{t('accountManager.proxyNone')}</option>
+                <option value="__auto__" disabled={!autoRouteEnabled || !acc.has_password}>
+                    {t('accountManager.proxyAuto')}
+                </option>
+                {proxies.map(proxy => (
+                    <option key={proxy.id} value={proxy.id}>
+                        {proxyOptionLabel(proxy, t)}
+                    </option>
+                ))}
+            </select>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px]">
+                <span className={clsx(
+                    'rounded border px-1.5 py-0.5 font-bold',
+                    assignedProxy?.route_available
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        : acc.proxy_auto_route || assignedProxy
+                            ? 'border-amber-200 bg-amber-50 text-amber-700'
+                            : 'border-slate-200 bg-slate-50 text-slate-600',
+                )}>
+                    {routeState}
+                </span>
+                {assignedProxy && Number(assignedProxy.last_latency_ms) > 0 && <span>{assignedProxy.last_latency_ms}ms</span>}
+                {assignedProxy && (assignedProxy.last_country || assignedProxy.last_colo) && (
+                    <span>{[assignedProxy.last_country, assignedProxy.last_colo].filter(Boolean).join(' / ')}</span>
+                )}
+                {assignedProxy?.last_exit_ip && (
+                    <span className="max-w-[150px] truncate font-mono" title={assignedProxy.last_exit_ip}>{assignedProxy.last_exit_ip}</span>
+                )}
+                {assignedProxy && <span>{t('accountManager.proxyAssigned', { count: Number(assignedProxy.assigned_account_count) || 0 })}</span>}
+            </div>
+        </div>
+    )
 }
 
 function AccountUsageDetail({ acc, identifier, t }) {
@@ -203,6 +277,7 @@ export default function AccountsTable({
     totalPages,
     resolveAccountIdentifier,
     proxies,
+    autoRouteEnabled,
     onTestAll,
     onShowAddAccount,
     onShowBatchUpload,
@@ -330,8 +405,8 @@ export default function AccountsTable({
             )}
 
             <div className="overflow-x-auto">
-                <div className="min-w-[1090px]">
-                    <div className="grid grid-cols-[minmax(215px,1.3fr)_minmax(230px,1.1fr)_75px_120px_minmax(150px,0.8fr)_210px] gap-3 border-b border-border bg-slate-50 px-4 py-2 text-[11px] font-black uppercase text-muted-foreground">
+                <div className="min-w-[1080px]">
+                    <div className={clsx('grid gap-3 border-b border-border bg-slate-50 px-4 py-2 text-[11px] font-black uppercase text-muted-foreground', accountGridColumns)}>
                         <div>{t('accountManager.accountColumn')}</div>
                         <div>{t('accountManager.statusColumn')}</div>
                         <div>{t('accountManager.sessionsColumn')}</div>
@@ -343,7 +418,7 @@ export default function AccountsTable({
                     {loadingAccounts ? (
                         <div className="px-4 py-5 space-y-3">
                             {[0, 1, 2, 3].map(i => (
-                                <div key={i} className="grid grid-cols-[minmax(215px,1.3fr)_minmax(230px,1.1fr)_75px_120px_minmax(150px,0.8fr)_210px] gap-3 items-center">
+                                <div key={i} className={clsx('grid gap-3 items-center', accountGridColumns)}>
                                     <div className="space-y-2">
                                         <div className="h-3 w-44 rounded-full skeleton-line" />
                                         <div className="h-2.5 w-64 rounded-full skeleton-line" />
@@ -359,7 +434,6 @@ export default function AccountsTable({
                     ) : accounts.length > 0 ? (
                         accounts.map((acc, i) => {
                             const id = resolveAccountIdentifier(acc)
-                            const assignedProxy = proxies.find(proxy => proxy.id === acc.proxy_id)
                             const runtimeUnknown = envBacked && !acc.test_status
                             const isActive = acc.test_status === 'ok' || acc.has_token
                             const accountUnavailable = acc.enabled === false || acc.account_state === 'permanently_banned' || acc.account_state === 'invalid_credentials'
@@ -368,7 +442,7 @@ export default function AccountsTable({
                                 <div
                                     key={id || i}
                                     data-testid={`account-row-${id}`}
-                                    className="page-transition table-row-hover grid grid-cols-[minmax(215px,1.3fr)_minmax(230px,1.1fr)_75px_120px_minmax(150px,0.8fr)_210px] gap-3 items-center border-b border-border/70 px-4 py-3 last:border-b-0"
+                                    className={clsx('page-transition table-row-hover grid gap-3 items-center border-b border-border/70 px-4 py-3 last:border-b-0', accountGridColumns)}
                                     style={{ animationDelay: `${Math.min(i, 10) * 18}ms` }}
                                 >
                                     <div className="min-w-0">
@@ -429,26 +503,15 @@ export default function AccountsTable({
 
                                     <AccountUsageDetail acc={acc} identifier={id} t={t} />
 
-                                    <div>
-                                        <select
-                                            value={acc.proxy_id || ''}
-                                            onChange={e => onUpdateAccountProxy(id, e.target.value)}
-                                            disabled={updatingProxy?.[id]}
-                                            className="input-field h-8 min-h-8 py-1 text-xs"
-                                        >
-                                            <option value="">{t('accountManager.proxyNone')}</option>
-                                            {proxies.map(proxy => (
-                                                <option key={proxy.id} value={proxy.id}>
-                                                    {proxy.name || `${proxy.host}:${proxy.port}`}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        {acc.proxy_id && (
-                                            <div className="mt-1 truncate text-[10px] font-mono text-amber-700">
-                                                {assignedProxy ? (assignedProxy.name || `${assignedProxy.host}:${assignedProxy.port}`) : acc.proxy_id}
-                                            </div>
-                                        )}
-                                    </div>
+                                    <AccountProxySelector
+                                        acc={acc}
+                                        identifier={id}
+                                        proxies={proxies}
+                                        autoRouteEnabled={autoRouteEnabled}
+                                        updating={updatingProxy?.[id]}
+                                        onUpdate={onUpdateAccountProxy}
+                                        t={t}
+                                    />
 
                                     <div className="flex items-center justify-end gap-1.5">
                                         <button
@@ -485,12 +548,13 @@ export default function AccountsTable({
                                         <button
                                             onClick={() => onTestAccount(id)}
                                             disabled={testing[id]}
-                                            className="btn btn-secondary btn-sm whitespace-nowrap"
+                                            className="btn btn-secondary btn-sm px-2"
+                                            title={testing[id] ? t('actions.testing') : t('actions.test')}
+                                            aria-label={testing[id] ? t('actions.testing') : t('actions.test')}
                                         >
                                             {testing[id]
                                                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                                 : <RefreshCw className="w-3.5 h-3.5" />}
-                                            {testing[id] ? t('actions.testing') : t('actions.test')}
                                         </button>
                                         <button
                                             onClick={() => onDeleteAccount(id)}

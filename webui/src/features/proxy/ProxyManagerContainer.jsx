@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CheckSquare2, Cpu, Download, Pencil, Play, Plus, Power, PowerOff, RefreshCw, Save, Shield, Square, Trash2, X } from 'lucide-react'
+import { CheckSquare2, Cpu, Download, MapPin, Pencil, Play, Plus, Power, PowerOff, RefreshCw, Save, Shield, Square, Trash2, Users, X } from 'lucide-react'
 import clsx from 'clsx'
 
 import { useI18n } from '../../i18n'
@@ -48,6 +48,7 @@ const CORE_PROXY_TYPES = new Set(['vless', 'vmess', 'hysteria2'])
 
 const DEFAULT_POLICY = {
     health_check_enabled: true,
+    auto_route_enabled: false,
     health_check_interval_minutes: 15,
     auto_disable_after_failures: 3,
     auto_enable_on_recovery: true,
@@ -179,6 +180,11 @@ function ProxiesTable({
                                             </span>
                                         )}
                                         <ProxyStatusBadge t={t} proxy={proxy} result={result} testing={testing[proxy.id]} />
+                                        {proxy.route_available && (
+                                            <span className="inline-flex items-center rounded-full border border-emerald-300/60 bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">
+                                                {t('proxyManager.routePoolAvailable')}
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                         <span className="font-mono bg-muted/30 px-2 py-1 rounded border border-border">
@@ -196,6 +202,20 @@ function ProxiesTable({
                                             <span className="max-w-full truncate text-destructive" title={proxy.last_test_error}>{proxy.last_test_error}</span>
                                         )}
                                         {proxy.last_http_status > 0 && <span>HTTP {proxy.last_http_status}</span>}
+                                        {(proxy.last_country || proxy.last_colo) && (
+                                            <span className="inline-flex items-center gap-1">
+                                                <MapPin className="h-3 w-3" />
+                                                {[proxy.last_country, proxy.last_colo].filter(Boolean).join(' / ')}
+                                            </span>
+                                        )}
+                                        {proxy.last_exit_ip && <span className="font-mono">{proxy.last_exit_ip}</span>}
+                                        <span className="inline-flex items-center gap-1">
+                                            <Users className="h-3 w-3" />
+                                            {t('proxyManager.assignedAccounts', { count: Number(proxy.assigned_account_count) || 0 })}
+                                        </span>
+                                        {Number(proxy.auto_routed_account_count) > 0 && (
+                                            <span>{t('proxyManager.autoRoutedAccounts', { count: Number(proxy.auto_routed_account_count) || 0 })}</span>
+                                        )}
                                         {proxy.consecutive_failures > 0 && <span>{t('proxyManager.failureCount', { count: proxy.consecutive_failures })}</span>}
                                         {proxy.subscription_id && <span>{t('proxyManager.subscriptionNode')}</span>}
                                     </div>

@@ -29,6 +29,9 @@ type ProxyTestResult struct {
 	FailureCount   int    `json:"failure_count"`
 	Disabled       bool   `json:"disabled"`
 	DisabledReason string `json:"disabled_reason,omitempty"`
+	ExitIP         string `json:"exit_ip,omitempty"`
+	Country        string `json:"country,omitempty"`
+	Colo           string `json:"colo,omitempty"`
 }
 
 func TestProxies(ctx context.Context, store Store, proxyIDs []string, concurrency int, tester ConnectivityTester) ([]ProxyTestResult, error) {
@@ -161,6 +164,15 @@ func applyTestResults(store Store, results []ProxyTestResult) error {
 					result.AutoDisabled = true
 				}
 			}
+			if result.ExitIP != "" {
+				proxy.LastExitIP = result.ExitIP
+			}
+			if result.Country != "" {
+				proxy.LastCountry = result.Country
+			}
+			if result.Colo != "" {
+				proxy.LastColo = result.Colo
+			}
 			result.FailureCount = proxy.ConsecutiveFailures
 			result.Disabled = proxy.Disabled
 			result.DisabledReason = proxy.DisabledReason
@@ -178,6 +190,9 @@ func proxyTestResult(proxy config.Proxy, payload map[string]any) ProxyTestResult
 		Message:      strings.TrimSpace(fmt.Sprintf("%v", payload["message"])),
 		ResponseTime: valueInt(payload["response_time"]),
 		StatusCode:   valueInt(payload["status_code"]),
+		ExitIP:       valueString(payload["exit_ip"]),
+		Country:      strings.ToUpper(valueString(payload["country"])),
+		Colo:         strings.ToUpper(valueString(payload["colo"])),
 	}
 }
 
@@ -219,4 +234,11 @@ func valueInt(value any) int {
 	default:
 		return 0
 	}
+}
+
+func valueString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", value))
 }

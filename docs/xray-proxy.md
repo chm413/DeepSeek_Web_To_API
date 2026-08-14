@@ -66,6 +66,7 @@ Docker 容器以非 root 用户运行，`/app/data` 可写；Compose 将其映�
 ```json
 {
   "proxy_policy": {
+    "auto_route_enabled": false,
     "health_check_enabled": true,
     "health_check_interval_minutes": 15,
     "auto_disable_after_failures": 3,
@@ -82,6 +83,17 @@ Docker 容器以非 root 用户运行，`/app/data` 可写；Compose 将其映�
 - 健康检测禁用的节点恢复后可自动重新启用；手动禁用的节点不会被检测结果自动启用。
 - 账号分配节点不可用时优先使用启用状态的 `fallback_proxy_id`；无可用兜底时使用直连。
 - 每个订阅可以覆盖全局更新间隔，也可以分别关闭自动更新和更新后测试。
+
+## 粘性自动路由
+
+`proxy_policy.auto_route_enabled` 默认关闭。启用全局开关后，还需要为账号设置 `proxy_auto_route: true`；自动路由账号必须保存密码，因为出口节点变化后旧 Token 会被清除并通过新节点重新登录。
+
+- 路由池只包含未禁用、至少测试过一次且最新测试成功的节点。单次测试失败会立即移出池，后续测试成功会重新加入，无需等待连续失败自动禁用阈值。
+- 分配优先选择“已启用账号分配数”最少的节点，再按延迟和节点 ID 排序。手动与自动分配都计数；运行时临时封禁/限流不改变持久启用状态，因此仍计数。
+- 分配具有粘性：只处理尚未分配的账号，或当前节点已经离开健康池的账号。普通负载变化不会搬迁健康账号，以保持出口 IP 稳定。
+- 节点切换后服务端先清除旧 Token、同步共享 Xray 路由，再通过新出口重新登录并持久化新 Token。
+- 自动路由账号没有可用节点时保持未分配并阻断上游请求，不会回退到直连。手动路由账号继续遵循 `fallback_proxy_id` 策略。
+- 节点测试还会通过同一出口读取 Cloudflare trace，记录出口 IP、国家/地区代码和 colo；元数据探测失败不会把 DeepSeek 连通性判为失败。
 
 ## 管理 API
 

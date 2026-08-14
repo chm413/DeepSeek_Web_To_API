@@ -412,7 +412,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         }
     }
 
-    const updateAccountProxy = async (identifier, proxyID) => {
+    const updateAccountProxy = async (identifier, proxyID, autoRoute = false) => {
         const accountID = String(identifier || '').trim()
         if (!accountID) {
             onMessage('error', t('accountManager.invalidIdentifier'))
@@ -423,14 +423,18 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
             const res = await apiFetch(`/admin/accounts/${encodeURIComponent(accountID)}/proxy`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ proxy_id: proxyID || '' }),
+                body: JSON.stringify({ proxy_id: proxyID || '', auto_route: Boolean(autoRoute) }),
             })
             const data = await res.json()
             if (!res.ok) {
                 onMessage('error', data.detail || t('messages.requestFailed'))
                 return
             }
-            onMessage('success', t('accountManager.proxyUpdateSuccess'))
+            if (data.relogin?.success === false) {
+                onMessage('error', t('accountManager.proxyReloginFailed', { reason: data.relogin.reason || t('messages.requestFailed') }))
+            } else {
+                onMessage('success', autoRoute ? t('accountManager.proxyAutoEnabled') : t('accountManager.proxyUpdateSuccess'))
+            }
             fetchAccounts()
             onRefresh()
         } catch (_err) {

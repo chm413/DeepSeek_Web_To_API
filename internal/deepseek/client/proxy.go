@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -29,6 +30,7 @@ type requestClients struct {
 type hostLookupFunc func(ctx context.Context, network, host string) ([]string, error)
 
 var proxyConnectivityTestURL = "https://chat.deepseek.com/"
+var proxyGeoTraceURL = "https://www.cloudflare.com/cdn-cgi/trace"
 
 var defaultHostLookup hostLookupFunc = func(ctx context.Context, _ string, host string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, host)
@@ -151,6 +153,12 @@ func (c *Client) resolveProxyForAccount(acc config.Account) (config.Proxy, confi
 	if !found {
 		return config.Proxy{}, snap.ProxyCore, false
 	}
+	if acc.ProxyAutoRoute {
+		if selected.Disabled || selected.LastTestAtUnix <= 0 || !selected.LastTestSuccess {
+			return config.Proxy{}, snap.ProxyCore, false
+		}
+		return selected, snap.ProxyCore, true
+	}
 	if !selected.Disabled {
 		return selected, snap.ProxyCore, true
 	}
@@ -184,6 +192,9 @@ func (c *Client) requestClientsForAuth(ctx context.Context, a *auth.RequestAuth)
 func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
 	proxyCfg, coreCfg, ok := c.resolveProxyForAccount(acc)
 	if !ok {
+		if acc.ProxyAutoRoute {
+			return c.unavailableAutomaticRouteClients(acc)
+		}
 		return c.defaultRequestClients()
 	}
 
@@ -221,6 +232,22 @@ func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
 	c.proxyClients[key] = bundle
 	c.proxyClientsMu.Unlock()
 	return bundle
+}
+
+func (c *Client) unavailableAutomaticRouteClients(acc config.Account) requestClients {
+	dialContext := func(context.Context, string, string) (net.Conn, error) {
+		return nil, fmt.Errorf("automatic proxy route for account %s is waiting for an available node", acc.Identifier())
+	}
+	totalTimeout := config.HTTPTotalTimeout()
+	if c != nil && c.Store != nil {
+		totalTimeout = c.Store.HTTPTotalTimeout()
+	}
+	return requestClients{
+		regular:   trans.NewWithDialContext(totalTimeout, dialContext),
+		stream:    trans.NewWithDialContext(0, dialContext),
+		fallback:  trans.NewFallbackClient(totalTimeout, dialContext),
+		fallbackS: trans.NewFallbackClient(0, dialContext),
+	}
 }
 
 func applyProxyConnectivityHeaders(req *http.Request) {
@@ -286,13 +313,60 @@ func TestProxyConnectivityWithCore(ctx context.Context, proxyCfg config.Proxy, c
 		result["message"] = err.Error()
 		return result
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			config.Logger.Warn("[proxy] close response body failed", "proxy_id", proxyCfg.ID, "error", closeErr)
-		}
-	}()
-
 	result["status_code"] = resp.StatusCode
 	result["success"], result["message"] = proxyConnectivityStatus(resp.StatusCode)
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		config.Logger.Warn("[proxy] close response body failed", "proxy_id", proxyCfg.ID, "error", closeErr)
+	}
+	if geo := proxyExitMetadata(ctx, client); len(geo) > 0 {
+		for key, value := range geo {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func proxyExitMetadata(ctx context.Context, client *http.Client) map[string]any {
+	if client == nil {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyGeoTraceURL, nil)
+	if err != nil {
+		return nil
+	}
+	applyProxyConnectivityHeaders(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			config.Logger.Warn("[proxy] close geo trace response failed", "error", closeErr)
+		}
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if err != nil {
+		return nil
+	}
+	trace := make(map[string]string)
+	for _, line := range strings.Split(string(body), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			trace[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	result := make(map[string]any)
+	if value := net.ParseIP(trace["ip"]); value != nil {
+		result["exit_ip"] = value.String()
+	}
+	if value := strings.ToUpper(trace["loc"]); len(value) == 2 {
+		result["country"] = value
+	}
+	if value := strings.ToUpper(trace["colo"]); value != "" && len(value) <= 12 {
+		result["colo"] = value
+	}
 	return result
 }

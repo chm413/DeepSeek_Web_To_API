@@ -92,6 +92,9 @@ func (h *Handler) addProxySubscription(w http.ResponseWriter, r *http.Request) {
 			response["refresh"] = result
 		}
 	}
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
+		response["route_error"] = err.Error()
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -148,6 +151,9 @@ func (h *Handler) updateProxySubscription(w http.ResponseWriter, r *http.Request
 			response["refresh"] = result
 		}
 	}
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
+		response["route_error"] = err.Error()
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -198,7 +204,7 @@ func (h *Handler) deleteProxySubscription(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := syncProxyRoutes(r.Context(), h.Store.Snapshot()); err != nil {
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -209,6 +215,10 @@ func (h *Handler) deleteProxySubscription(w http.ResponseWriter, r *http.Request
 func (h *Handler) refreshProxySubscription(w http.ResponseWriter, r *http.Request) {
 	result, err := proxyservice.RefreshSubscription(r.Context(), h.Store, subscriptionIDParam(r))
 	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -233,6 +243,10 @@ func (h *Handler) refreshAllProxySubscriptions(w http.ResponseWriter, r *http.Re
 			item["result"] = result
 		}
 		results = append(results, item)
+	}
+	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error(), "results": results})
+		return
 	}
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "results": results})

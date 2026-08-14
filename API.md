@@ -108,12 +108,15 @@ curl "http://127.0.0.1:5001/v1beta/models/gemini-2.5-pro:generateContent?key=you
 | `GET` / `POST` | `/admin/accounts` | 查询或新增账号 |
 | `POST` | `/admin/accounts/batch` | 批量校验、创建或更新账号；凭据不回显 |
 | `PUT` / `DELETE` | `/admin/accounts/{identifier}` | 更新或删除账号 |
+| `PUT` | `/admin/accounts/{identifier}/proxy` | 设置手动节点或粘性自动路由，并在出口变化后重新登录 |
 | `POST` | `/admin/accounts/test` | 测试单账号 |
 | `POST` | `/admin/accounts/test-all` | 批量测试账号 |
 | `GET` | `/admin/queue/status` | 账号池与队列状态 |
 | `GET` / `POST` | `/admin/proxies` | 查询或新增代理 |
 | `PUT` / `DELETE` | `/admin/proxies/{proxyID}` | 更新或删除代理 |
 | `POST` | `/admin/proxies/test` | 测试 SOCKS 或 Xray 代理连通性 |
+| `POST` | `/admin/proxies/test-batch` | 批量测试节点并更新自动路由健康池 |
+| `GET` / `PUT` | `/admin/proxies/policy` | 查询或更新健康检测、自动路由与兜底策略 |
 | `GET` / `PUT` | `/admin/proxies/core` | 查询 Xray core 状态或更新核心路径、运行目录和启动超时 |
 | `GET` | `/admin/chat-history` | 分页查看历史记录 |
 | `GET` | `/admin/chat-history/{id}` | 查看历史详情 |
@@ -122,6 +125,8 @@ curl "http://127.0.0.1:5001/v1beta/models/gemini-2.5-pro:generateContent?key=you
 | `PUT` | `/admin/chat-history/settings` | 修改历史保留策略 |
 | `GET` | `/admin/metrics/overview` | 总览指标 |
 | `GET` | `/admin/version` | 版本信息 |
+
+账号路由接口请求体为 `{"proxy_id":"node-id","auto_route":false}`；自动路由使用 `{"auto_route":true}`，要求全局 `proxy_policy.auto_route_enabled=true` 且账号保存了密码。响应包含实际 `proxy_id`、`auto_route`、`route_changed` 和 `relogin`。`GET /admin/proxies` 的节点条目包含 `route_available`、`last_latency_ms`、`last_exit_ip`、`last_country`、`last_colo`、`assigned_account_count`、`auto_routed_account_count`，顶层 `route_pool` 是按当前分配优先级排序的健康节点列表。
 
 ## 缓存规则
 

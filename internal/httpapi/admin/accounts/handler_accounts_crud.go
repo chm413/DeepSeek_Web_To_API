@@ -88,19 +88,20 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		sessionCount, hasSessionCount := h.Store.AccountSessionCount(acc.Identifier())
 		token := strings.TrimSpace(acc.Token)
 		item := map[string]any{
-			"identifier":      acc.Identifier(),
-			"name":            acc.Name,
-			"remark":          acc.Remark,
-			"email":           acc.Email,
-			"mobile":          acc.Mobile,
-			"proxy_id":        acc.ProxyID,
-			"has_password":    acc.Password != "",
-			"has_token":       token != "",
-			"token_preview":   maskSecretPreview(token),
-			"test_status":     testStatus,
-			"enabled":         !acc.Disabled,
-			"disabled":        acc.Disabled,
-			"disabled_reason": acc.DisabledReason,
+			"identifier":       acc.Identifier(),
+			"name":             acc.Name,
+			"remark":           acc.Remark,
+			"email":            acc.Email,
+			"mobile":           acc.Mobile,
+			"proxy_id":         acc.ProxyID,
+			"proxy_auto_route": acc.ProxyAutoRoute,
+			"has_password":     acc.Password != "",
+			"has_token":        token != "",
+			"token_preview":    maskSecretPreview(token),
+			"test_status":      testStatus,
+			"enabled":          !acc.Disabled,
+			"disabled":         acc.Disabled,
+			"disabled_reason":  acc.DisabledReason,
 		}
 		usage := accountUsage[strings.ToLower(strings.TrimSpace(acc.Identifier()))]
 		item["token_usage_24h"] = map[string]any{
