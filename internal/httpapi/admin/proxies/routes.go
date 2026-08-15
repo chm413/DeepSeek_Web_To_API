@@ -25,6 +25,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Post("/proxies/test", h.testProxy)
 	r.Post("/proxies/test-batch", h.testProxiesBatch)
 	r.Post("/proxies/actions", h.proxyBatchAction)
+	r.Post("/accounts/batch/actions", h.batchAccountActions)
 	r.Put("/accounts/{identifier}/proxy", h.updateAccountProxy)
 }
 

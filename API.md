@@ -107,6 +107,7 @@ curl "http://127.0.0.1:5001/v1beta/models/gemini-2.5-pro:generateContent?key=you
 | `GET` | `/admin/config/export` | 导出配置 |
 | `GET` / `POST` | `/admin/accounts` | 查询或新增账号 |
 | `POST` | `/admin/accounts/batch` | 批量校验、创建或更新账号；凭据不回显 |
+| `POST` | `/admin/accounts/batch/actions` | 对已选账号批量设置出口、自动路由或启停；出口变化后自动重新登录 |
 | `PUT` / `DELETE` | `/admin/accounts/{identifier}` | 更新或删除账号 |
 | `PUT` | `/admin/accounts/{identifier}/proxy` | 设置手动节点或粘性自动路由，并在出口变化后重新登录 |
 | `POST` | `/admin/accounts/test` | 测试单账号 |

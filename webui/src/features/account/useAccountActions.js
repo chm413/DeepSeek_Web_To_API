@@ -16,7 +16,7 @@ function accountTestFailureMessage(accountID, data, t) {
     return t('accountManager.testFailureDetail', { account: accountID, phase, reason })
 }
 
-export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, totalAccounts, fetchAccounts, resolveAccountIdentifier }) {
+export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, totalAccounts, refreshAccounts, resolveAccountIdentifier }) {
     const [showAddKey, setShowAddKey] = useState(false)
     const [editingKey, setEditingKey] = useState(null)
     const [showAddAccount, setShowAddAccount] = useState(false)
@@ -36,6 +36,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
     const [updatingProxy, setUpdatingProxy] = useState({})
     const [updatingEnabled, setUpdatingEnabled] = useState({})
     const [batchUploading, setBatchUploading] = useState(false)
+    const [batchActionLoading, setBatchActionLoading] = useState(false)
 
     const readJSONResponse = async (res) => {
         const text = await res.text()
@@ -195,7 +196,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
             if (res.ok) {
                 onMessage('success', t('accountManager.addAccountSuccess'))
                 closeAddAccount()
-                fetchAccounts(1)
+                await refreshAccounts()
                 onRefresh()
             } else {
                 const data = await res.json()
@@ -224,7 +225,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
             if (res.ok) {
                 onMessage('success', t('accountManager.updateAccountSuccess'))
                 closeEditAccount()
-                fetchAccounts()
+                await refreshAccounts()
                 onRefresh()
             } else {
                 const data = await res.json()
@@ -241,20 +242,23 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         const identifier = String(id || '').trim()
         if (!identifier) {
             onMessage('error', t('accountManager.invalidIdentifier'))
-            return
+            return false
         }
-        if (!confirm(t('accountManager.deleteAccountConfirm'))) return
+        if (!confirm(t('accountManager.deleteAccountConfirm'))) return false
         try {
             const res = await apiFetch(`/admin/accounts/${encodeURIComponent(identifier)}`, { method: 'DELETE' })
             if (res.ok) {
                 onMessage('success', t('messages.deleted'))
-                fetchAccounts()
+                await refreshAccounts()
                 onRefresh()
+                return true
             } else {
                 onMessage('error', t('messages.deleteFailed'))
+                return false
             }
         } catch (e) {
             onMessage('error', t('messages.networkError'))
+            return false
         }
     }
 
@@ -283,7 +287,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 ? t('apiTester.testSuccess', { account: accountID, time: data.response_time })
                 : accountTestFailureMessage(accountID, data, t)
             onMessage(succeeded ? 'success' : 'error', statusMessage)
-            fetchAccounts()
+            await refreshAccounts()
             onRefresh()
         } catch (e) {
             onMessage('error', t('accountManager.testFailed', { error: e.message }))
@@ -319,7 +323,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 const now = Date.now()
                 if (completed !== total && now - lastTableRefreshAt < 1500) return
                 lastTableRefreshAt = now
-                fetchAccounts()
+                refreshAccounts()
             }
 
             const recordResult = (result) => {
@@ -371,7 +375,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
 
             await Promise.all(workers)
 
-            await fetchAccounts()
+            await refreshAccounts()
             await onRefresh()
             onMessage('success', t('accountManager.testAllCompleted', { success: successCount, total }))
         } catch (e) {
@@ -401,7 +405,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
             if (data.success) {
                 onMessage('success', t('accountManager.deleteAllSessionsSuccess'))
                 setSessionCounts(prev => ({ ...prev, [accountID]: 0 }))
-                fetchAccounts()
+                await refreshAccounts()
             } else {
                 onMessage('error', data.message || t('messages.requestFailed'))
             }
@@ -435,7 +439,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
             } else {
                 onMessage('success', autoRoute ? t('accountManager.proxyAutoEnabled') : t('accountManager.proxyUpdateSuccess'))
             }
-            fetchAccounts()
+            await refreshAccounts()
             onRefresh()
         } catch (_err) {
             onMessage('error', t('messages.networkError'))
@@ -460,7 +464,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 throw new Error(data.detail || t('messages.requestFailed'))
             }
             if (!payload.dry_run) {
-                await fetchAccounts(1)
+                await refreshAccounts()
                 await onRefresh()
                 onMessage(data.invalid > 0 ? 'error' : 'success', t('accountManager.batchUploadResult', {
                     created: data.created || 0,
@@ -494,12 +498,57 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 return
             }
             onMessage('success', enabled ? t('accountManager.accountEnabled') : t('accountManager.accountDisabled'))
-            fetchAccounts()
+            await refreshAccounts()
             onRefresh()
         } catch (_err) {
             onMessage('error', t('messages.networkError'))
         } finally {
             setUpdatingEnabled(prev => ({ ...prev, [accountID]: false }))
+        }
+    }
+
+    const applyBatchAccountAction = async (identifiers, action, { proxyID = '', autoRoute = false } = {}) => {
+        const accountIDs = [...new Set((identifiers || []).map(value => String(value || '').trim()).filter(Boolean))]
+        if (accountIDs.length === 0) {
+            onMessage('error', t('accountManager.batchSelectionRequired'))
+            return null
+        }
+        setBatchActionLoading(true)
+        try {
+            const payload = { identifiers: accountIDs, action }
+            if (action === 'set_proxy') {
+                payload.proxy_id = proxyID || ''
+                payload.auto_route = Boolean(autoRoute)
+            }
+            const res = await apiFetch('/admin/accounts/batch/actions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+            const data = await readJSONResponse(res)
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return null
+            }
+            await refreshAccounts()
+            await onRefresh()
+            const affected = Number(data.affected) || accountIDs.length
+            const reloginFailed = Number(data?.relogin?.failed) || 0
+            if (reloginFailed > 0) {
+                onMessage('error', t('accountManager.batchActionReloginFailed', { affected, failed: reloginFailed }))
+            } else if (action === 'set_proxy') {
+                onMessage('success', t('accountManager.batchProxyUpdated', { count: affected }))
+            } else if (action === 'enable') {
+                onMessage('success', t('accountManager.batchAccountsEnabled', { count: affected }))
+            } else {
+                onMessage('success', t('accountManager.batchAccountsDisabled', { count: affected }))
+            }
+            return data
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+            return null
+        } finally {
+            setBatchActionLoading(false)
         }
     }
 
@@ -516,6 +565,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         openBatchUpload,
         closeBatchUpload,
         batchUploading,
+        batchActionLoading,
         uploadBatchAccounts,
         showEditAccount,
         editingAccount,
@@ -547,5 +597,6 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         deleteAllSessions,
         updateAccountProxy,
         updateAccountEnabled,
+        applyBatchAccountAction,
     }
 }

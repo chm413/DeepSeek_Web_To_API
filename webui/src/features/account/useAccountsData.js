@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export function useAccountsData({ apiFetch }) {
     const [queueStatus, setQueueStatus] = useState(null)
@@ -12,6 +12,9 @@ export function useAccountsData({ apiFetch }) {
     const [totalAccounts, setTotalAccounts] = useState(0)
     const [loadingAccounts, setLoadingAccounts] = useState(false)
     const accountsRequestSequence = useRef(0)
+    const pageRef = useRef(1)
+    const pageSizeRef = useRef(10)
+    const searchQueryRef = useRef('')
 
     const resolveAccountIdentifier = (acc) => {
         if (!acc || typeof acc !== 'object') return ''
@@ -20,24 +23,34 @@ export function useAccountsData({ apiFetch }) {
 
     const [searchQuery, setSearchQuery] = useState('')
 
-    const fetchAccounts = async (
-        targetPage = page,
-        targetPageSize = pageSize,
-        targetQuery = searchQuery,
+    const fetchAccounts = useCallback(async (
+        targetPage = pageRef.current,
+        targetPageSize = pageSizeRef.current,
+        targetQuery = searchQueryRef.current,
         { background = false } = {},
     ) => {
+        const requestedPage = Math.max(1, Number(targetPage) || 1)
+        const requestedPageSize = Math.max(1, Number(targetPageSize) || 10)
+        const requestedQuery = String(targetQuery || '')
         const requestSequence = ++accountsRequestSequence.current
         if (!background) setLoadingAccounts(true)
         try {
-            let url = `/admin/accounts?page=${targetPage}&page_size=${targetPageSize}`
-            if (targetQuery.trim()) url += `&q=${encodeURIComponent(targetQuery.trim())}`
+            let url = `/admin/accounts?page=${requestedPage}&page_size=${requestedPageSize}`
+            if (requestedQuery.trim()) url += `&q=${encodeURIComponent(requestedQuery.trim())}`
             const res = await apiFetch(url)
             if (res.ok && requestSequence === accountsRequestSequence.current) {
                 const data = await res.json()
+                const nextTotalPages = Math.max(1, Number(data.total_pages) || 1)
+                const responsePage = Math.max(1, Number(data.page) || requestedPage)
+                const nextPage = Math.min(responsePage, nextTotalPages)
+                const nextPageSize = Math.max(1, Number(data.page_size) || requestedPageSize)
                 setAccounts(data.items || [])
-                setTotalPages(data.total_pages || 1)
+                setTotalPages(nextTotalPages)
                 setTotalAccounts(data.total || 0)
-                setPage(data.page || 1)
+                pageRef.current = nextPage
+                pageSizeRef.current = nextPageSize
+                setPage(nextPage)
+                setPageSize(nextPageSize)
             }
         } catch (e) {
             console.error('Failed to fetch accounts:', e)
@@ -46,21 +59,41 @@ export function useAccountsData({ apiFetch }) {
                 setLoadingAccounts(false)
             }
         }
-    }
+    }, [apiFetch])
 
-    const changePage = (newPage) => {
-        setPage(Math.max(1, newPage))
-    }
+    const refreshAccounts = useCallback((options = {}) => (
+        fetchAccounts(pageRef.current, pageSizeRef.current, searchQueryRef.current, {
+            background: true,
+            ...options,
+        })
+    ), [fetchAccounts])
 
-    const changePageSize = (newSize) => {
+    const changePage = useCallback((newPage) => {
+        const nextPage = Math.max(1, Math.min(Number(newPage) || 1, totalPages))
+        if (nextPage === pageRef.current) return
+        // A page change must invalidate a late response for the previous page.
+        accountsRequestSequence.current += 1
+        pageRef.current = nextPage
+        setPage(nextPage)
+    }, [totalPages])
+
+    const changePageSize = useCallback((newSize) => {
+        const nextSize = Math.max(1, Number(newSize) || 10)
+        accountsRequestSequence.current += 1
+        pageRef.current = 1
+        pageSizeRef.current = nextSize
         setPage(1)
-        setPageSize(newSize)
-    }
+        setPageSize(nextSize)
+    }, [])
 
-    const handleSearchChange = (query) => {
+    const handleSearchChange = useCallback((query) => {
+        const nextQuery = String(query || '')
+        accountsRequestSequence.current += 1
+        pageRef.current = 1
+        searchQueryRef.current = nextQuery
         setPage(1)
-        setSearchQuery(query)
-    }
+        setSearchQuery(nextQuery)
+    }, [])
 
     const fetchQueueStatus = async () => {
         try {
@@ -109,6 +142,7 @@ export function useAccountsData({ apiFetch }) {
         totalAccounts,
         loadingAccounts,
         fetchAccounts,
+        refreshAccounts,
         changePage,
         changePageSize,
         resolveAccountIdentifier,

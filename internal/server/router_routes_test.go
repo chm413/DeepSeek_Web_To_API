@@ -101,6 +101,7 @@ func TestAPIRoutesRemainRegistered(t *testing.T) {
 		"GET /admin/accounts",
 		"POST /admin/accounts",
 		"POST /admin/accounts/batch",
+		"POST /admin/accounts/batch/actions",
 		"PUT /admin/accounts/{identifier}",
 		"DELETE /admin/accounts/{identifier}",
 		"PUT /admin/accounts/{identifier}/proxy",

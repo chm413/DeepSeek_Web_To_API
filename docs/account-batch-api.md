@@ -93,6 +93,27 @@ curl http://127.0.0.1:5001/admin/accounts/batch \
 
 建议先把同一文件以 `dry_run: true` 调用一次，再执行实际导入。
 
+## 选中账号批量操作
+
+`POST /admin/accounts/batch/actions` 用于对已有账号执行同一种批量动作。它与上传接口分离，避免上传的重复处理策略影响已选择的账号。请求同样需要 Admin 鉴权和 `Content-Type: application/json`，每次最多 5000 个去重后的账号标识。
+
+```json
+{
+  "identifiers": ["user-1@example.com", "+8613800000000"],
+  "action": "set_proxy",
+  "proxy_id": "proxy-main",
+  "auto_route": false
+}
+```
+
+`action` 支持：
+
+- `set_proxy`：必须显式提供 `proxy_id`。空字符串表示直连；`auto_route: true` 启用粘性自动路由，空 `proxy_id` 会保留现有健康出口直到节点失效。
+- `enable`：批量解除手动停用。
+- `disable`：批量手动停用并从请求池移除。
+
+`set_proxy` 会先验证所有账号、节点引用和账号密码；任一项校验失败时不会写入部分账号。通过校验后服务会清除发生出口变化账号的旧 Token、同步共享 Xray 路由，并以受限并发重新登录；登录失败会保留已变更的出口和空 Token，并通过响应明确报告。自动路由仍要求全局 `proxy_policy.auto_route_enabled=true` 和账号已保存 password。响应包含 `affected`、`route_changed` 以及 `relogin.attempted/succeeded/failed`，不回显密码或 Token。
+
 ## 实时账号状态
 
 `GET /admin/accounts` 的每个条目新增以下运行态字段：

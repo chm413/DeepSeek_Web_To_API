@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
     Check,
     ChevronLeft,
@@ -10,13 +10,15 @@ import {
     Plus,
     Power,
     RefreshCw,
+    Route,
     Search,
     Trash2,
     Upload,
+    X,
 } from 'lucide-react'
 import clsx from 'clsx'
 
-const accountGridColumns = 'grid-cols-[minmax(200px,1.15fr)_minmax(215px,1fr)_70px_110px_minmax(220px,1.25fr)_170px]'
+const accountGridColumns = 'grid-cols-[36px_minmax(190px,1.15fr)_minmax(215px,1fr)_70px_110px_minmax(220px,1.25fr)_170px]'
 
 function formatCompactTokens(value) {
     const count = Number(value) || 0
@@ -51,6 +53,18 @@ function proxyOptionLabel(proxy, t) {
     const region = [proxy.last_country, proxy.last_colo].filter(Boolean).join('/') || '-'
     const assigned = Number(proxy.assigned_account_count) || 0
     return `${name} | ${state} | ${latency} | ${region} | ${t('accountManager.proxyAssigned', { count: assigned })}`
+}
+
+function batchProxyOptionLabel(proxy, t) {
+    const name = proxy.name || `${proxy.host}:${proxy.port}`
+    const state = proxy.route_available
+        ? t('accountManager.proxyAvailable')
+        : proxy.last_test_at_unix
+            ? t('accountManager.proxyUnavailable')
+            : t('accountManager.proxyUntested')
+    const latency = Number(proxy.last_latency_ms) > 0 ? `${proxy.last_latency_ms}ms` : '-'
+    const region = [proxy.last_country, proxy.last_colo].filter(Boolean).join('/') || '-'
+    return `${name} | ${state} | ${latency} | ${region}`
 }
 
 function AccountProxySelector({ acc, identifier, proxies, autoRouteEnabled, updating, onUpdate, t }) {
@@ -107,6 +121,88 @@ function AccountProxySelector({ acc, identifier, proxies, autoRouteEnabled, upda
                     <span className="max-w-[150px] truncate font-mono" title={assignedProxy.last_exit_ip}>{assignedProxy.last_exit_ip}</span>
                 )}
                 {assignedProxy && <span>{t('accountManager.proxyAssigned', { count: Number(assignedProxy.assigned_account_count) || 0 })}</span>}
+            </div>
+        </div>
+    )
+}
+
+function BatchAccountActions({ accountIDs, proxies, autoRouteEnabled, loading, onAction, onClear, t }) {
+    const [routeTarget, setRouteTarget] = useState('__select__')
+    const selectedCount = accountIDs.length
+    const submitRoute = async () => {
+        if (routeTarget === '__select__') return
+        const autoRoute = routeTarget === '__auto__'
+        const proxyID = autoRoute || routeTarget === '__direct__' ? '' : routeTarget
+        const result = await onAction(accountIDs, 'set_proxy', { proxyID, autoRoute })
+        if (result) setRouteTarget('__select__')
+    }
+
+    return (
+        <div className="border-b border-blue-200 bg-blue-50/70 px-4 py-3" data-testid="account-batch-actions">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                <div className="flex min-w-0 items-center gap-2">
+                    <span className="rounded-md border border-blue-200 bg-white px-2 py-1 text-xs font-black tabular-nums text-blue-800">
+                        {t('accountManager.batchSelectionCount', { count: selectedCount })}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onClear}
+                        disabled={loading}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    >
+                        <X className="h-3.5 w-3.5" />
+                        {t('accountManager.clearSelection')}
+                    </button>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:justify-end">
+                    <select
+                        value={routeTarget}
+                        onChange={event => setRouteTarget(event.target.value)}
+                        disabled={loading}
+                        className="input-field h-9 min-h-9 min-w-[280px] py-1 text-xs"
+                        aria-label={t('accountManager.batchProxyTarget')}
+                        data-testid="account-batch-proxy-target"
+                    >
+                        <option value="__select__" disabled>{t('accountManager.batchProxyTarget')}</option>
+                        <option value="__direct__">{t('accountManager.proxyNone')}</option>
+                        <option value="__auto__" disabled={!autoRouteEnabled}>{t('accountManager.proxyAuto')}</option>
+                        {proxies.map(proxy => (
+                            <option key={proxy.id} value={proxy.id}>{batchProxyOptionLabel(proxy, t)}</option>
+                        ))}
+                    </select>
+                    <button
+                        type="button"
+                        onClick={submitRoute}
+                        disabled={loading || routeTarget === '__select__'}
+                        className="btn btn-primary whitespace-nowrap"
+                        data-testid="account-batch-apply-proxy"
+                    >
+                        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Route className="h-4 w-4" />}
+                        {t('accountManager.applyProxyToSelected')}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onAction(accountIDs, 'enable')}
+                        disabled={loading}
+                        className="btn btn-secondary whitespace-nowrap"
+                    >
+                        <Power className="h-4 w-4" />
+                        {t('accountManager.enableSelected')}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (confirm(t('accountManager.batchDisableConfirm', { count: selectedCount }))) {
+                                onAction(accountIDs, 'disable')
+                            }
+                        }}
+                        disabled={loading}
+                        className="btn btn-secondary whitespace-nowrap text-red-700 hover:border-red-300 hover:bg-red-50"
+                    >
+                        <Power className="h-4 w-4" />
+                        {t('accountManager.disableSelected')}
+                    </button>
+                </div>
             </div>
         </div>
     )
@@ -271,6 +367,7 @@ export default function AccountsTable({
     deletingSessions,
     updatingProxy,
     updatingEnabled,
+    batchActionLoading,
     totalAccounts,
     page,
     pageSize,
@@ -287,14 +384,18 @@ export default function AccountsTable({
     onDeleteAllSessions,
     onUpdateAccountProxy,
     onUpdateAccountEnabled,
+    onBatchAccountAction,
     onPrevPage,
     onNextPage,
+    onGoToPage,
     onPageSizeChange,
     searchQuery,
     onSearchChange,
     envBacked = false,
 }) {
     const [copiedId, setCopiedId] = useState(null)
+    const [selectedAccountIDs, setSelectedAccountIDs] = useState(() => new Set())
+    const [pageInput, setPageInput] = useState(String(page))
     const showBatchProgress = batchProgress.total > 0 && (testingAll || batchProgress.results.length > 0)
     const batchSuccessCount = batchProgress.results.filter(result => result.success).length
 
@@ -302,6 +403,42 @@ export default function AccountsTable({
     const batchProgressPercent = batchProgress.total > 0
         ? (batchProgress.current / batchProgress.total) * 100
         : 0
+    const visibleAccountIDs = useMemo(() => accounts
+        .map(resolveAccountIdentifier)
+        .filter(Boolean), [accounts, resolveAccountIdentifier])
+    const allVisibleSelected = visibleAccountIDs.length > 0 && visibleAccountIDs.every(identifier => selectedAccountIDs.has(identifier))
+    const pageStart = totalAccounts === 0 ? 0 : ((page - 1) * pageSize) + 1
+    const pageEnd = Math.min(page * pageSize, totalAccounts)
+
+    useEffect(() => {
+        setPageInput(String(page))
+    }, [page])
+
+    const toggleAccountSelection = (identifier, selected) => {
+        setSelectedAccountIDs(previous => {
+            const next = new Set(previous)
+            if (selected) next.add(identifier)
+            else next.delete(identifier)
+            return next
+        })
+    }
+
+    const toggleVisibleSelection = (selected) => {
+        setSelectedAccountIDs(previous => {
+            const next = new Set(previous)
+            visibleAccountIDs.forEach(identifier => {
+                if (selected) next.add(identifier)
+                else next.delete(identifier)
+            })
+            return next
+        })
+    }
+
+    const commitPageInput = () => {
+        const nextPage = Math.max(1, Math.min(Number(pageInput) || page, totalPages))
+        setPageInput(String(nextPage))
+        onGoToPage(nextPage)
+    }
 
     const copyId = (id) => {
         navigator.clipboard.writeText(id).then(() => {
@@ -361,6 +498,18 @@ export default function AccountsTable({
                 </div>
             </div>
 
+            {selectedAccountIDs.size > 0 && (
+                <BatchAccountActions
+                    accountIDs={[...selectedAccountIDs]}
+                    proxies={proxies}
+                    autoRouteEnabled={autoRouteEnabled}
+                    loading={batchActionLoading}
+                    onAction={onBatchAccountAction}
+                    onClear={() => setSelectedAccountIDs(new Set())}
+                    t={t}
+                />
+            )}
+
             {showBatchProgress && (
                 <div className="border-b border-border bg-blue-50/70 px-4 py-3 page-transition">
                     <div className="flex items-center justify-between text-sm mb-2">
@@ -405,8 +554,20 @@ export default function AccountsTable({
             )}
 
             <div className="overflow-x-auto">
-                <div className="min-w-[1080px]">
+                <div className="min-w-[1120px]">
                     <div className={clsx('grid gap-3 border-b border-border bg-slate-50 px-4 py-2 text-[11px] font-black uppercase text-muted-foreground', accountGridColumns)}>
+                        <div className="flex items-center justify-center">
+                            <input
+                                type="checkbox"
+                                checked={allVisibleSelected}
+                                onChange={event => toggleVisibleSelection(event.target.checked)}
+                                disabled={visibleAccountIDs.length === 0 || batchActionLoading}
+                                className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-primary"
+                                aria-label={t('accountManager.selectPage')}
+                                title={t('accountManager.selectPage')}
+                                data-testid="account-select-page"
+                            />
+                        </div>
                         <div>{t('accountManager.accountColumn')}</div>
                         <div>{t('accountManager.statusColumn')}</div>
                         <div>{t('accountManager.sessionsColumn')}</div>
@@ -419,6 +580,7 @@ export default function AccountsTable({
                         <div className="px-4 py-5 space-y-3">
                             {[0, 1, 2, 3].map(i => (
                                 <div key={i} className={clsx('grid gap-3 items-center', accountGridColumns)}>
+                                    <div className="mx-auto h-4 w-4 rounded skeleton-line" />
                                     <div className="space-y-2">
                                         <div className="h-3 w-44 rounded-full skeleton-line" />
                                         <div className="h-2.5 w-64 rounded-full skeleton-line" />
@@ -445,6 +607,17 @@ export default function AccountsTable({
                                     className={clsx('page-transition table-row-hover grid gap-3 items-center border-b border-border/70 px-4 py-3 last:border-b-0', accountGridColumns)}
                                     style={{ animationDelay: `${Math.min(i, 10) * 18}ms` }}
                                 >
+                                    <div className="flex items-center justify-center">
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedAccountIDs.has(id)}
+                                            onChange={event => toggleAccountSelection(id, event.target.checked)}
+                                            disabled={!id || batchActionLoading}
+                                            className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-primary"
+                                            aria-label={t('accountManager.selectAccount', { account: id || '-' })}
+                                            data-testid={`account-select-${id}`}
+                                        />
+                                    </div>
                                     <div className="min-w-0">
                                         <div className="flex items-center gap-2">
                                             <span className={clsx(
@@ -557,7 +730,12 @@ export default function AccountsTable({
                                                 : <RefreshCw className="w-3.5 h-3.5" />}
                                         </button>
                                         <button
-                                            onClick={() => onDeleteAccount(id)}
+                                            onClick={async () => {
+                                                if (await onDeleteAccount(id)) {
+                                                    toggleAccountSelection(id, false)
+                                                }
+                                            }}
+                                            disabled={!id}
                                             className="btn btn-danger btn-sm px-2"
                                             title={t('actions.delete')}
                                         >
@@ -580,11 +758,14 @@ export default function AccountsTable({
                 </div>
             </div>
 
-            {totalPages > 1 && (
+            {totalAccounts > 0 && (
                 <div className="border-t border-border px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-muted/25">
                     <div className="flex items-center gap-3">
-                        <div className="text-sm font-semibold text-muted-foreground">
+                        <div className="text-sm font-semibold text-muted-foreground whitespace-nowrap">
                             {t('accountManager.pageInfo', { current: page, total: totalPages, count: totalAccounts })}
+                        </div>
+                        <div className="text-xs text-muted-foreground whitespace-nowrap">
+                            {t('accountManager.pageRange', { start: pageStart, end: pageEnd })}
                         </div>
                         <select
                             value={pageSize}
@@ -601,14 +782,36 @@ export default function AccountsTable({
                             onClick={onPrevPage}
                             disabled={page <= 1 || loadingAccounts}
                             className="btn btn-secondary btn-sm px-2"
+                            data-testid="account-prev-page"
                         >
                             <ChevronLeft className="w-4 h-4" />
                         </button>
-                        <span className="text-sm font-black px-2 tabular-nums">{page} / {totalPages}</span>
+                        <label className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+                            <span>{t('accountManager.goToPage')}</span>
+                            <input
+                                type="number"
+                                min="1"
+                                max={totalPages}
+                                value={pageInput}
+                                onChange={event => setPageInput(event.target.value)}
+                                onBlur={commitPageInput}
+                                onKeyDown={event => {
+                                    if (event.key === 'Enter') {
+                                        event.currentTarget.blur()
+                                    }
+                                }}
+                                disabled={loadingAccounts}
+                                className="input-field h-8 min-h-8 w-16 py-1 text-center text-xs tabular-nums"
+                                aria-label={t('accountManager.goToPage')}
+                                data-testid="account-page-input"
+                            />
+                        </label>
+                        <span className="text-sm font-black px-1 tabular-nums">/ {totalPages}</span>
                         <button
                             onClick={onNextPage}
                             disabled={page >= totalPages || loadingAccounts}
                             className="btn btn-secondary btn-sm px-2"
+                            data-testid="account-next-page"
                         >
                             <ChevronRight className="w-4 h-4" />
                         </button>

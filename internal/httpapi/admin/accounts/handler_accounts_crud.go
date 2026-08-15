@@ -53,10 +53,10 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	if total > 0 {
 		totalPages = (total + pageSize - 1) / pageSize
 	}
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
+	if page > totalPages {
+		page = totalPages
 	}
+	start := (page - 1) * pageSize
 	end := start + pageSize
 	if end > total {
 		end = total

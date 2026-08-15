@@ -57,6 +57,33 @@ func TestListAccountsPageSizeAbove5000ClampedTo5000(t *testing.T) {
 	}
 }
 
+func TestListAccountsClampsDeletedLastPageToLastAvailablePage(t *testing.T) {
+	router := newHTTPAdminHarness(t, `{
+		"accounts":[
+			{"email":"one@example.com","password":"pwd"},
+			{"email":"two@example.com","password":"pwd"},
+			{"email":"three@example.com","password":"pwd"}
+		]
+	}`, &testingDSMock{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodGet, "/accounts?page=9&page_size=2", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if page, _ := payload["page"].(float64); page != 2 {
+		t.Fatalf("expected final valid page 2, got %#v", payload["page"])
+	}
+	items, _ := payload["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one item on final page, got %#v", items)
+	}
+}
+
 func TestUpdateAccountMetadataPreservesCredentials(t *testing.T) {
 	h := newAdminTestHandler(t, `{
 		"accounts":[{"email":"u@example.com","name":"old name","remark":"old remark","password":"secret"}]

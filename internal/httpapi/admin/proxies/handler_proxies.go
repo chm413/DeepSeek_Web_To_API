@@ -351,6 +351,14 @@ func (h *Handler) reconcileAndSyncProxyRoutes(ctx context.Context) (map[string]m
 }
 
 func (h *Handler) reloginAutoRouteChanges(ctx context.Context, changes []proxyservice.AutoRouteChange) map[string]map[string]any {
+	return h.reloginRouteChanges(ctx, changes, true)
+}
+
+func (h *Handler) reloginManualRouteChanges(ctx context.Context, changes []proxyservice.AutoRouteChange) map[string]map[string]any {
+	return h.reloginRouteChanges(ctx, changes, false)
+}
+
+func (h *Handler) reloginRouteChanges(ctx context.Context, changes []proxyservice.AutoRouteChange, requireProxy bool) map[string]map[string]any {
 	results := make(map[string]map[string]any, len(changes))
 	if len(changes) == 0 {
 		return results
@@ -371,7 +379,7 @@ func (h *Handler) reloginAutoRouteChanges(ctx context.Context, changes []proxyse
 		go func() {
 			defer workers.Done()
 			for change := range jobs {
-				if strings.TrimSpace(change.ToProxyID) == "" {
+				if requireProxy && strings.TrimSpace(change.ToProxyID) == "" {
 					completed <- reloginResult{accountID: change.AccountID, value: map[string]any{"success": false, "reason": "no tested proxy node is currently available"}}
 					continue
 				}

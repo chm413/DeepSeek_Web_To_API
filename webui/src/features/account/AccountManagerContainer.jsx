@@ -24,7 +24,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         totalPages,
         totalAccounts,
         loadingAccounts,
-        fetchAccounts,
+        refreshAccounts,
         changePage,
         changePageSize,
         resolveAccountIdentifier,
@@ -66,6 +66,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         deletingSessions,
         updatingProxy,
         updatingEnabled,
+        batchActionLoading,
         addKey,
         deleteKey,
         addAccount,
@@ -76,6 +77,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         deleteAllSessions,
         updateAccountProxy,
         updateAccountEnabled,
+        applyBatchAccountAction,
     } = useAccountActions({
         apiFetch,
         t,
@@ -83,7 +85,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         onRefresh,
         config,
         totalAccounts,
-        fetchAccounts,
+        refreshAccounts,
         resolveAccountIdentifier,
     })
 
@@ -135,6 +137,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 deletingSessions={deletingSessions}
                 updatingProxy={updatingProxy}
                 updatingEnabled={updatingEnabled}
+                batchActionLoading={batchActionLoading}
                 totalAccounts={totalAccounts}
                 page={page}
                 pageSize={pageSize}
@@ -151,8 +154,10 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 onDeleteAllSessions={deleteAllSessions}
                 onUpdateAccountProxy={updateAccountProxy}
                 onUpdateAccountEnabled={updateAccountEnabled}
+                onBatchAccountAction={applyBatchAccountAction}
                 onPrevPage={() => changePage(page - 1)}
                 onNextPage={() => changePage(page + 1)}
+                onGoToPage={changePage}
                 onPageSizeChange={changePageSize}
                 searchQuery={searchQuery}
                 onSearchChange={handleSearchChange}
