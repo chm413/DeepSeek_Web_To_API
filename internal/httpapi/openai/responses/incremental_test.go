@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -101,6 +102,23 @@ func (responsesRotationConfigStub) PromptLimitSnapshot() config.PromptLimitSetti
 	cfg := config.DefaultPromptLimitSettings()
 	cfg.IncrementalMaxTurns = 2
 	cfg.IncrementalRotationKeepRecent = 1
+	return cfg
+}
+
+type responsesIncrementalCurrentInputConfigStub struct{ responsesHistoryConfigStub }
+
+func (responsesIncrementalCurrentInputConfigStub) CurrentInputFileEnabled() bool { return true }
+func (responsesIncrementalCurrentInputConfigStub) CurrentInputFileMinChars() int { return 0 }
+func (responsesIncrementalCurrentInputConfigStub) RemoteFileUploadEnabled() bool { return false }
+
+type responsesIncrementalCurrentInputRotationConfigStub struct {
+	responsesIncrementalCurrentInputConfigStub
+}
+
+func (responsesIncrementalCurrentInputRotationConfigStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.IncrementalMaxTurns = 25
+	cfg.IncrementalRotationKeepRecent = 25
 	return cfg
 }
 
@@ -260,6 +278,79 @@ func TestResponsesIncrementalReusesSessionAndSendsOnlyDelta(t *testing.T) {
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("unexpected replay of %q: %q", forbidden, prompt)
 		}
+	}
+}
+
+func TestResponsesPreviousResponseReusesIncrementalSessionWithCurrentInputFile(t *testing.T) {
+	ds := &responsesIncrementalDSStub{}
+	h := &Handler{
+		Store:       responsesIncrementalCurrentInputConfigStub{},
+		Auth:        responsesIncrementalAuthStub{},
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+
+	first := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": "first request",
+	})
+	responseID, _ := first["id"].(string)
+	if responseID == "" {
+		t.Fatalf("first response had no id: %#v", first)
+	}
+	serveResponsesIncremental(t, h, map[string]any{
+		"model":                "deepseek-v4-flash",
+		"previous_response_id": responseID,
+		"input":                "second request",
+	})
+
+	if ds.createCalls != 1 || len(ds.normal) != 1 || len(ds.pinned) != 1 {
+		t.Fatalf("current-input response chain must reuse the original session: create=%d normal=%d pinned=%d", ds.createCalls, len(ds.normal), len(ds.pinned))
+	}
+	prompt, _ := ds.pinned[0]["prompt"].(string)
+	for _, expected := range []string{"Incremental response format requirements", "second request"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("incremental prompt missing %q: %q", expected, prompt)
+		}
+	}
+	for _, replayed := range []string{"first request", "first response"} {
+		if strings.Contains(prompt, replayed) {
+			t.Fatalf("incremental prompt replayed %q: %q", replayed, prompt)
+		}
+	}
+}
+
+func TestResponsesPreviousResponseRotatesAfter25TurnsWithCurrentInputFile(t *testing.T) {
+	ds := &responsesIncrementalDSStub{}
+	h := &Handler{
+		Store:       responsesIncrementalCurrentInputRotationConfigStub{},
+		Auth:        responsesIncrementalAuthStub{},
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+
+	previousResponseID := ""
+	for turn := 1; turn <= 26; turn++ {
+		body := map[string]any{
+			"model": "deepseek-v4-flash",
+			"input": fmt.Sprintf("turn %d", turn),
+		}
+		if previousResponseID != "" {
+			body["previous_response_id"] = previousResponseID
+		}
+		response := serveResponsesIncremental(t, h, body)
+		previousResponseID, _ = response["id"].(string)
+		if previousResponseID == "" {
+			t.Fatalf("turn %d response had no id: %#v", turn, response)
+		}
+	}
+
+	if ds.createCalls != 2 || len(ds.normal) != 2 || len(ds.pinned) != 24 {
+		t.Fatalf("expected 25-turn pinned session followed by rotation: create=%d normal=%d pinned=%d", ds.createCalls, len(ds.normal), len(ds.pinned))
+	}
+	rollover := ds.normal[1]
+	if rollover["parent_message_id"] != nil {
+		t.Fatalf("rotation must create a root completion: %#v", rollover)
 	}
 }
 

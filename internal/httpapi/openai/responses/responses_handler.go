@@ -322,6 +322,10 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 				"dropped_messages", dropped, "prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "dynamic_upstream_limit", dynamicLimitApplied, "compact_threshold", compactThresholdApplied)
 		}
 	}
+	// Keep the client-visible canonical conversation separate from the CIF
+	// transport rewrite below. previous_response_id must restore this shape so
+	// it can strictly extend the incremental branch recorded for the turn.
+	incrementalBaseReq = stdReq
 	if errMsg := shared.EnforcePromptLimitBeforeCIF(promptLimit, stdReq, h.Store.RemoteFileUploadEnabled()); errMsg != "" {
 		config.Logger.Info("[prompt_limit] rejected before CIF",
 			"surface", "responses", "model", stdReq.ResolvedModel,
@@ -437,7 +441,10 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	h.getResponseStore().putInput(owner, responseID, stdReq.Messages)
+	// stdReq may now be a current-input-file transport envelope. Persist the
+	// canonical pre-CIF input instead; otherwise a follow-up previous_response_id
+	// reconstructs a different first message and cannot reuse the pinned session.
+	h.getResponseStore().putInput(owner, responseID, incrementalBaseReq.Messages)
 	h.getResponseStore().putSessionKey(owner, responseID, a.SessionKey)
 	refFileTokens := stdReq.RefFileTokens
 	var outcome responsesCompletionOutcome

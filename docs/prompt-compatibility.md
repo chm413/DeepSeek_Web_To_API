@@ -151,6 +151,12 @@ the retained DeepSeek session is the state being reused. A successful full
 turn records the canonical request messages, the exact visible assistant/tool
 response messages, the DeepSeek `chat_session_id`, and the response message ID.
 
+For Responses `previous_response_id` chains, that request snapshot is always
+the canonical pre-CIF message list. CIF may rewrite the transport payload into
+a single file/transcript envelope for the upstream call, but that envelope is
+never persisted as client conversation state; restoring it on the next turn
+would make strict incremental matching fail and repeatedly nest transcript text.
+
 On a later request, the cache accepts only an exact extension of that recorded
 prefix. The request must contain the same prior user/assistant/tool messages in
 the same order and then at least one new message. Edited history, a changed

@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-08-16 (1.1.5)
+
+Fixed the Responses incremental chain when Current Input File (CIF) is enabled.
+`previous_response_id` now restores the canonical pre-CIF conversation instead
+of the single-message transport envelope, so strict pinned-session reuse
+continues to work and no longer repeatedly nests the transcript. Added
+regression coverage for CIF chaining and the configured 25-turn rollover.
+
 ## 2026-08-15 (1.1.4)
 
 新增账号列表的跨页批量操作：可一次为选中账号设置指定出口、直连或自动路由，也可批量启用和停用。服务端会在写入前校验全部账号、节点和重新登录所需密码，避免部分账号已切换出口而其余账号失败；出口变化会清空旧 Token，并在对应出口完成重新登录。批量接口为 `POST /admin/accounts/batch/actions`，详见 `docs/account-batch-api.md`。
