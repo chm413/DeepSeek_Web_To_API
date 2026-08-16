@@ -53,6 +53,10 @@ func (*incrementalDSStub) GetPow(_ context.Context, _ *auth.RequestAuth, _ int) 
 	return "pow", nil
 }
 
+func (*incrementalDSStub) GetPowPinned(_ context.Context, _ *auth.RequestAuth) (string, error) {
+	return "pow", nil
+}
+
 func (*incrementalDSStub) UploadFile(_ context.Context, _ *auth.RequestAuth, _ dsclient.UploadFileRequest, _ int) (*dsclient.UploadFileResult, error) {
 	return &dsclient.UploadFileResult{ID: "file-1", Status: "uploaded"}, nil
 }

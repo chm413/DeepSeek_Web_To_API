@@ -110,12 +110,27 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 		historySession = historycapture.Start(h.ChatHistory, r, a, norm.Standard)
 	}
 	openaishared.LogIncrementalRequestContext("anthropic.messages", a, incrementalBaseNorm.Standard, len(raw))
+	incrementalAccountID := a.AccountID
+	incrementalToken := a.DeepSeekToken
 	incrementalAttemptNorm := incrementalBaseNorm
 	if h.tryIncrementalClaude(w, r, a, &incrementalAttemptNorm, exposeThinking, promptLimit, historySession, &sessionID) {
 		return true
 	}
 	if incrementalAttemptNorm.Standard.IncrementalSessionRotated {
 		norm.Standard = incrementalAttemptNorm.Standard
+	}
+	if a.AccountID != incrementalAccountID || a.DeepSeekToken != incrementalToken {
+		promptLimit, dynamicLimitApplied, err = openaishared.ResolveDynamicPromptLimits(r.Context(), h.DS, a, promptLimit)
+		if err != nil {
+			config.Logger.Warn("[prompt_limit] dynamic upstream limit lookup failed after incremental account switch; using prior settings", "surface", "anthropic.messages", "error", err)
+		}
+		if dropped, ok := openaishared.CompressPromptBeforeCIF(promptLimit, &norm.Standard); ok {
+			limit, expert := openaishared.PromptLimitForModel(promptLimit, norm.Standard.ResolvedModel)
+			config.Logger.Info("[prompt_limit] recompressed history after incremental account switch",
+				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
+				"expert", expert, "limit_units", limit, "dropped_messages", dropped,
+				"prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt), "dynamic_upstream_limit", dynamicLimitApplied)
+		}
 	}
 	// v1.0.14: LLM-based binary safety check on the assembled standard
 	// prompt. Blocks return 403 with policy_blocked finish_reason; the
@@ -130,11 +145,15 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 
 	var chunkedPrompt *openaishared.SessionChunkingPreparation
 	if openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.SessionChunkingEnable {
-		chunkedPrompt, err = openaishared.TryPrepareSessionChunking(r.Context(), h.DS, a, norm.Standard, promptLimit, "", 0)
+		chunkedPrompt, err = openaishared.TryPrepareRootSessionChunkingWithFailover(r.Context(), h.DS, h.Auth, a, norm.Standard, promptLimit)
 		if err != nil {
 			config.Logger.Error("[prompt_limit] same-session chunking failed",
 				"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
 				"prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt), "error", err)
+			if openaishared.IsSessionCapacityRateLimit(err) {
+				writeClaudeCompletionCallError(w, historySession, err, "", "")
+				return true
+			}
 			if historySession != nil {
 				historySession.Error(http.StatusBadGateway, err.Error(), "session_chunking_failed", "", "")
 			}
@@ -143,6 +162,7 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 		}
 		if chunkedPrompt != nil {
 			sessionID = chunkedPrompt.SessionID
+			promptLimit = chunkedPrompt.PromptLimit
 		}
 	}
 	if chunkedPrompt == nil && openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.ProFlashCompressionEnable {
@@ -167,60 +187,151 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	if chunkedPrompt == nil {
-		sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
-	} else {
-		err = nil
-	}
-	if err != nil {
-		sessionDetail := openaishared.SessionErrorDetail(err)
-		if sessionDetail.Stopped || sessionDetail.Status == http.StatusGatewayTimeout {
-			writeClaudeSessionCallError(w, historySession, err)
-			return true
-		}
-		if a.UseConfigToken {
-			if historySession != nil {
-				historySession.Error(http.StatusUnauthorized, "Account token is invalid. Please re-login the account in admin.", "error", "", "")
+	var (
+		pow     string
+		payload map[string]any
+		resp    *http.Response
+	)
+rootDispatch:
+	for {
+		if chunkedPrompt == nil {
+			sessionCapacityRetried := false
+			restartAsChunks := false
+			for {
+				root, rootErr := openaishared.PrepareRootSessionWithPinnedPow(r.Context(), h.DS, h.Auth, a, norm.Standard, promptLimit)
+				if rootErr != nil {
+					if message, limited := openaishared.RootSessionPromptLimitMessage(rootErr); limited {
+						if replacementCfg, ok := openaishared.RootSessionPromptLimitSettings(rootErr); ok && replacementCfg.SessionChunkingEnable {
+							chunkedPrompt, err = openaishared.TryPrepareRootSessionChunkingWithFailover(r.Context(), h.DS, h.Auth, a, norm.Standard, replacementCfg)
+							if err == nil && chunkedPrompt != nil {
+								promptLimit = chunkedPrompt.PromptLimit
+								restartAsChunks = true
+								break
+							}
+							if err != nil {
+								config.Logger.Error("[prompt_limit] replacement-account chunking failed",
+									"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
+									"prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt), "error", err)
+								if openaishared.IsSessionCapacityRateLimit(err) {
+									writeClaudeCompletionCallError(w, historySession, err, "", "")
+									return true
+								}
+							}
+						}
+						if historySession != nil {
+							historySession.Error(http.StatusRequestEntityTooLarge, message, "prompt_too_large", "", "")
+						}
+						writeClaudeError(w, http.StatusRequestEntityTooLarge, message)
+						return true
+					}
+					if openaishared.RootSessionErrorIsPow(rootErr) {
+						writeClaudePowCallError(w, historySession, rootErr)
+					} else {
+						writeClaudeSessionCallError(w, historySession, rootErr)
+					}
+					return true
+				}
+				promptLimit = root.PromptLimit
+				sessionID = root.SessionID
+				pow = root.Pow
+				payload = norm.Standard.CompletionPayload(sessionID)
+				resp, err = openaishared.CallRootSessionPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+				if err == nil {
+					break
+				}
+				if openaishared.IsSessionCapacityRateLimit(err) {
+					if sessionCapacityRetried {
+						break
+					}
+					sessionCapacityRetried = true
+				}
+				nextCfg, restarted, restartErr := openaishared.RestartRootSessionAfterPinnedFailure(r.Context(), h.DS, h.Auth, a, norm.Standard, promptLimit, sessionID, err)
+				if !restarted {
+					break
+				}
+				if message, limited := openaishared.RootSessionPromptLimitMessage(restartErr); limited {
+					if replacementCfg, ok := openaishared.RootSessionPromptLimitSettings(restartErr); ok && replacementCfg.SessionChunkingEnable {
+						chunkedPrompt, err = openaishared.TryPrepareRootSessionChunkingWithFailover(r.Context(), h.DS, h.Auth, a, norm.Standard, replacementCfg)
+						if err == nil && chunkedPrompt != nil {
+							promptLimit = chunkedPrompt.PromptLimit
+							restartAsChunks = true
+							break
+						}
+						if err != nil {
+							config.Logger.Error("[prompt_limit] replacement-account chunking failed",
+								"surface", "anthropic.messages", "model", norm.Standard.ResolvedModel,
+								"prompt_units", promptcompat.PromptUnits(norm.Standard.FinalPrompt), "error", err)
+							if openaishared.IsSessionCapacityRateLimit(err) {
+								writeClaudeCompletionCallError(w, historySession, err, "", "")
+								return true
+							}
+						}
+					}
+					if historySession != nil {
+						historySession.Error(http.StatusRequestEntityTooLarge, message, "prompt_too_large", "", "")
+					}
+					writeClaudeError(w, http.StatusRequestEntityTooLarge, message)
+					return true
+				}
+				if restartErr != nil {
+					err = restartErr
+					break
+				}
+				promptLimit = nextCfg
 			}
-			writeClaudeError(w, http.StatusUnauthorized, "Account token is invalid. Please re-login the account in admin.")
-			return true
+			if restartAsChunks {
+				continue rootDispatch
+			}
+			break rootDispatch
 		}
-		if historySession != nil {
-			historySession.Error(http.StatusUnauthorized, "Invalid token. If this should be a DeepSeek_Web_To_API key, add it to config.keys first.", "error", "", "")
+		for {
+			pow, err = openaishared.GetPinnedPow(r.Context(), h.DS, a)
+			if err != nil {
+				next, restarted, replayErr := openaishared.RestartRootSessionChunkingAfterPinnedFailure(r.Context(), h.DS, h.Auth, a, norm.Standard, promptLimit, chunkedPrompt, err)
+				if restarted {
+					if replayErr != nil {
+						err = replayErr
+						break
+					}
+					chunkedPrompt = next
+					continue
+				}
+				powDetail := openaishared.PowErrorDetail(err)
+				if powDetail.Code != "authentication_failed" {
+					writeClaudePowCallError(w, historySession, err)
+					return true
+				}
+				if historySession != nil {
+					historySession.Error(http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).", "error", "", "")
+				}
+				if !a.UseConfigToken {
+					a.MarkDirectTokenInvalid()
+				}
+				writeClaudeError(w, http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).")
+				return true
+			}
+			payload = norm.Standard.CompletionPayload(chunkedPrompt.SessionID)
+			payload["prompt"] = chunkedPrompt.FinalWirePrompt
+			payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+			resp, err = openaishared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+			if err == nil {
+				sessionID = chunkedPrompt.SessionID
+				break
+			}
+			next, restarted, replayErr := openaishared.RestartRootSessionChunkingAfterPinnedFailure(r.Context(), h.DS, h.Auth, a, norm.Standard, promptLimit, chunkedPrompt, err)
+			if !restarted {
+				break
+			}
+			if replayErr != nil {
+				err = replayErr
+				break
+			}
+			chunkedPrompt = next
 		}
-		a.MarkDirectTokenInvalid()
-		writeClaudeError(w, http.StatusUnauthorized, "Invalid token. If this should be a DeepSeek_Web_To_API key, add it to config.keys first.")
-		return true
+		break rootDispatch
 	}
-	var pow string
-	if chunkedPrompt != nil {
-		pow, err = openaishared.GetPinnedPow(r.Context(), h.DS, a)
-	} else {
-		pow, err = h.DS.GetPow(r.Context(), a, 3)
-	}
-	if err != nil {
-		powDetail := openaishared.PowErrorDetail(err)
-		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
-			writeClaudePowCallError(w, historySession, err)
-			return true
-		}
-		if historySession != nil {
-			historySession.Error(http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).", "error", "", "")
-		}
-		if !a.UseConfigToken {
-			a.MarkDirectTokenInvalid()
-		}
-		writeClaudeError(w, http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).")
-		return true
-	}
-	payload := norm.Standard.CompletionPayload(sessionID)
-	var resp *http.Response
-	if chunkedPrompt != nil {
-		payload["prompt"] = chunkedPrompt.FinalWirePrompt
-		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
-		resp, err = openaishared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
-	} else {
-		resp, err = h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+	if nextSessionID, ok := payload["chat_session_id"].(string); ok && strings.TrimSpace(nextSessionID) != "" {
+		sessionID = strings.TrimSpace(nextSessionID)
 	}
 	if err != nil {
 		config.Logger.Warn("[claude] completion request failed", "stream", norm.Standard.Stream, "error", err)
@@ -318,6 +429,26 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 	if openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.SessionChunkingEnable {
 		chunkedPrompt, err = openaishared.TryPrepareSessionChunking(r.Context(), h.DS, a, norm.Standard, promptLimit, lease.SessionID, lease.ParentMessageID)
 		if err != nil {
+			if openaishared.IsSessionCapacityRateLimit(err) {
+				config.Logger.Warn("[incremental] existing upstream session reached capacity during chunk preparation; rebuilding full context on the same account",
+					"surface", "anthropic.messages", "session_key", a.SessionKey,
+					"turn_count", lease.TurnCount, "error", err)
+				if activeSessionID != nil {
+					*activeSessionID = ""
+				}
+				norm.Standard.FinalPrompt = fullPrompt
+				return false
+			}
+			if openaishared.SwitchManagedAccountForPinnedBranch(r.Context(), h.Auth, a, err) {
+				config.Logger.Warn("[incremental] pinned chunk preparation failed; rebuilding full context on another account",
+					"surface", "anthropic.messages", "session_key", a.SessionKey,
+					"error", err)
+				if activeSessionID != nil {
+					*activeSessionID = ""
+				}
+				norm.Standard.FinalPrompt = fullPrompt
+				return false
+			}
 			if historySession != nil {
 				historySession.Error(http.StatusBadGateway, err.Error(), "session_chunking_failed", "", "")
 			}
@@ -334,13 +465,30 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 			return true
 		}
 	}
-	var pow string
-	if chunkedPrompt != nil {
-		pow, err = openaishared.GetPinnedPow(r.Context(), h.DS, a)
-	} else {
-		pow, err = h.DS.GetPow(r.Context(), a, 3)
-	}
+	// An incremental Claude request is always a child of the retained
+	// upstream session, so this PoW lookup must keep the same account.
+	pow, err := openaishared.GetPinnedPow(r.Context(), h.DS, a)
 	if err != nil {
+		if openaishared.IsSessionCapacityRateLimit(err) {
+			config.Logger.Warn("[incremental] existing upstream session reached capacity while acquiring pinned PoW; rebuilding full context on the same account",
+				"surface", "anthropic.messages", "session_key", a.SessionKey,
+				"turn_count", lease.TurnCount, "error", err)
+			if activeSessionID != nil {
+				*activeSessionID = ""
+			}
+			norm.Standard.FinalPrompt = fullPrompt
+			return false
+		}
+		if openaishared.SwitchManagedAccountForPinnedBranch(r.Context(), h.Auth, a, err) {
+			config.Logger.Warn("[incremental] pinned PoW failed; rebuilding full context on another account",
+				"surface", "anthropic.messages", "session_key", a.SessionKey,
+				"error", err)
+			if activeSessionID != nil {
+				*activeSessionID = ""
+			}
+			norm.Standard.FinalPrompt = fullPrompt
+			return false
+		}
 		writeClaudePowCallError(w, historySession, err)
 		return true
 	}
@@ -352,8 +500,15 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 	}
 	resp, err := openaishared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
 	if err != nil {
-		config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",
-			"surface", "anthropic.messages", "session_key", a.SessionKey, "error", err)
+		if openaishared.IsSessionCapacityRateLimit(err) {
+			config.Logger.Warn("[incremental] existing upstream session reached capacity; rebuilding full context on the same account",
+				"surface", "anthropic.messages", "session_key", a.SessionKey,
+				"turn_count", lease.TurnCount, "error", err)
+		} else {
+			switched := openaishared.SwitchManagedAccountForPinnedBranch(r.Context(), h.Auth, a, err)
+			config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",
+				"surface", "anthropic.messages", "session_key", a.SessionKey, "switched_account", switched, "error", err)
+		}
 		if activeSessionID != nil {
 			*activeSessionID = ""
 		}

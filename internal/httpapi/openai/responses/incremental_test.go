@@ -165,11 +165,22 @@ type responsesSwitchingIncrementalDSStub struct {
 	pinnedParents  []int
 }
 
+type responsesPinned429DSStub struct {
+	normalAccounts []string
+	normalPayloads []map[string]any
+	pinnedAccounts []string
+	pinnedError    error
+}
+
 func (s *responsesSwitchingIncrementalDSStub) CreateSession(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
 	return "session-" + a.AccountID, nil
 }
 
 func (*responsesSwitchingIncrementalDSStub) GetPow(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "pow-" + a.AccountID, nil
+}
+
+func (*responsesSwitchingIncrementalDSStub) GetPowPinned(_ context.Context, a *auth.RequestAuth) (string, error) {
 	return "pow-" + a.AccountID, nil
 }
 
@@ -208,12 +219,62 @@ func (*responsesSwitchingIncrementalDSStub) DeleteAllSessionsForToken(_ context.
 	return nil
 }
 
+func (*responsesPinned429DSStub) CreateSession(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "session-" + a.AccountID, nil
+}
+
+func (*responsesPinned429DSStub) GetPow(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	return "pow-" + a.AccountID, nil
+}
+
+func (*responsesPinned429DSStub) GetPowPinned(_ context.Context, a *auth.RequestAuth) (string, error) {
+	return "pow-" + a.AccountID, nil
+}
+
+func (*responsesPinned429DSStub) UploadFile(_ context.Context, _ *auth.RequestAuth, _ dsclient.UploadFileRequest, _ int) (*dsclient.UploadFileResult, error) {
+	return &dsclient.UploadFileResult{ID: "file-1", Status: "uploaded"}, nil
+}
+
+func (s *responsesPinned429DSStub) CallCompletion(_ context.Context, a *auth.RequestAuth, payload map[string]any, _ string, _ int) (*http.Response, error) {
+	s.normalAccounts = append(s.normalAccounts, a.AccountID)
+	s.normalPayloads = append(s.normalPayloads, cloneResponsesPayload(payload))
+	if len(s.normalAccounts) == 1 {
+		return responsesIncrementalSSE(501, "first response"), nil
+	}
+	return responsesIncrementalSSE(502, "replayed response"), nil
+}
+
+func (s *responsesPinned429DSStub) CallCompletionPinned(_ context.Context, a *auth.RequestAuth, _ map[string]any, _ string) (*http.Response, error) {
+	s.pinnedAccounts = append(s.pinnedAccounts, a.AccountID)
+	if s.pinnedError != nil {
+		return nil, s.pinnedError
+	}
+	return nil, &dsclient.RequestFailure{
+		Op:         "completion",
+		Kind:       dsclient.FailureUpstreamStatus,
+		StatusCode: http.StatusTooManyRequests,
+		Message:    "rate limited",
+	}
+}
+
+func (*responsesPinned429DSStub) DeleteSessionForToken(_ context.Context, _, _ string) (*dsclient.DeleteSessionResult, error) {
+	return &dsclient.DeleteSessionResult{Success: true}, nil
+}
+
+func (*responsesPinned429DSStub) DeleteAllSessionsForToken(_ context.Context, _ string) error {
+	return nil
+}
+
 func (s *responsesIncrementalDSStub) CreateSession(_ context.Context, _ *auth.RequestAuth, _ int) (string, error) {
 	s.createCalls++
 	return "responses-remote-session", nil
 }
 
 func (*responsesIncrementalDSStub) GetPow(_ context.Context, _ *auth.RequestAuth, _ int) (string, error) {
+	return "pow", nil
+}
+
+func (*responsesIncrementalDSStub) GetPowPinned(_ context.Context, _ *auth.RequestAuth) (string, error) {
 	return "pow", nil
 }
 
@@ -418,6 +479,101 @@ func TestResponsesIncrementalRecordsRetryAccountSession(t *testing.T) {
 	}
 	if len(ds.pinnedAccounts) != 1 || ds.pinnedAccounts[0] != "account-retry" || ds.pinnedSessions[0] != "session-account-retry" || ds.pinnedParents[0] != 202 {
 		t.Fatalf("incremental branch did not retain retry account/session state: accounts=%#v sessions=%#v parents=%#v", ds.pinnedAccounts, ds.pinnedSessions, ds.pinnedParents)
+	}
+}
+
+func TestResponsesPinned429SwitchesAccountAndReplaysFullContext(t *testing.T) {
+	authStub := &responsesSwitchingIncrementalAuthStub{}
+	ds := &responsesPinned429DSStub{}
+	h := &Handler{
+		Store:       responsesHistoryConfigStub{},
+		Auth:        authStub,
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+	first := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": "first request",
+	})
+	firstOutput, _ := first["output"].([]any)
+	if len(firstOutput) == 0 {
+		t.Fatalf("missing first response output: %#v", first)
+	}
+	secondInput := []any{map[string]any{"role": "user", "content": "first request"}}
+	secondInput = append(secondInput, firstOutput...)
+	secondInput = append(secondInput, map[string]any{"role": "user", "content": "second request"})
+	serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": secondInput,
+	})
+
+	if authStub.switches != 1 {
+		t.Fatalf("expected one account switch after pinned 429, got %d", authStub.switches)
+	}
+	if got := ds.pinnedAccounts; len(got) != 1 || got[0] != "account-initial" {
+		t.Fatalf("pinned branch should remain on the original account: %#v", got)
+	}
+	if got := ds.normalAccounts; len(got) != 2 || got[0] != "account-initial" || got[1] != "account-retry" {
+		t.Fatalf("full replay did not move to the replacement account: %#v", got)
+	}
+	fallback := ds.normalPayloads[1]
+	if fallback["chat_session_id"] != "session-account-retry" || fallback["parent_message_id"] != nil {
+		t.Fatalf("replay must create a new root session: %#v", fallback)
+	}
+	prompt, _ := fallback["prompt"].(string)
+	for _, expected := range []string{"first request", "first response", "second request"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("full replay prompt missing %q: %q", expected, prompt)
+		}
+	}
+}
+
+func TestResponsesPinnedSessionCapacityRebuildsFullContextOnSameAccount(t *testing.T) {
+	authStub := &responsesSwitchingIncrementalAuthStub{}
+	ds := &responsesPinned429DSStub{pinnedError: &dsclient.RequestFailure{
+		Op:             "completion",
+		Kind:           dsclient.FailureUpstreamStatus,
+		StatusCode:     http.StatusTooManyRequests,
+		RateLimitScope: dsclient.RateLimitScopeSessionCapacity,
+		Message:        "maximum conversation turns reached",
+	}}
+	h := &Handler{
+		Store:       responsesHistoryConfigStub{},
+		Auth:        authStub,
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+	first := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": "first request",
+	})
+	firstOutput, _ := first["output"].([]any)
+	secondInput := []any{map[string]any{"role": "user", "content": "first request"}}
+	secondInput = append(secondInput, firstOutput...)
+	secondInput = append(secondInput, map[string]any{"role": "user", "content": "second request"})
+	serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": secondInput,
+	})
+
+	if authStub.switches != 0 {
+		t.Fatalf("session capacity must not switch accounts, got %d switches", authStub.switches)
+	}
+	if got := ds.pinnedAccounts; len(got) != 1 || got[0] != "account-initial" {
+		t.Fatalf("pinned branch should stay on the original account: %#v", got)
+	}
+	if got := ds.normalAccounts; len(got) != 2 || got[0] != "account-initial" || got[1] != "account-initial" {
+		t.Fatalf("full replay should rebuild a root on the same account: %#v", got)
+	}
+	fallback := ds.normalPayloads[1]
+	if fallback["chat_session_id"] != "session-account-initial" || fallback["parent_message_id"] != nil {
+		t.Fatalf("same-account replay must create a new root session: %#v", fallback)
+	}
+	prompt, _ := fallback["prompt"].(string)
+	for _, expected := range []string{"first request", "first response", "second request"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("full replay prompt missing %q: %q", expected, prompt)
+		}
 	}
 }
 

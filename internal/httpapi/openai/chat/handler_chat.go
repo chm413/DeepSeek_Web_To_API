@@ -164,11 +164,15 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Reject here rather than letting upstream return an opaque empty output.
 	var chunkedPrompt *shared.SessionChunkingPreparation
 	if shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.SessionChunkingEnable {
-		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, stdReq, promptLimit, "", 0)
+		chunkedPrompt, err = shared.TryPrepareRootSessionChunkingWithFailover(r.Context(), h.DS, h.Auth, a, stdReq, promptLimit)
 		if err != nil {
 			config.Logger.Error("[prompt_limit] same-session chunking failed",
 				"surface", "chat.completions", "model", stdReq.ResolvedModel,
 				"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "error", err)
+			if shared.IsSessionCapacityRateLimit(err) {
+				writeCompletionCallError(w, historySession, err, "", "")
+				return
+			}
 			if historySession != nil {
 				historySession.error(http.StatusBadGateway, err.Error(), "error", "session_chunking_failed", "")
 			}
@@ -177,6 +181,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if chunkedPrompt != nil {
 			sessionID = chunkedPrompt.SessionID
+			promptLimit = chunkedPrompt.PromptLimit
 		}
 	}
 	if chunkedPrompt == nil && shared.EnforcePromptLimit(promptLimit, stdReq) != "" && promptLimit.ProFlashCompressionEnable {
@@ -201,60 +206,148 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if chunkedPrompt == nil {
-		sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
-	} else {
-		err = nil
-	}
-	if err != nil {
-		sessionDetail := shared.SessionErrorDetail(err)
-		if sessionDetail.Stopped || sessionDetail.Status == http.StatusGatewayTimeout {
-			writeSessionCallError(w, historySession, err)
-			return
-		}
-		if a.UseConfigToken {
-			if historySession != nil {
-				historySession.error(http.StatusUnauthorized, "Account token is invalid. Please re-login the account in admin.", "error", "", "")
+	var (
+		pow     string
+		payload map[string]any
+		resp    *http.Response
+	)
+rootDispatch:
+	for {
+		if chunkedPrompt == nil {
+			sessionCapacityRetried := false
+			restartAsChunks := false
+			for {
+				root, rootErr := shared.PrepareRootSessionWithPinnedPow(r.Context(), h.DS, h.Auth, a, stdReq, promptLimit)
+				if rootErr != nil {
+					if message, limited := shared.RootSessionPromptLimitMessage(rootErr); limited {
+						if replacementCfg, ok := shared.RootSessionPromptLimitSettings(rootErr); ok && replacementCfg.SessionChunkingEnable {
+							chunkedPrompt, err = shared.TryPrepareRootSessionChunkingWithFailover(r.Context(), h.DS, h.Auth, a, stdReq, replacementCfg)
+							if err == nil && chunkedPrompt != nil {
+								promptLimit = chunkedPrompt.PromptLimit
+								restartAsChunks = true
+								break
+							}
+							if err != nil {
+								config.Logger.Error("[prompt_limit] replacement-account chunking failed",
+									"surface", "chat.completions", "model", stdReq.ResolvedModel,
+									"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "error", err)
+								if shared.IsSessionCapacityRateLimit(err) {
+									writeCompletionCallError(w, historySession, err, "", "")
+									return
+								}
+							}
+						}
+						if historySession != nil {
+							historySession.error(http.StatusRequestEntityTooLarge, message, "error", "prompt_too_large", "")
+						}
+						writeOpenAIError(w, http.StatusRequestEntityTooLarge, message)
+						return
+					}
+					if shared.RootSessionErrorIsPow(rootErr) {
+						writePowCallError(w, historySession, rootErr)
+					} else {
+						writeSessionCallError(w, historySession, rootErr)
+					}
+					return
+				}
+				promptLimit = root.PromptLimit
+				sessionID = root.SessionID
+				pow = root.Pow
+				payload = stdReq.CompletionPayload(sessionID)
+				resp, err = shared.CallRootSessionPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+				if err == nil {
+					break
+				}
+				if shared.IsSessionCapacityRateLimit(err) {
+					if sessionCapacityRetried {
+						break
+					}
+					sessionCapacityRetried = true
+				}
+				nextCfg, restarted, restartErr := shared.RestartRootSessionAfterPinnedFailure(r.Context(), h.DS, h.Auth, a, stdReq, promptLimit, sessionID, err)
+				if !restarted {
+					break
+				}
+				if message, limited := shared.RootSessionPromptLimitMessage(restartErr); limited {
+					if replacementCfg, ok := shared.RootSessionPromptLimitSettings(restartErr); ok && replacementCfg.SessionChunkingEnable {
+						chunkedPrompt, err = shared.TryPrepareRootSessionChunkingWithFailover(r.Context(), h.DS, h.Auth, a, stdReq, replacementCfg)
+						if err == nil && chunkedPrompt != nil {
+							promptLimit = chunkedPrompt.PromptLimit
+							restartAsChunks = true
+							break
+						}
+						if err != nil {
+							config.Logger.Error("[prompt_limit] replacement-account chunking failed",
+								"surface", "chat.completions", "model", stdReq.ResolvedModel,
+								"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt), "error", err)
+							if shared.IsSessionCapacityRateLimit(err) {
+								writeCompletionCallError(w, historySession, err, "", "")
+								return
+							}
+						}
+					}
+					if historySession != nil {
+						historySession.error(http.StatusRequestEntityTooLarge, message, "error", "prompt_too_large", "")
+					}
+					writeOpenAIError(w, http.StatusRequestEntityTooLarge, message)
+					return
+				}
+				if restartErr != nil {
+					err = restartErr
+					break
+				}
+				promptLimit = nextCfg
 			}
-			writeOpenAIError(w, http.StatusUnauthorized, "Account token is invalid. Please re-login the account in admin.")
-		} else {
-			a.MarkDirectTokenInvalid()
-			if historySession != nil {
-				historySession.error(http.StatusUnauthorized, "Invalid token. If this should be a DeepSeek_Web_To_API key, add it to config.keys first.", "error", "", "")
+			if restartAsChunks {
+				continue rootDispatch
 			}
-			writeOpenAIError(w, http.StatusUnauthorized, "Invalid token. If this should be a DeepSeek_Web_To_API key, add it to config.keys first.")
+			break rootDispatch
 		}
-		return
-	}
-	var pow string
-	if chunkedPrompt != nil {
-		pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
-	} else {
-		pow, err = h.DS.GetPow(r.Context(), a, 3)
-	}
-	if err != nil {
-		powDetail := shared.PowErrorDetail(err)
-		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
-			writePowCallError(w, historySession, err)
-			return
+		for {
+			pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
+			if err != nil {
+				next, restarted, replayErr := shared.RestartRootSessionChunkingAfterPinnedFailure(r.Context(), h.DS, h.Auth, a, stdReq, promptLimit, chunkedPrompt, err)
+				if restarted {
+					if replayErr != nil {
+						err = replayErr
+						break
+					}
+					chunkedPrompt = next
+					continue
+				}
+				powDetail := shared.PowErrorDetail(err)
+				if powDetail.Code != "authentication_failed" {
+					writePowCallError(w, historySession, err)
+					return
+				}
+				if !a.UseConfigToken {
+					a.MarkDirectTokenInvalid()
+				}
+				if historySession != nil {
+					historySession.error(http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).", "error", "", "")
+				}
+				writeOpenAIError(w, http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).")
+				return
+			}
+			payload = stdReq.CompletionPayload(chunkedPrompt.SessionID)
+			payload["prompt"] = chunkedPrompt.FinalWirePrompt
+			payload["parent_message_id"] = chunkedPrompt.ParentMessageID
+			resp, err = shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
+			if err == nil {
+				sessionID = chunkedPrompt.SessionID
+				break
+			}
+			next, restarted, replayErr := shared.RestartRootSessionChunkingAfterPinnedFailure(r.Context(), h.DS, h.Auth, a, stdReq, promptLimit, chunkedPrompt, err)
+			if !restarted {
+				break
+			}
+			if replayErr != nil {
+				err = replayErr
+				break
+			}
+			chunkedPrompt = next
 		}
-		if !a.UseConfigToken {
-			a.MarkDirectTokenInvalid()
-		}
-		if historySession != nil {
-			historySession.error(http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).", "error", "", "")
-		}
-		writeOpenAIError(w, http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).")
-		return
-	}
-	payload := stdReq.CompletionPayload(sessionID)
-	var resp *http.Response
-	if chunkedPrompt != nil {
-		payload["prompt"] = chunkedPrompt.FinalWirePrompt
-		payload["parent_message_id"] = chunkedPrompt.ParentMessageID
-		resp, err = shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
-	} else {
-		resp, err = h.DS.CallCompletion(r.Context(), a, payload, pow, 3)
+		break rootDispatch
 	}
 	if nextSessionID := strings.TrimSpace(asString(payload["chat_session_id"])); nextSessionID != "" {
 		sessionID = nextSessionID
@@ -269,9 +362,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	refFileTokens := stdReq.RefFileTokens
 	var outcome chatCompletionOutcome
 	if stdReq.Stream {
-		outcome = h.handleStreamWithRetry(w, r, a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+		outcome = h.handleStreamWithRetry(w, r, a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq, promptLimit, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
 	} else {
-		outcome = h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+		outcome = h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, sessionID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq, promptLimit, refFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, &sessionID)
+	}
+	if outcome.sessionID != "" {
+		sessionID = outcome.sessionID
 	}
 	h.recordFullChatIncrementalState(a, incrementalBaseReq, sessionID, outcome)
 }
@@ -309,6 +405,7 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 		return false
 	}
 	fullPrompt := stdReq.FinalPrompt
+	fullRootReq := *stdReq
 	stdReq.FinalPrompt = incrementalPrompt
 	if activeSessionID != nil {
 		*activeSessionID = lease.SessionID
@@ -339,6 +436,26 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 	if shared.EnforcePromptLimit(promptLimit, *stdReq) != "" && promptLimit.SessionChunkingEnable {
 		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, *stdReq, promptLimit, lease.SessionID, lease.ParentMessageID)
 		if err != nil {
+			if shared.IsSessionCapacityRateLimit(err) {
+				config.Logger.Warn("[incremental] existing upstream session reached capacity during chunk preparation; rebuilding full context on the same account",
+					"surface", "chat.completions", "session_key", a.SessionKey,
+					"turn_count", lease.TurnCount, "error", err)
+				if activeSessionID != nil {
+					*activeSessionID = ""
+				}
+				stdReq.FinalPrompt = fullPrompt
+				return false
+			}
+			if shared.SwitchManagedAccountForPinnedBranch(r.Context(), h.Auth, a, err) {
+				config.Logger.Warn("[incremental] pinned chunk preparation failed; rebuilding full context on another account",
+					"surface", "chat.completions", "session_key", a.SessionKey,
+					"error", err)
+				if activeSessionID != nil {
+					*activeSessionID = ""
+				}
+				stdReq.FinalPrompt = fullPrompt
+				return false
+			}
 			if historySession != nil {
 				historySession.error(http.StatusBadGateway, err.Error(), "error", "session_chunking_failed", "")
 			}
@@ -355,13 +472,31 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 			return true
 		}
 	}
-	var pow string
-	if chunkedPrompt != nil {
-		pow, err = shared.GetPinnedPow(r.Context(), h.DS, a)
-	} else {
-		pow, err = h.DS.GetPow(r.Context(), a, 3)
-	}
+	// Every incremental request still targets a child of lease.SessionID,
+	// including an ordinary short delta. It must not use a PoW path that can
+	// silently change accounts before the pinned branch is abandoned.
+	pow, err := shared.GetPinnedPow(r.Context(), h.DS, a)
 	if err != nil {
+		if shared.IsSessionCapacityRateLimit(err) {
+			config.Logger.Warn("[incremental] existing upstream session reached capacity while acquiring pinned PoW; rebuilding full context on the same account",
+				"surface", "chat.completions", "session_key", a.SessionKey,
+				"turn_count", lease.TurnCount, "error", err)
+			if activeSessionID != nil {
+				*activeSessionID = ""
+			}
+			stdReq.FinalPrompt = fullPrompt
+			return false
+		}
+		if shared.SwitchManagedAccountForPinnedBranch(r.Context(), h.Auth, a, err) {
+			config.Logger.Warn("[incremental] pinned PoW failed; rebuilding full context on another account",
+				"surface", "chat.completions", "session_key", a.SessionKey,
+				"error", err)
+			if activeSessionID != nil {
+				*activeSessionID = ""
+			}
+			stdReq.FinalPrompt = fullPrompt
+			return false
+		}
 		powDetail := shared.PowErrorDetail(err)
 		if powDetail.Stopped || powDetail.Status == http.StatusGatewayTimeout {
 			writePowCallError(w, historySession, err)
@@ -384,8 +519,15 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 	}
 	resp, err := shared.CallPinnedCompletion(r.Context(), h.DS, a, payload, pow)
 	if err != nil {
-		config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",
-			"surface", "chat.completions", "session_key", a.SessionKey, "error", err)
+		if shared.IsSessionCapacityRateLimit(err) {
+			config.Logger.Warn("[incremental] existing upstream session reached capacity; rebuilding full context on the same account",
+				"surface", "chat.completions", "session_key", a.SessionKey,
+				"turn_count", lease.TurnCount, "error", err)
+		} else {
+			switched := shared.SwitchManagedAccountForPinnedBranch(r.Context(), h.Auth, a, err)
+			config.Logger.Warn("[incremental] pinned completion failed; falling back to full replay",
+				"surface", "chat.completions", "session_key", a.SessionKey, "switched_account", switched, "error", err)
+		}
 		if activeSessionID != nil {
 			*activeSessionID = ""
 		}
@@ -394,13 +536,18 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 	}
 	var outcome chatCompletionOutcome
 	if stdReq.Stream {
-		outcome = h.handleStreamWithRetry(w, r, a, resp, payload, pow, lease.SessionID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, activeSessionID)
+		outcome = h.handleStreamWithRetry(w, r, a, resp, payload, pow, lease.SessionID, stdReq.ResponseModel, stdReq.FinalPrompt, fullRootReq, promptLimit, stdReq.RefFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, activeSessionID)
 	} else {
-		outcome = h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, lease.SessionID, stdReq.ResponseModel, stdReq.FinalPrompt, stdReq.RefFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, activeSessionID)
+		outcome = h.handleNonStreamWithRetry(w, r.Context(), a, resp, payload, pow, lease.SessionID, stdReq.ResponseModel, stdReq.FinalPrompt, fullRootReq, promptLimit, stdReq.RefFileTokens, stdReq.Thinking, stdReq.ExposeReasoning, stdReq.Search, stdReq.ToolNames, stdReq.ToolsRaw, stdReq.ToolChoice.IsRequired(), historySession, activeSessionID)
 	}
 	if outcome.success {
-		lease.Complete(shared.IncrementalScope(a, *stdReq), stdReq.Messages, outcome.responseMessages, lease.SessionID, outcome.responseMessageID)
-		lease = nil
+		if outcome.replayedRoot {
+			stdReq.FinalPrompt = fullPrompt
+			h.recordFullChatIncrementalState(a, *stdReq, outcome.sessionID, outcome)
+		} else {
+			lease.Complete(shared.IncrementalScope(a, *stdReq), stdReq.Messages, outcome.responseMessages, lease.SessionID, outcome.responseMessageID)
+			lease = nil
+		}
 	}
 	return true
 }
@@ -529,8 +676,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, resp *htt
 			}
 			return decision
 		},
-		OnFinalize: func(reason streamengine.StopReason, _ error) {
-			if string(reason) == "content_filter" {
+		OnFinalize: func(reason streamengine.StopReason, scannerErr error) {
+			if failure, failed := streamengine.ClassifyTerminalFailure(reason, scannerErr); failed {
+				config.Logger.Warn("[stream] upstream stream terminated abnormally",
+					"surface", "chat.completions", "stop_reason", reason,
+					"status", failure.Status, "code", failure.Code, "error", scannerErr)
+				streamRuntime.sendFailedChunk(failure.Status, failure.Message, failure.Code)
+			} else if string(reason) == "content_filter" {
 				streamRuntime.finalize("content_filter", false)
 			} else {
 				streamRuntime.finalize("stop", false)

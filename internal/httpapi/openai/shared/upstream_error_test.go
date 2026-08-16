@@ -44,3 +44,18 @@ func TestCompletionErrorDetailPreservesUpstreamHTTPStatus(t *testing.T) {
 		t.Fatalf("expected status and body in message, got %q", detail.Message)
 	}
 }
+
+func TestCompletionErrorDetailMapsSessionCapacitySeparately(t *testing.T) {
+	t.Parallel()
+
+	detail := CompletionErrorDetail(&dsclient.RequestFailure{
+		Op:             "completion",
+		Kind:           dsclient.FailureUpstreamStatus,
+		StatusCode:     http.StatusTooManyRequests,
+		RateLimitScope: dsclient.RateLimitScopeSessionCapacity,
+		Message:        "maximum conversation turns reached",
+	})
+	if detail.Status != http.StatusRequestEntityTooLarge || detail.Code != "upstream_session_capacity" {
+		t.Fatalf("unexpected session capacity detail: %#v", detail)
+	}
+}

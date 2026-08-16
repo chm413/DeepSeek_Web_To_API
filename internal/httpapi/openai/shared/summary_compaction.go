@@ -148,12 +148,12 @@ func TrySummaryCompactPrompt(ctx context.Context, ds ProFlashCompressionCaller, 
 		}
 		func() {
 			defer AutoDeleteRemoteSession(ctx, ds, "single", a.AccountID, a.DeepSeekToken, sessionID)
-			pow, err := ds.GetPow(ctx, a, 3)
+			pow, err := GetRootSessionPinnedPow(ctx, ds, a)
 			if err != nil {
 				lastErr = fmt.Errorf("get summary PoW: %w", err)
 				return
 			}
-			resp, err := ds.CallCompletion(ctx, a, map[string]any{
+			resp, err := CallRootSessionPinnedCompletion(ctx, ds, a, map[string]any{
 				"chat_session_id":   sessionID,
 				"model_type":        "default",
 				"parent_message_id": nil,
@@ -161,7 +161,7 @@ func TrySummaryCompactPrompt(ctx context.Context, ds ProFlashCompressionCaller, 
 				"ref_file_ids":      []any{},
 				"thinking_enabled":  false,
 				"search_enabled":    false,
-			}, pow, 3)
+			}, pow)
 			if err != nil {
 				lastErr = fmt.Errorf("summary completion: %w", err)
 				return

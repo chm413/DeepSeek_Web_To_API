@@ -202,6 +202,8 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 loading={batchUploading}
                 onClose={closeBatchUpload}
                 onUpload={uploadBatchAccounts}
+                proxies={config?.proxies || []}
+                autoRouteEnabled={Boolean(config?.proxy_policy?.auto_route_enabled)}
             />
         </div>
     )

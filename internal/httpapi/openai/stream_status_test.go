@@ -528,8 +528,8 @@ func TestChatCompletionsNonStreamSwitchesManagedAccountOnEmptyRetry(t *testing.T
 	if ds.pows[1] != "pow-acct-retry" {
 		t.Fatalf("expected retry PoW from switched account, pows=%#v", ds.pows)
 	}
-	if parentID, ok := ds.payloads[1]["parent_message_id"].(int); !ok || parentID != 101 {
-		t.Fatalf("expected retry parent_message_id=101, got %#v", ds.payloads[1]["parent_message_id"])
+	if parentID, ok := ds.payloads[1]["parent_message_id"]; !ok || parentID != nil {
+		t.Fatalf("expected retry to start a new root without parent_message_id, got %#v", parentID)
 	}
 }
 
@@ -774,8 +774,8 @@ func TestResponsesNonStreamSwitchesManagedAccountOnEmptyRetry(t *testing.T) {
 	if ds.payloads[1]["chat_session_id"] != "session-acct-retry" {
 		t.Fatalf("expected retry session for switched account, payloads=%#v", ds.payloads)
 	}
-	if parentID, ok := ds.payloads[1]["parent_message_id"].(int); !ok || parentID != 202 {
-		t.Fatalf("expected retry parent_message_id=202, got %#v", ds.payloads[1]["parent_message_id"])
+	if parentID, ok := ds.payloads[1]["parent_message_id"]; !ok || parentID != nil {
+		t.Fatalf("expected retry to start a new root without parent_message_id, got %#v", parentID)
 	}
 }
 

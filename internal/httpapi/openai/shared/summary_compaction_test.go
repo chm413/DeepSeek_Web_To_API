@@ -19,6 +19,14 @@ type summaryCompactionDSStub struct {
 	response func() *http.Response
 }
 
+type summaryPinnedCompactionDSStub struct {
+	summaryCompactionDSStub
+	normalPowCalls        int
+	pinnedPowCalls        int
+	normalCompletionCalls int
+	pinnedCompletionCalls int
+}
+
 func (s *summaryCompactionDSStub) CreateSession(context.Context, *auth.RequestAuth, int) (string, error) {
 	return "summary-session", nil
 }
@@ -27,12 +35,32 @@ func (*summaryCompactionDSStub) GetPow(context.Context, *auth.RequestAuth, int) 
 	return "pow", nil
 }
 
+func (s *summaryPinnedCompactionDSStub) GetPow(context.Context, *auth.RequestAuth, int) (string, error) {
+	s.normalPowCalls++
+	return "unsafe-normal-pow", nil
+}
+
+func (s *summaryPinnedCompactionDSStub) GetPowPinned(context.Context, *auth.RequestAuth) (string, error) {
+	s.pinnedPowCalls++
+	return "pinned-pow", nil
+}
+
 func (s *summaryCompactionDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, payload map[string]any, _ string, _ int) (*http.Response, error) {
 	s.prompts = append(s.prompts, strings.TrimSpace(payload["prompt"].(string)))
 	if s.response != nil {
 		return s.response(), nil
 	}
 	return summaryCompactionSSE("Preserve active requirements, exact identifiers, decisions, and unresolved work."), nil
+}
+
+func (s *summaryPinnedCompactionDSStub) CallCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, pow string, attempts int) (*http.Response, error) {
+	s.normalCompletionCalls++
+	return s.summaryCompactionDSStub.CallCompletion(ctx, a, payload, pow, attempts)
+}
+
+func (s *summaryPinnedCompactionDSStub) CallCompletionRootPinned(ctx context.Context, a *auth.RequestAuth, payload map[string]any, pow string) (*http.Response, error) {
+	s.pinnedCompletionCalls++
+	return s.summaryCompactionDSStub.CallCompletion(ctx, a, payload, pow, 1)
 }
 
 func (s *summaryCompactionDSStub) DeleteSessionForToken(_ context.Context, _ string, sessionID string) (*dsclient.DeleteSessionResult, error) {
@@ -134,6 +162,24 @@ func TestTrySummaryCompactPromptUsesHiddenOutputWhenVisibleOutputIsEmpty(t *test
 	}
 	if !stats.UsedThinkingFallback || !strings.Contains(compacted.FinalPrompt, "Preserve hidden summary requirements") {
 		t.Fatalf("hidden summary was not used: stats=%+v prompt=%q", stats, compacted.FinalPrompt)
+	}
+}
+
+func TestTrySummaryCompactPromptPinsRootSession(t *testing.T) {
+	ds := &summaryPinnedCompactionDSStub{}
+	messages := []any{
+		map[string]any{"role": "user", "content": "old requirement " + strings.Repeat("history ", 160)},
+		map[string]any{"role": "assistant", "content": strings.Repeat("old result ", 160)},
+		map[string]any{"role": "user", "content": "latest requirement"},
+	}
+	req := promptcompat.StandardRequest{ResolvedModel: "deepseek-v4-flash", ResponseModel: "deepseek-v4-flash", Messages: messages, ToolChoice: promptcompat.DefaultToolChoicePolicy()}
+	req.FinalPrompt, _ = promptcompat.BuildOpenAIPrompt(messages, nil, "", req.ToolChoice, false)
+	_, _, ok, err := TrySummaryCompactPrompt(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, config.DefaultPromptLimitSettings(), 4000)
+	if err != nil || !ok {
+		t.Fatalf("summary compaction = (%v, %v)", ok, err)
+	}
+	if ds.normalPowCalls != 0 || ds.normalCompletionCalls != 0 || ds.pinnedPowCalls != 1 || ds.pinnedCompletionCalls != 1 {
+		t.Fatalf("expected pinned root path only: %+v", ds)
 	}
 }
 

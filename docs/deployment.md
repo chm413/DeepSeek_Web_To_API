@@ -286,7 +286,7 @@ PR 阶段使用 `--no-cache` 确保每次都是全量构建，避免层缓存掩
 - 容器启动后读取不到配置：确认 `.env` 存在、`DEEPSEEK_WEB_TO_API_CONFIG_JSON` 非空，并挂载 `./data:/app/data`。
 - 管理台改动重启后丢失：确认 `DEEPSEEK_WEB_TO_API_ENV_WRITEBACK=true` 且 `DEEPSEEK_WEB_TO_API_CONFIG_PATH=/app/data/config.json` 可写。
 - 反代后访问失败：确认应用绑定地址、反代 upstream、CORS 头与超时配置。
-- 长流式请求中断：检查反代读写超时是否低于业务请求时间。
+- 长流式请求中断：检查反代读写超时是否低于业务请求时间。上游读取异常会以 SSE 中的 `502` / `upstream_stream_error` 结束；首内容前超时或中途空闲超时会以 `504` / `upstream_stream_timeout` 结束，二者都会记录为失败而不是成功会话。默认服务端空闲阈值为 7200 秒、无内容 keepalive 上限为 1440（5 秒间隔）；反代需要不低于该业务时长。
 - `/admin/version` 显示 `dev`（`source: default`）：部署时未注入版本字符串。使用 `scripts/deploy_107.py` 重新部署，或手动构建时添加 `-X DeepSeek_Web_To_API/internal/version.BuildVersion=<VERSION>` ldflags。
 - 部署后服务未启动：查看 `systemctl status deepseek-web-to-api` 和 `journalctl -u deepseek-web-to-api -n 50`。使用备份文件回滚：`mv /opt/deepseek-web-to-api/deepseek-web-to-api.bak.<ts> /opt/deepseek-web-to-api/deepseek-web-to-api && systemctl restart deepseek-web-to-api`。
 - `scripts/deploy_107.py` 失败（sha256 不匹配）：SCP 可能传输截断，脚本自动清理 `.new` 文件。检查网络或目标磁盘空间后重试。

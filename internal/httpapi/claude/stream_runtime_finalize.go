@@ -138,8 +138,8 @@ func (s *claudeStreamRuntime) onFinalize(reason streamengine.StopReason, scanner
 		s.sendError(s.upstreamErr)
 		return
 	}
-	if scannerErr != nil {
-		s.sendError(scannerErr.Error())
+	if failure, failed := streamengine.ClassifyTerminalFailure(reason, scannerErr); failed {
+		s.sendErrorWithCode(failure.Message, failure.Code)
 		return
 	}
 	s.finalize("end_turn")

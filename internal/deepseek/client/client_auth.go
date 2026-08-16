@@ -128,12 +128,26 @@ func extractResponseUser(resp map[string]any) map[string]any {
 }
 
 func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (string, error) {
+	return c.createSession(ctx, a, maxAttempts, true)
+}
+
+// CreateSessionPinned creates a root conversation without silently selecting a
+// replacement account. Callers that will later attach PoW or a parent message
+// must own the switch so the session, token, and input budget stay aligned.
+func (c *Client) CreateSessionPinned(ctx context.Context, a *auth.RequestAuth) (string, error) {
+	return c.createSession(ctx, a, 3, false)
+}
+
+func (c *Client) createSession(ctx context.Context, a *auth.RequestAuth, maxAttempts int, allowAccountSwitch bool) (string, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
 	}
 	clients := c.requestClientsForAuth(ctx, a)
 	attempts := 0
 	refreshed := false
+	lastFailureStatus := 0
+	lastFailureKind := FailureUnknown
+	lastFailureMessage := ""
 	for attempts < maxAttempts {
 		headers := c.authHeaders(a.DeepSeekToken)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreateSessionURL, headers, map[string]any{"agent": "chat"})
@@ -146,6 +160,23 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 			continue
 		}
 		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		lastFailureMessage = failureMessage(msg, bizMsg, "create session failed")
+		rateLimited := accountRateLimitError(status, code, bizCode, msg, bizMsg, "") != nil
+		rateLimitScope := rateLimitScopeFromResponse(status, code, bizCode, msg, bizMsg)
+		lastFailureStatus = 0
+		if rateLimited {
+			// Some upstream endpoints return a business 429 inside HTTP 200.
+			// Preserve the semantic status so callers can move a pinned branch.
+			lastFailureStatus = http.StatusTooManyRequests
+			lastFailureKind = FailureUpstreamStatus
+		} else if isTokenInvalid(status, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
+			lastFailureKind = authFailureKind(a.UseConfigToken)
+		} else if status >= http.StatusBadRequest {
+			lastFailureStatus = status
+			lastFailureKind = FailureUpstreamStatus
+		} else {
+			lastFailureKind = FailureUnknown
+		}
 		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
 		if status == http.StatusOK && code == 0 && bizCode == 0 {
 			sessionID := extractCreateSessionID(resp)
@@ -154,7 +185,7 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 			}
 		}
 		if healthErr := c.markAccountHealth(a, code, bizCode, msg, bizMsg); healthErr != nil {
-			if a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
+			if allowAccountSwitch && a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
 				clients = c.requestClientsForAuth(ctx, a)
 				refreshed = false
 				attempts++
@@ -162,7 +193,7 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 			}
 			return "", healthErr
 		}
-		config.Logger.Warn("[create_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID)
+		config.Logger.Warn("[create_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "rate_limit_scope", rateLimitScope, "use_config_token", a.UseConfigToken, "account", a.AccountID)
 		if a.UseConfigToken {
 			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
 				if c.Auth.RefreshToken(ctx, a) {
@@ -170,13 +201,25 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 					continue
 				}
 			}
-			if c.Auth.SwitchAccount(ctx, a) {
+			if allowAccountSwitch && rateLimitScope != RateLimitScopeSessionCapacity && c.Auth.SwitchAccount(ctx, a) {
 				refreshed = false
-				attempts++
+				clients = c.requestClientsForAuth(ctx, a)
+				if !rateLimited {
+					attempts++
+				}
 				continue
 			}
 		}
 		attempts++
+	}
+	if lastFailureKind != FailureUnknown || lastFailureStatus > 0 {
+		return "", &RequestFailure{
+			Op:             "create session",
+			Kind:           lastFailureKind,
+			StatusCode:     lastFailureStatus,
+			RateLimitScope: rateLimitScopeFromResponse(lastFailureStatus, 0, 0, lastFailureMessage, ""),
+			Message:        lastFailureMessage,
+		}
 	}
 	return "", errors.New("create session failed")
 }
@@ -209,6 +252,7 @@ func (c *Client) getPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 	refreshed := false
 	lastFailureKind := FailureUnknown
 	lastFailureMessage := ""
+	lastFailureStatus := 0
 	for attempts < maxAttempts {
 		headers := c.authHeaders(a.DeepSeekToken)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreatePowURL, headers, map[string]any{"target_path": targetPath})
@@ -223,6 +267,10 @@ func (c *Client) getPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 			continue
 		}
 		code, bizCode, msg, bizMsg := extractResponseStatus(resp)
+		lastFailureStatus = 0
+		lastFailureMessage = failureMessage(msg, bizMsg, "get pow failed")
+		rateLimited := accountRateLimitError(status, code, bizCode, msg, bizMsg, "") != nil
+		rateLimitScope := rateLimitScopeFromResponse(status, code, bizCode, msg, bizMsg)
 		c.markAccountRateLimited(a, status, code, bizCode, msg, bizMsg, "")
 		if status == http.StatusOK && code == 0 && bizCode == 0 {
 			data, _ := resp["data"].(map[string]any)
@@ -244,10 +292,17 @@ func (c *Client) getPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 			}
 			return "", healthErr
 		}
-		config.Logger.Warn("[get_pow] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID, "target_path", targetPath)
-		lastFailureMessage = failureMessage(msg, bizMsg, "get pow failed")
-		if isTokenInvalid(status, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
+		config.Logger.Warn("[get_pow] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "rate_limit_scope", rateLimitScope, "use_config_token", a.UseConfigToken, "account", a.AccountID, "target_path", targetPath)
+		if rateLimited {
+			// A business-code rate limit may be wrapped in HTTP 200. Surface
+			// it as 429 so pinned-session callers rebuild on another account.
+			lastFailureStatus = http.StatusTooManyRequests
+			lastFailureKind = FailureUpstreamStatus
+		} else if isTokenInvalid(status, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
 			lastFailureKind = authFailureKind(a.UseConfigToken)
+		} else if status >= http.StatusBadRequest {
+			lastFailureStatus = status
+			lastFailureKind = FailureUpstreamStatus
 		} else {
 			lastFailureKind = FailureUnknown
 		}
@@ -258,16 +313,25 @@ func (c *Client) getPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 					continue
 				}
 			}
-			if allowAccountSwitch && c.Auth.SwitchAccount(ctx, a) {
+			if allowAccountSwitch && rateLimitScope != RateLimitScopeSessionCapacity && c.Auth.SwitchAccount(ctx, a) {
 				refreshed = false
-				attempts++
+				clients = c.requestClientsForAuth(ctx, a)
+				if !rateLimited {
+					attempts++
+				}
 				continue
 			}
 		}
 		attempts++
 	}
-	if lastFailureKind != FailureUnknown {
-		return "", &RequestFailure{Op: "get pow", Kind: lastFailureKind, Message: lastFailureMessage}
+	if lastFailureKind != FailureUnknown || lastFailureStatus > 0 {
+		return "", &RequestFailure{
+			Op:             "get pow",
+			Kind:           lastFailureKind,
+			StatusCode:     lastFailureStatus,
+			RateLimitScope: rateLimitScopeFromResponse(lastFailureStatus, 0, 0, lastFailureMessage, ""),
+			Message:        lastFailureMessage,
+		}
 	}
 	return "", errors.New("get pow failed")
 }

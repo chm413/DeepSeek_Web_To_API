@@ -30,6 +30,13 @@ func (c *Client) CallCompletionPinned(ctx context.Context, a *auth.RequestAuth, 
 	return c.callCompletion(ctx, a, payload, powResp, 1, false, true)
 }
 
+// CallCompletionRootPinned sends a root completion on the exact account that
+// created chat_session_id. It is separate from the incremental capability so
+// alternate/test callers can retain their ordinary root completion behavior.
+func (c *Client) CallCompletionRootPinned(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string) (*http.Response, error) {
+	return c.callCompletion(ctx, a, payload, powResp, 1, false, true)
+}
+
 // CallCompletionRaw returns the upstream completion stream without the
 // auto-continue pipe. Callers that deliberately interrupt generation need
 // Close on the returned body to reach the underlying HTTP stream immediately.
@@ -132,7 +139,7 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 			resp.Body = captureSession.WrapBody(resp.Body, resp.StatusCode)
 		}
 		lastErr = c.completionStatusFailure(a, resp)
-		config.Logger.Warn("[completion] upstream returned non-OK status", "account", accountIDForLog(a), "status", resp.StatusCode, "failure_kind", requestFailureKind(lastErr), "error", lastErr)
+		config.Logger.Warn("[completion] upstream returned non-OK status", "account", accountIDForLog(a), "status", resp.StatusCode, "failure_kind", requestFailureKind(lastErr), "rate_limit_scope", requestRateLimitScope(lastErr), "error", lastErr)
 		if resp.Body != nil {
 			if err := resp.Body.Close(); err != nil {
 				config.Logger.Warn("[completion] close upstream response body failed", "account", accountIDForLog(a), "status", resp.StatusCode, "error", err)
@@ -167,7 +174,7 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 		// client even when the operator's pool has dozens of idle
 		// accounts — the historical pain on /admin/metrics/overview's
 		// failure rate.
-		if allowAccountSwitch && resp.StatusCode == http.StatusTooManyRequests && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
+		if allowAccountSwitch && !IsSessionCapacityRateLimit(lastErr) && resp.StatusCode == http.StatusTooManyRequests && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
 			if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
 				config.Logger.Info("[completion] 429 fail-over to next account", "from", accountIDForLog(a), "tried", len(a.TriedAccounts))
 				continue
@@ -181,7 +188,7 @@ func (c *Client) callCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 		if attempts >= maxAttempts {
 			break
 		}
-		if allowAccountSwitch {
+		if allowAccountSwitch && !IsSessionCapacityRateLimit(lastErr) {
 			if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
 				continue
 			} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
@@ -439,11 +446,20 @@ func (c *Client) completionStatusFailure(a *auth.RequestAuth, resp *http.Respons
 			}
 		}
 	}
-	c.markAccountRateLimited(a, resp.StatusCode, code, bizCode, msg, bizMsg, resp.Header.Get("Retry-After"))
+	rateLimitScope := rateLimitScopeFromResponse(resp.StatusCode, code, bizCode, msg, bizMsg, message)
+	c.markAccountRateLimited(a, resp.StatusCode, code, bizCode, msg, bizMsg, resp.Header.Get("Retry-After"), message)
 	if isTokenInvalid(resp.StatusCode, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
 		kind = authFailureKind(a != nil && a.UseConfigToken)
 	}
-	return &RequestFailure{Op: "completion", Kind: kind, StatusCode: resp.StatusCode, Message: message}
+	return &RequestFailure{Op: "completion", Kind: kind, StatusCode: resp.StatusCode, RateLimitScope: rateLimitScope, Message: message}
+}
+
+func requestRateLimitScope(err error) RateLimitScope {
+	var failure *RequestFailure
+	if errors.As(err, &failure) {
+		return failure.RateLimitScope
+	}
+	return ""
 }
 
 func completionFailureRetryable(err error) bool {

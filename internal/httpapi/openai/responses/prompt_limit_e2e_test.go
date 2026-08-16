@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/upstreamsession"
 )
 
 type responsesAutoCompressConfigStub struct{ responsesHistoryConfigStub }
@@ -28,6 +30,28 @@ func (responsesAutoCompressConfigStub) PromptLimitSnapshot() config.PromptLimitS
 type responsesPromptLimitDSStub struct {
 	responsesIncrementalDSStub
 	limitCalls int
+}
+
+type responsesPinned429LimitConfigStub struct{ responsesHistoryConfigStub }
+
+func (responsesPinned429LimitConfigStub) RemoteFileUploadEnabled() bool { return false }
+
+func (responsesPinned429LimitConfigStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.Enabled = true
+	cfg.AutoCompressEnable = false
+	cfg.ProFlashCompressionEnable = false
+	cfg.SessionChunkingEnable = false
+	return cfg
+}
+
+type responsesPinned429LimitDSStub struct{ responsesPinned429DSStub }
+
+func (*responsesPinned429LimitDSStub) GetModelInputLimits(_ context.Context, a *auth.RequestAuth) (config.ModelInputLimits, error) {
+	if a.AccountID == "account-retry" {
+		return config.ModelInputLimits{Default: 1000, Expert: 1000}, nil
+	}
+	return config.ModelInputLimits{Default: 10000, Expert: 10000}, nil
 }
 
 type responsesSummaryConfigStub struct{ responsesHistoryConfigStub }
@@ -108,6 +132,44 @@ func TestResponsesExpertOverflowAutoCompressesBeforeUpstream(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "newest-marker") || !strings.Contains(prompt, "retain system instructions") {
 		t.Fatal("automatic compression dropped required recent or system content")
+	}
+}
+
+func TestResponsesPinned429FallbackRechecksReplacementAccountInputLimit(t *testing.T) {
+	authStub := &responsesSwitchingIncrementalAuthStub{}
+	ds := &responsesPinned429LimitDSStub{}
+	h := &Handler{
+		Store:       responsesPinned429LimitConfigStub{},
+		Auth:        authStub,
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+	firstText := strings.Repeat("retained context ", 300)
+	first := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": firstText,
+	})
+	firstOutput, _ := first["output"].([]any)
+	if len(firstOutput) == 0 {
+		t.Fatalf("missing first response output: %#v", first)
+	}
+	secondInput := []any{map[string]any{"role": "user", "content": firstText}}
+	secondInput = append(secondInput, firstOutput...)
+	secondInput = append(secondInput, map[string]any{"role": "user", "content": "small new request"})
+	body, _ := json.Marshal(map[string]any{"model": "deepseek-v4-flash", "input": secondInput})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	h.Responses(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("replacement account limit must reject the full replay, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if authStub.switches != 1 {
+		t.Fatalf("expected a switch after pinned 429, got %d", authStub.switches)
+	}
+	if len(ds.normalAccounts) != 1 {
+		t.Fatalf("oversized full replay was sent upstream: accounts=%#v", ds.normalAccounts)
 	}
 }
 

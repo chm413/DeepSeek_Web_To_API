@@ -56,6 +56,14 @@ func upstreamRequestErrorDetail(err error, op string) UpstreamErrorDetail {
 	}
 	var failure *dsclient.RequestFailure
 	if errors.As(err, &failure) {
+		if dsclient.IsSessionCapacityRateLimit(err) {
+			return UpstreamErrorDetail{
+				Status:       http.StatusRequestEntityTooLarge,
+				Message:      "Upstream conversation reached its context or turn capacity; the account remains available and this session should be rotated.",
+				Code:         "upstream_session_capacity",
+				FinishReason: "upstream_session_capacity",
+			}
+		}
 		switch failure.Kind {
 		case dsclient.FailureClientCancelled:
 			return UpstreamErrorDetail{
@@ -129,6 +137,13 @@ func upstreamRequestErrorDetail(err error, op string) UpstreamErrorDetail {
 		Code:         "upstream_request_failed",
 		FinishReason: "upstream_request_failed",
 	}
+}
+
+// IsSessionCapacityRateLimit distinguishes a conversation-specific upstream
+// 429 from an account-wide rate limit. The latter may move to another account;
+// the former must rotate or compress the current conversation instead.
+func IsSessionCapacityRateLimit(err error) bool {
+	return dsclient.IsSessionCapacityRateLimit(err)
 }
 
 func prefixUpstreamHTTPMessage(op string, status int, detail string) string {

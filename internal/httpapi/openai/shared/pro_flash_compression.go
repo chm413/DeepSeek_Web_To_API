@@ -78,11 +78,11 @@ func TryFlashCompressPrompt(ctx context.Context, ds ProFlashCompressionCaller, a
 		return req, false, fmt.Errorf("create Flash compression session: %w", err)
 	}
 	defer AutoDeleteRemoteSession(ctx, ds, autoDeleteMode, a.AccountID, a.DeepSeekToken, sessionID)
-	pow, err := ds.GetPow(ctx, a, 3)
+	pow, err := GetRootSessionPinnedPow(ctx, ds, a)
 	if err != nil {
 		return req, false, fmt.Errorf("get Flash compression PoW: %w", err)
 	}
-	resp, err := ds.CallCompletion(ctx, a, map[string]any{
+	resp, err := CallRootSessionPinnedCompletion(ctx, ds, a, map[string]any{
 		"chat_session_id":   sessionID,
 		"model_type":        "default",
 		"parent_message_id": nil,
@@ -90,7 +90,7 @@ func TryFlashCompressPrompt(ctx context.Context, ds ProFlashCompressionCaller, a
 		"ref_file_ids":      []any{},
 		"thinking_enabled":  false,
 		"search_enabled":    false,
-	}, pow, 3)
+	}, pow)
 	if err != nil {
 		return req, false, fmt.Errorf("flash compression completion: %w", err)
 	}

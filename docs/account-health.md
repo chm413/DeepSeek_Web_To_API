@@ -64,9 +64,16 @@ quarantine and returns the account to the pool.
 
 ## Signals that are not bans
 
-- HTTP 429 or an empty completion is a request/model rate-limit signal. It is
-  not sufficient to quarantine an account, especially for oversized Pro
-  prompts.
+- Ordinary HTTP 429 is a temporary account throughput/quota signal. It enters
+  a bounded cooldown and can route to another healthy managed account; it is
+  never a persistent disable by itself.
+- A 429 that explicitly says the current conversation reached its context or
+  turn/message capacity is a session-only signal. It keeps the account
+  available, rotates the conversation on the same account, and is exposed as
+  structured `413` / `upstream_session_capacity` if the rebuilt prompt still
+  cannot fit.
+- An empty completion is a request/model retry signal. It is not sufficient to
+  quarantine an account, especially for oversized Pro prompts.
 - HTTP 413 is a local or model-context limit and must be handled by prompt
   limiting/compression.
 - HTTP 403 from the local safety or IP policy is not an account ban.

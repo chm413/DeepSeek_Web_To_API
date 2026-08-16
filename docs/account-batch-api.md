@@ -9,9 +9,12 @@
 生产环境应通过 HTTPS 调用。接口层的凭据保护包括：
 
 - password 和 token 只进入配置存储，不出现在响应中。
-- 服务日志只记录提交、创建、更新、跳过和无效数量，不记录请求体、账号密码或 token。
+- `refresh_token` 不是该接口支持的字段；严格 JSON 校验会拒绝它，不会把其值映射、存储或回显为 token。
+- 服务日志只记录提交、创建、更新、跳过和无效数量，不记录请求体、账号密码、token 或 refresh token。
 - 响应包含 `Cache-Control: no-store` 和 `Pragma: no-cache`。
-- WebUI 文件上传不预览 JSON 原文，关闭弹窗或成功导入后清空浏览器内的文件数据引用。
+- WebUI 不预览 JSON 原文、password、token 或 refresh token；关闭弹窗或成功导入后会清空浏览器内的文件数据引用。
+
+上述保护限制了传输、日志和响应中的凭据暴露，不代表静态加密。生产部署仍应限制 `data/` 目录和账户存储文件的访问权限。
 
 ## 请求格式
 
@@ -59,6 +62,18 @@
 | `enabled` | boolean | 否 | false 表示导入后保持手动停用 |
 
 `update` 模式不会用空 password 或空 token 覆盖已有凭据；未提供 name、remark 或 proxy_id 时也会保留原值。每个条目独立校验，有效条目仍可写入，无效条目通过 results 返回原因。
+
+## WebUI 导入
+
+批量导入弹窗会在读取文件前检查 16 MiB 上限，解析后检查 `accounts` 不超过 5000 条，并在发送前再次检查最终 JSON 请求大小。这样可以在凭据文件离开浏览器前尽早阻止超限请求。
+
+弹窗中的“导入默认值”会保留 JSON 文件已有的 `defaults`，并可覆盖以下默认字段：
+
+- 默认启用状态：`defaults.enabled`。
+- 默认出口代理：`defaults.proxy_id`；选择直连会写入空字符串。
+- 默认自动路由：`defaults.proxy_auto_route`；全局自动路由未启用时不能在 WebUI 中新开此选项。
+
+这些默认值只影响条目未显式指定相同字段的部分；条目级 `enabled`、`proxy_id` 和 `proxy_auto_route` 保持优先。选择“使用文件值”不会改写 JSON 文件中的对应 `defaults` 字段。自动路由仍要求账号保存 password。
 
 ## 响应格式
 

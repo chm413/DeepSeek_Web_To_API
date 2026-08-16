@@ -57,6 +57,14 @@ type SessionChunkingPreparation struct {
 	ChunkCount          int
 	OriginalPromptUnits int
 	FinalWireUnits      int
+	// SessionCapacityRestarted bounds a final-turn recovery when upstream says
+	// this particular conversation has reached its turn or context ceiling.
+	// It is deliberately distinct from account-level 429 failover.
+	SessionCapacityRestarted bool
+	// PromptLimit is the effective account-scoped limit used while preparing
+	// this root branch. Root handlers retain it if the first fragment moved to
+	// another managed account before the session became pinned.
+	PromptLimit config.PromptLimitSettings
 }
 
 // TryPrepareSessionChunking preserves an oversized prompt verbatim by
@@ -192,6 +200,7 @@ func TryPrepareSessionChunking(ctx context.Context, ds any, a *auth.RequestAuth,
 		ChunkCount:          len(chunks),
 		OriginalPromptUnits: originalUnits,
 		FinalWireUnits:      finalWireUnits,
+		PromptLimit:         cfg,
 	}, nil
 }
 

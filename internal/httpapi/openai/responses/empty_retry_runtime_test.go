@@ -16,6 +16,21 @@ import (
 
 type responsesEmptyRetryAuthStub struct{}
 
+type responsesReadThenError struct {
+	data []byte
+	sent bool
+}
+
+func (r *responsesReadThenError) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.sent = true
+	return copy(p, r.data), io.ErrUnexpectedEOF
+}
+
+func (*responsesReadThenError) Close() error { return nil }
+
 func (responsesEmptyRetryAuthStub) Determine(_ *http.Request) (*auth.RequestAuth, error) {
 	return nil, nil
 }
@@ -116,6 +131,49 @@ func TestConsumeResponsesStreamAttemptMarksContextCancelledState(t *testing.T) {
 	}
 	if streamRuntime.finalErrorMessage == "" {
 		t.Fatalf("expected cancelled final error message to be preserved")
+	}
+}
+
+func TestConsumeResponsesStreamAttemptMarksUnexpectedEOFAsFailure(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rec := httptest.NewRecorder()
+	streamRuntime := newResponsesStreamRuntime(
+		rec,
+		http.NewResponseController(rec),
+		true,
+		"resp-unexpected-eof",
+		"deepseek-v4-flash",
+		"prompt",
+		false,
+		false,
+		true,
+		nil,
+		nil,
+		false,
+		false,
+		promptcompat.DefaultToolChoicePolicy(),
+		"",
+		nil,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: &responsesReadThenError{data: []byte(
+			"data: {\"response_message_id\":1}\n" +
+				"data: {\"p\":\"response/content\",\"v\":\"partial\"}\n",
+		)},
+	}
+
+	h := &Handler{}
+	terminalWritten, retryable := h.consumeResponsesStreamAttempt(req, resp, streamRuntime, "text", false, true, nil)
+	if !terminalWritten || retryable {
+		t.Fatalf("expected stream reader failure to terminate without retry, terminalWritten=%v retryable=%v", terminalWritten, retryable)
+	}
+	if !streamRuntime.failed || streamRuntime.finalErrorStatus != http.StatusBadGateway || streamRuntime.finalErrorCode != "upstream_stream_error" {
+		t.Fatalf("unexpected stream failure: failed=%v status=%d code=%q", streamRuntime.failed, streamRuntime.finalErrorStatus, streamRuntime.finalErrorCode)
+	}
+	if !strings.Contains(rec.Body.String(), "upstream_stream_error") {
+		t.Fatalf("stream error was not sent to the client: %q", rec.Body.String())
 	}
 }
 

@@ -22,16 +22,24 @@ func (s *claudeStreamRuntime) send(event string, v any) {
 }
 
 func (s *claudeStreamRuntime) sendError(message string) {
+	s.sendErrorWithCode(message, "internal_error")
+}
+
+func (s *claudeStreamRuntime) sendErrorWithCode(message, code string) {
 	msg := strings.TrimSpace(message)
 	if msg == "" {
 		msg = "upstream stream error"
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		code = "internal_error"
 	}
 	s.send("error", map[string]any{
 		"type": "error",
 		"error": map[string]any{
 			"type":    "api_error",
 			"message": msg,
-			"code":    "internal_error",
+			"code":    code,
 			"param":   nil,
 		},
 	})

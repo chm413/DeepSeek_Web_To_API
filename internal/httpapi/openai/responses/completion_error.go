@@ -15,11 +15,11 @@ func writeCompletionCallError(w http.ResponseWriter, historySession *historycapt
 
 func handleCreateSessionError(w http.ResponseWriter, historySession *historycapture.Session, a *auth.RequestAuth, err error) {
 	detail := shared.SessionErrorDetail(err)
-	if detail.Stopped || detail.Status == http.StatusGatewayTimeout {
+	if detail.Code != "authentication_failed" {
 		writeUpstreamCallError(w, historySession, detail, "", "")
 		return
 	}
-	if a.UseConfigToken {
+	if a != nil && a.UseConfigToken {
 		message := "Account token is invalid. Please re-login the account in admin."
 		if historySession != nil {
 			historySession.Error(http.StatusUnauthorized, message, "error", "", "")
@@ -27,7 +27,9 @@ func handleCreateSessionError(w http.ResponseWriter, historySession *historycapt
 		writeOpenAIError(w, http.StatusUnauthorized, message)
 		return
 	}
-	a.MarkDirectTokenInvalid()
+	if a != nil {
+		a.MarkDirectTokenInvalid()
+	}
 	message := "Invalid token. If this should be a DeepSeek_Web_To_API key, add it to config.keys first."
 	if historySession != nil {
 		historySession.Error(http.StatusUnauthorized, message, "error", "", "")
@@ -37,7 +39,7 @@ func handleCreateSessionError(w http.ResponseWriter, historySession *historycapt
 
 func handlePowError(w http.ResponseWriter, historySession *historycapture.Session, a *auth.RequestAuth, err error) {
 	detail := shared.PowErrorDetail(err)
-	if detail.Stopped || detail.Status == http.StatusGatewayTimeout {
+	if detail.Code != "authentication_failed" {
 		writeUpstreamCallError(w, historySession, detail, "", "")
 		return
 	}

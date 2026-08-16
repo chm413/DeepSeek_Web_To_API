@@ -150,7 +150,10 @@ func (c *Client) markAccountHealth(a *auth.RequestAuth, code, bizCode int, msg, 
 	return healthErr
 }
 
-func (c *Client) markAccountRateLimited(a *auth.RequestAuth, status, code, bizCode int, msg, bizMsg, retryAfter string) {
+func (c *Client) markAccountRateLimited(a *auth.RequestAuth, status, code, bizCode int, msg, bizMsg, retryAfter string, extraMessages ...string) {
+	if rateLimitScopeFromResponse(status, code, bizCode, msg, bizMsg, extraMessages...) == RateLimitScopeSessionCapacity {
+		return
+	}
 	healthErr := accountRateLimitError(status, code, bizCode, msg, bizMsg, retryAfter)
 	if healthErr == nil {
 		return
@@ -164,6 +167,42 @@ func (c *Client) markAccountRateLimited(a *auth.RequestAuth, status, code, bizCo
 		}
 	}
 	c.Auth.MarkAccountHealth(a.AccountID, healthErr)
+}
+
+func rateLimitScopeFromResponse(status, code, bizCode int, msg, bizMsg string, extraMessages ...string) RateLimitScope {
+	if isSessionCapacityRateLimit(status, code, bizCode, msg, bizMsg, extraMessages...) {
+		return RateLimitScopeSessionCapacity
+	}
+	if accountRateLimitError(status, code, bizCode, msg, bizMsg, "") != nil {
+		return RateLimitScopeAccount
+	}
+	return ""
+}
+
+func isSessionCapacityRateLimit(status, code, bizCode int, msg, bizMsg string, extraMessages ...string) bool {
+	if status != http.StatusTooManyRequests && code != http.StatusTooManyRequests && bizCode != http.StatusTooManyRequests {
+		return false
+	}
+	parts := []string{strings.TrimSpace(msg), strings.TrimSpace(bizMsg)}
+	parts = append(parts, extraMessages...)
+	message := normalizedAccountFailureMessage(strings.Join(parts, " "))
+	if message == "" {
+		return false
+	}
+	patterns := []string{
+		"conversation context", "conversation limit", "conversation turn", "conversation has reached",
+		"session context", "session limit", "session turn", "session has reached",
+		"maximum turns", "maximum messages", "too many messages", "context window",
+		"context length", "prompt is too long", "input is too long",
+		"会话上下文", "会话轮次", "会话达到上限", "会话已达到上限",
+		"对话上下文", "对话轮次", "对话达到上限", "上下文长度", "上下文超限",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(message, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) markAccountRateLimitedFromContext(ctx context.Context, status, code, bizCode int, msg, bizMsg, retryAfter string) {

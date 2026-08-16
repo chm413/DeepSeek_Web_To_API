@@ -48,7 +48,7 @@
 - Incremental upstream-session rollover remains a separate transport rule: it keeps the immediately preceding assistant result plus the current input and always resends the forced response-format prompt.
 - When a process-local Responses compaction handle has expired but the client supplies a fresh tail after that handle, the tail is treated as an explicit compact recovery request. It may be compacted even while ordinary `prompt_limit.auto_compress_enabled` remains disabled. Every recovered request rebuilds and budgets the actual incremental payload, including the forced response-format prompt, before it is sent upstream.
 - The pinned-session cache accepts a constrained sliding compact window only inside the exact caller/session/account/surface/variant scope. It must match the leading system prefix, at least one previous user message, and the complete latest assistant response. Rotation counts actual upstream calls rather than the number of replayed user messages in a recovered window.
-- Responses empty-output retries propagate the final switched account's replacement upstream session into the incremental branch. Subsequent turns therefore never combine one account with another account's `chat_session_id`; logs expose only fingerprints for this state.
+- Empty-output retries use fixed-account PoW and completion calls after a session exists. A managed-account retry creates a new root, clears the old `parent_message_id`, rechecks the replacement account's live input limit, and propagates that root into the incremental branch. If a pinned retry then receives an account-scoped 429, the old session is discarded and the full canonical prompt is rebuilt on a replacement root; an explicit per-conversation capacity 429 rebuilds on the same account. Subsequent turns therefore never combine one account with another account's `chat_session_id`; logs expose only fingerprints for this state.
 
 ## Live boundary and protocol notes
 
@@ -175,11 +175,14 @@ Every incremental completion sends both parts, in this order:
    never copied into the incremental prompt.
 
 The request uses the cached DeepSeek session and parent message ID through a
-pinned completion call. Account failover and empty-output account switching
-are disabled for that call, because changing account would invalidate the
-parent. If the pinned call fails, the lease is discarded and the same request
-falls back to the existing full-history path with a new session; the client
-does not receive a partial or protocol-invalid response.
+pinned completion call. The call itself never silently changes accounts,
+because doing so would invalidate the parent. If it fails with an account-wide
+429, temporary mute, invalid credential, or permanent ban, the lease is
+discarded and the full canonical history is replayed on a new root session for
+the replacement account. If the upstream explicitly reports a conversation
+context or turn-capacity 429, the account remains healthy: the lease is
+discarded and the full history is rebuilt on a new root session for the same
+account. The client never receives a cross-account parent/session pair.
 
 This is the practical 1M-context strategy: each new turn can be small while
 DeepSeek retains the accumulated history in its own session. It does **not**
@@ -187,6 +190,21 @@ raise the upstream model's single-request input ceiling, survive process
 restart, or make an edited/branched transcript reusable. Dynamic upstream
 input limits and the existing compact/CIF compression gates still apply to a
 full replay and to the incremental delta itself.
+
+### Upstream 429 classification
+
+The gateway distinguishes two rate-limit scopes. An ordinary HTTP/business
+429 is treated as account-wide throughput or time-window quota exhaustion:
+the account enters a bounded cooldown (respecting `Retry-After` when present)
+and the request may move to another healthy managed account. A 429 whose
+upstream text explicitly identifies a conversation context/window or maximum
+turn/message count is treated as `session_capacity`: it does not cool or
+disable the account, does not switch accounts, and instead rotates the
+upstream conversation once. If the rebuilt canonical prompt still cannot fit,
+the API returns structured `413` with code `upstream_session_capacity` rather
+than misreporting an account ban or a generic 401. Ambiguous 429 responses are
+conservatively account-scoped until an observed upstream message identifies a
+session limit.
 
 The operational `max_chars_*` names are retained for configuration
 compatibility, but their values are UTF-16 code-unit budgets, matching the

@@ -319,10 +319,12 @@ func (r *Resolver) recordAccountHealth(accountID string, err error) {
 		if r.Pool != nil {
 			r.Pool.MarkRateLimited(accountID, healthErr.Until, healthErr.Error())
 		}
+		config.Logger.Warn("[account_health] account entered rate-limit cooldown", "account", accountID, "state", healthErr.State, "code", healthErr.Code, "until", healthErr.Until)
 	case account.HealthTemporarilyMuted:
 		if r.Pool != nil {
 			r.Pool.MarkTemporaryMute(accountID, healthErr.Until, healthErr.Error())
 		}
+		config.Logger.Warn("[account_health] account marked temporarily muted", "account", accountID, "state", healthErr.State, "code", healthErr.Code, "until", healthErr.Until)
 	case account.HealthInvalidCredentials:
 		if r.Pool != nil {
 			r.Pool.MarkInvalidCredentials(accountID, healthErr.Error())

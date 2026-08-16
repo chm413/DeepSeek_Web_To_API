@@ -80,8 +80,11 @@ func (h *Handler) handleClaudeStreamRealtime(w http.ResponseWriter, r *http.Requ
 				historySession.Error(http.StatusBadGateway, streamRuntime.upstreamErr, "upstream_error", streamRuntime.thinking.String(), streamRuntime.text.String())
 				return
 			}
-			if scannerErr != nil {
-				historySession.Error(http.StatusBadGateway, scannerErr.Error(), "stream_error", streamRuntime.thinking.String(), streamRuntime.text.String())
+			if failure, failed := streamengine.ClassifyTerminalFailure(reason, scannerErr); failed {
+				config.Logger.Warn("[stream] upstream stream terminated abnormally",
+					"surface", "anthropic.messages", "stop_reason", reason,
+					"status", failure.Status, "code", failure.Code, "error", scannerErr)
+				historySession.Error(failure.Status, failure.Message, failure.Code, streamRuntime.thinking.String(), streamRuntime.text.String())
 				return
 			}
 			finalText := cleanVisibleOutput(streamRuntime.text.String(), streamRuntime.stripReferenceMarkers)

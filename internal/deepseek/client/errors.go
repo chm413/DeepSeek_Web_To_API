@@ -10,6 +10,15 @@ import (
 
 type FailureKind string
 
+// RateLimitScope distinguishes a whole-account cooldown from a single
+// conversation that has exhausted its upstream context or turn budget.
+type RateLimitScope string
+
+const (
+	RateLimitScopeAccount         RateLimitScope = "account"
+	RateLimitScopeSessionCapacity RateLimitScope = "session_capacity"
+)
+
 const (
 	FailureUnknown             FailureKind = ""
 	FailureDirectUnauthorized  FailureKind = "direct_unauthorized"
@@ -21,11 +30,12 @@ const (
 )
 
 type RequestFailure struct {
-	Op         string
-	Kind       FailureKind
-	Message    string
-	StatusCode int
-	Cause      error
+	Op             string
+	Kind           FailureKind
+	Message        string
+	StatusCode     int
+	RateLimitScope RateLimitScope
+	Cause          error
 }
 
 func (e *RequestFailure) Error() string {
@@ -81,6 +91,13 @@ func IsUpstreamTimeoutError(err error) bool {
 	}
 	var failure *RequestFailure
 	return errors.As(err, &failure) && failure.Kind == FailureUpstreamTimeout
+}
+
+// IsSessionCapacityRateLimit reports a 429 caused by one upstream
+// conversation's context or turn capacity, not account-wide throughput.
+func IsSessionCapacityRateLimit(err error) bool {
+	var failure *RequestFailure
+	return errors.As(err, &failure) && failure.RateLimitScope == RateLimitScopeSessionCapacity
 }
 
 func requestContextFailure(op string, ctx context.Context, cause error) *RequestFailure {

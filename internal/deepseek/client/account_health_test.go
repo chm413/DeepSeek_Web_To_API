@@ -90,6 +90,37 @@ func TestCompletion429MarksManagedAccountTemporarilyRateLimited(t *testing.T) {
 	}
 }
 
+func TestCompletionSessionCapacity429LeavesManagedAccountAvailable(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"accounts":[{"email":"capacity@example.com","token":"token-1"}]
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) { return acc.Token, nil })
+	client := &Client{Store: store, Auth: resolver}
+	acc, _ := store.FindAccount("capacity@example.com")
+	a := &auth.RequestAuth{UseConfigToken: true, AccountID: acc.Identifier(), Account: acc, DeepSeekToken: acc.Token}
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     make(http.Header),
+		// The upstream sometimes sends a raw JSON error rather than msg/biz_msg.
+		// The classifier must still avoid cooling a healthy account for a single
+		// exhausted conversation.
+		Body: io.NopCloser(strings.NewReader(`{"error":"maximum conversation turns reached"}`)),
+	}
+	err := client.completionStatusFailure(a, resp)
+	var failure *RequestFailure
+	if !errors.As(err, &failure) || failure.RateLimitScope != RateLimitScopeSessionCapacity {
+		t.Fatalf("expected a session-capacity 429, got %#v", err)
+	}
+	if health, ok := pool.AccountHealth(acc.Identifier()); ok && health.State == account.HealthRateLimited {
+		t.Fatalf("session capacity must not cool the account: %#v", health)
+	}
+	if updated, _ := store.FindAccount(acc.Identifier()); updated.Disabled {
+		t.Fatalf("session capacity must not disable the account: %#v", updated)
+	}
+}
+
 func TestCompletionBodyMarksSSEMuteWithoutChangingBytes(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
 		"keys":["managed-key"],

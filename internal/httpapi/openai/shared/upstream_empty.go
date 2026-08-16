@@ -7,12 +7,24 @@ import (
 
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/promptcompat"
 )
 
 const emptyOutputRetryAccountSwitchAttempts = 3
 
 type EmptyRetryAccountSwitcher interface {
 	SwitchAccount(ctx context.Context, a *auth.RequestAuth) bool
+}
+
+// EmptyOutputRetryCall is the result of sending a synthetic empty-output
+// retry. ReplayedRoot is true only when a pinned retry hit a recoverable
+// upstream failure and had to restart from the complete canonical prompt.
+type EmptyOutputRetryCall struct {
+	Response     *http.Response
+	Pow          string
+	SessionID    string
+	PromptLimit  config.PromptLimitSettings
+	ReplayedRoot bool
 }
 
 // ShouldWriteUpstreamEmptyOutputError returns true ONLY when the upstream
@@ -77,8 +89,11 @@ func PrepareEmptyOutputRetry(ctx context.Context, resolver any, ds DeepSeekCalle
 				config.Logger.Warn("[openai_empty_retry] retry account returned empty session", "surface", surface, "stream", stream, "retry_attempt", retryAttempt, "switch_attempt", switchAttempt)
 				continue
 			}
-			retryPow, powErr := ds.GetPow(ctx, a, 3)
+			sessionAccountID := strings.TrimSpace(a.AccountID)
+			sessionToken := strings.TrimSpace(a.DeepSeekToken)
+			retryPow, powErr := GetRootSessionPinnedPow(ctx, ds, a)
 			if powErr != nil {
+				AutoDeleteRemoteSession(ctx, ds, "single", sessionAccountID, sessionToken, sessionID)
 				config.Logger.Warn("[openai_empty_retry] retry account PoW fetch failed", "surface", surface, "stream", stream, "retry_attempt", retryAttempt, "switch_attempt", switchAttempt, "error", powErr)
 				continue
 			}
@@ -95,12 +110,162 @@ func PrepareEmptyOutputRetry(ctx context.Context, resolver any, ds DeepSeekCalle
 		}
 		config.Logger.Warn("[openai_empty_retry] no alternate managed account available; retrying current account", "surface", surface, "stream", stream, "retry_attempt", retryAttempt)
 	}
-	retryPow, powErr := ds.GetPow(ctx, a, 3)
+	// A non-incremental retry still owns an existing root session. Do not let
+	// the regular account-pooling PoW call silently select another account for
+	// that session.
+	retryPow, powErr := GetRootSessionPinnedPow(ctx, ds, a)
 	if powErr != nil {
 		config.Logger.Warn("[openai_empty_retry] retry PoW fetch failed, falling back to original PoW", "surface", surface, "stream", stream, "retry_attempt", retryAttempt, "error", powErr)
 		return originalPow, true
 	}
 	return retryPow, true
+}
+
+// CallEmptyOutputRetry keeps the synthetic retry on the account that owns its
+// session. When the retry is rate-limited, it uses the same safe root replay
+// as the initial request: abandon the old session, switch only when the error
+// is account-scoped, then rebuild the full canonical prompt on a fresh root.
+// This avoids combining a session from account A with PoW or completion
+// credentials from account B.
+func CallEmptyOutputRetry(ctx context.Context, ds any, resolver any, a *auth.RequestAuth, basePayload, retryPayload map[string]any, pow string, rootReq promptcompat.StandardRequest, promptLimit config.PromptLimitSettings, activeSessionID *string) (EmptyOutputRetryCall, error) {
+	result := EmptyOutputRetryCall{Pow: pow, PromptLimit: promptLimit}
+	sessionCapacityRetried := false
+	for {
+		if !IsPinnedCompletionPayload(retryPayload) {
+			// PrepareEmptyOutputRetry may have deliberately moved an empty
+			// response to a newly-created root on another account. Input
+			// ceilings are account-scoped, so validate the complete canonical
+			// prompt again before issuing that first request on the new root.
+			result.PromptLimit = refreshRootSessionPromptLimits(ctx, ds, a, rootReq, result.PromptLimit)
+			if limitErr := rootSessionLimitError(result.PromptLimit, rootReq); limitErr != nil {
+				// This can happen immediately after PrepareEmptyOutputRetry
+				// moves a root to an account with a lower live ceiling. The
+				// previous root has not accepted useful content, so discard it
+				// and rebuild the complete canonical prompt through the normal
+				// chunking path when that operator option is enabled.
+				if !result.PromptLimit.SessionChunkingEnable {
+					return result, limitErr
+				}
+				deleteAbandonedRootSession(ctx, ds, a.AccountID, a.DeepSeekToken, payloadSessionID(retryPayload))
+				if err := rebuildEmptyRetryChunkedRoot(ctx, ds, resolver, a, basePayload, retryPayload, rootReq, &result, activeSessionID); err != nil {
+					return result, err
+				}
+				continue
+			}
+		}
+		sessionID := strings.TrimSpace(payloadSessionID(retryPayload))
+		var (
+			resp *http.Response
+			err  error
+		)
+		// A synthetic retry of a full root has a child parent_message_id, but
+		// it is still owned by the root account and can use the root-pinned
+		// fallback for alternate callers. Only an already-incremental base
+		// requires the stricter incremental capability.
+		if IsPinnedCompletionPayload(basePayload) {
+			resp, err = CallPinnedCompletion(ctx, ds, a, retryPayload, result.Pow)
+		} else {
+			resp, err = CallRootSessionPinnedCompletion(ctx, ds, a, retryPayload, result.Pow)
+		}
+		if err == nil {
+			result.Response = resp
+			result.SessionID = sessionID
+			return result, nil
+		}
+
+		if IsSessionCapacityRateLimit(err) {
+			if sessionCapacityRetried {
+				return result, err
+			}
+			sessionCapacityRetried = true
+		}
+		nextCfg, restarted, restartErr := RestartRootSessionAfterPinnedFailure(ctx, ds, resolver, a, rootReq, result.PromptLimit, sessionID, err)
+		if !restarted {
+			return result, err
+		}
+		if restartErr != nil {
+			return result, restartErr
+		}
+		root, rootErr := PrepareRootSessionWithPinnedPow(ctx, ds, resolver, a, rootReq, nextCfg)
+		if rootErr != nil {
+			if _, limited := RootSessionPromptLimitMessage(rootErr); limited && nextCfg.SessionChunkingEnable {
+				result.PromptLimit = nextCfg
+				if err := rebuildEmptyRetryChunkedRoot(ctx, ds, resolver, a, basePayload, retryPayload, rootReq, &result, activeSessionID); err != nil {
+					return result, err
+				}
+				continue
+			}
+			return result, rootErr
+		}
+		result.Pow = root.Pow
+		result.PromptLimit = root.PromptLimit
+		result.ReplayedRoot = true
+		setEmptyRetryRootPayload(basePayload, rootReq.CompletionPayload(root.SessionID))
+		setEmptyRetryRootPayload(retryPayload, rootReq.CompletionPayload(root.SessionID))
+		if activeSessionID != nil {
+			*activeSessionID = root.SessionID
+		}
+		config.Logger.Warn("[openai_empty_retry] replaying complete root after pinned retry failure",
+			"surface", rootReq.Surface,
+			"model", rootReq.ResolvedModel,
+			"prompt_units", promptcompat.PromptUnits(rootReq.FinalPrompt),
+			"reason", CompletionErrorDetail(err).Code)
+	}
+}
+
+func rebuildEmptyRetryChunkedRoot(ctx context.Context, ds any, resolver any, a *auth.RequestAuth, basePayload, retryPayload map[string]any, rootReq promptcompat.StandardRequest, result *EmptyOutputRetryCall, activeSessionID *string) error {
+	if result == nil {
+		return &RootSessionPromptLimitError{}
+	}
+	prepared, err := TryPrepareRootSessionChunkingWithFailover(ctx, ds, resolver, a, rootReq, result.PromptLimit)
+	if err != nil {
+		return err
+	}
+	if prepared == nil {
+		return &RootSessionPromptLimitError{Message: "replacement account input limit still requires a chunked root"}
+	}
+	pow, err := GetPinnedPow(ctx, ds, a)
+	if err != nil {
+		return err
+	}
+	payload := rootReq.CompletionPayload(prepared.SessionID)
+	payload["prompt"] = prepared.FinalWirePrompt
+	payload["parent_message_id"] = prepared.ParentMessageID
+	setEmptyRetryRootPayload(basePayload, payload)
+	setEmptyRetryRootPayload(retryPayload, payload)
+	result.Pow = pow
+	result.PromptLimit = prepared.PromptLimit
+	result.ReplayedRoot = true
+	if activeSessionID != nil {
+		*activeSessionID = prepared.SessionID
+	}
+	config.Logger.Warn("[openai_empty_retry] rebuilt complete root with session chunks after account limit change",
+		"surface", rootReq.Surface,
+		"model", rootReq.ResolvedModel,
+		"prompt_units", promptcompat.PromptUnits(rootReq.FinalPrompt),
+		"chunk_count", prepared.ChunkCount,
+		"final_wire_units", prepared.FinalWireUnits)
+	return nil
+}
+
+func payloadSessionID(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload["chat_session_id"].(string)
+	return value
+}
+
+func setEmptyRetryRootPayload(target, source map[string]any) {
+	if target == nil {
+		return
+	}
+	for key := range target {
+		delete(target, key)
+	}
+	for key, value := range source {
+		target[key] = value
+	}
 }
 
 func setEmptyRetrySessionID(basePayload, retryPayload map[string]any, sessionID string) {
@@ -109,8 +274,10 @@ func setEmptyRetrySessionID(basePayload, retryPayload map[string]any, sessionID 
 	}
 	if basePayload != nil {
 		basePayload["chat_session_id"] = sessionID
+		basePayload["parent_message_id"] = nil
 	}
 	if retryPayload != nil {
 		retryPayload["chat_session_id"] = sessionID
+		retryPayload["parent_message_id"] = nil
 	}
 }

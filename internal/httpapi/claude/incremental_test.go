@@ -61,6 +61,10 @@ func (*claudeIncrementalDSStub) GetPow(_ context.Context, _ *auth.RequestAuth, _
 	return "pow", nil
 }
 
+func (*claudeIncrementalDSStub) GetPowPinned(_ context.Context, _ *auth.RequestAuth) (string, error) {
+	return "pow", nil
+}
+
 func (s *claudeIncrementalDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, payload map[string]any, _ string, _ int) (*http.Response, error) {
 	s.normal = append(s.normal, cloneClaudeIncrementalPayload(payload))
 	return claudeIncrementalSSE(501, "first answer"), nil
