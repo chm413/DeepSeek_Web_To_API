@@ -13,6 +13,27 @@ if [[ ! "${required_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 if ! command -v go >/dev/null 2>&1; then
+  # macOS images keep preinstalled Go in the hosted tool cache, and the
+  # Apple Silicon image may not add that directory to PATH for bash steps.
+  candidate_bins=(
+    "/usr/local/go/bin"
+    "/opt/homebrew/bin"
+    "/opt/homebrew/opt/go/libexec/bin"
+    "/usr/local/opt/go/libexec/bin"
+    "/Users/runner/hostedtoolcache/go"/*/*/bin
+  )
+  if [[ "${RUNNER_TOOL_CACHE:-}" == /* ]]; then
+    candidate_bins+=("${RUNNER_TOOL_CACHE}/go"/*/*/bin)
+  fi
+  for candidate_bin in "${candidate_bins[@]}"; do
+    if [[ -x "${candidate_bin}/go" ]]; then
+      export PATH="${candidate_bin}:${PATH}"
+      break
+    fi
+  done
+fi
+
+if ! command -v go >/dev/null 2>&1; then
   echo "The GitHub runner does not provide a bootstrap Go command." >&2
   exit 1
 fi
