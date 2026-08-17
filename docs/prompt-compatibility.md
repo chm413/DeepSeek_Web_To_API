@@ -90,6 +90,23 @@ text, and history snapshot remain unchanged. If both overflow switches are
 enabled, same-session chunking takes precedence and Flash summarization is not
 run.
 
+### Responses stream failure boundary
+
+The Responses handler does not commit `response.created` until it has a
+client-visible delta, tool item, compaction item, or successful completion. An
+upstream attempt that ends before that point with no deliverable output returns
+an ordinary JSON `429` with `upstream_empty_output`; a locally oversized expert
+request returns JSON `413` before any upstream session is created. This lets
+Codex surface the real request error instead of treating an already-open SSE
+connection as a generic stream disconnect.
+
+After a visible event has been written, HTTP status can no longer change. A
+real upstream scanner/read failure at that stage is emitted as
+`response.failed` with `upstream_stream_error`, while client cancellation does
+not attempt a trailing JSON response. Request logs record sizes, dynamic
+limits, trace IDs, and account fingerprints only; they do not write prompt
+content, credentials, or upstream response bodies.
+
 OpenAI Responses compaction is handled locally and conservatively.
 `previous_response_id` is reconstructed from a per-caller in-process input
 snapshot with the stored visible output appended. `POST /v1/responses/compact`

@@ -57,6 +57,7 @@ type responsesStreamRuntime struct {
 	messageAdded          bool
 	messagePartAdded      bool
 	sequence              int
+	started               bool
 	failed                bool
 	finalErrorStatus      int
 	finalErrorMessage     string
@@ -122,6 +123,12 @@ func (s *responsesStreamRuntime) failResponse(status int, message, code string) 
 	s.finalErrorStatus = status
 	s.finalErrorMessage = message
 	s.finalErrorCode = code
+	// Before the first deliverable upstream frame, the handler can still return
+	// a normal HTTP error. Do not turn a no-output upstream failure into a
+	// successful-looking SSE connection that Codex reports as a disconnect.
+	if !s.started {
+		return
+	}
 	failedResp := map[string]any{
 		"id":          s.responseID,
 		"type":        "response",
@@ -197,6 +204,7 @@ func (s *responsesStreamRuntime) finalize(finishReason string, deferEmptyOutput 
 		s.failResponse(status, message, code)
 		return true
 	}
+	s.start()
 	s.closeIncompleteFunctionItems()
 
 	obj := s.buildCompletedResponseObject(finalThinking, finalText, detected)

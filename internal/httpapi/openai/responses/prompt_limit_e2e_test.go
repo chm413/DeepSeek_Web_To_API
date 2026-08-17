@@ -27,6 +27,19 @@ func (responsesAutoCompressConfigStub) PromptLimitSnapshot() config.PromptLimitS
 	return cfg
 }
 
+type responsesRejectOverflowConfigStub struct{ responsesHistoryConfigStub }
+
+func (responsesRejectOverflowConfigStub) RemoteFileUploadEnabled() bool { return false }
+
+func (responsesRejectOverflowConfigStub) PromptLimitSnapshot() config.PromptLimitSettings {
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.Enabled = true
+	cfg.AutoCompressEnable = false
+	cfg.ProFlashCompressionEnable = false
+	cfg.SessionChunkingEnable = false
+	return cfg
+}
+
 type responsesPromptLimitDSStub struct {
 	responsesIncrementalDSStub
 	limitCalls int
@@ -132,6 +145,41 @@ func TestResponsesExpertOverflowAutoCompressesBeforeUpstream(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "newest-marker") || !strings.Contains(prompt, "retain system instructions") {
 		t.Fatal("automatic compression dropped required recent or system content")
+	}
+}
+
+// Regression for the historical Codex Responses failure: a ~215k UTF-16 Pro
+// prompt must fail locally before an upstream session or SSE response exists.
+func TestResponsesStreamExpertOverflowReturns413BeforeUpstream(t *testing.T) {
+	ds := &responsesPromptLimitDSStub{}
+	h := &Handler{
+		Store: responsesRejectOverflowConfigStub{},
+		Auth:  responsesIncrementalAuthStub{},
+		DS:    ds,
+	}
+	body, _ := json.Marshal(map[string]any{
+		"model":  "deepseek-v4-pro",
+		"input":  strings.Repeat("x", 215000),
+		"stream": true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	h.Responses(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected local 413 for oversized stream, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "event: response.") {
+		t.Fatalf("oversized request must not start an SSE response: %s", rec.Body.String())
+	}
+	if ds.createCalls != 0 || len(ds.normal) != 0 {
+		t.Fatalf("oversized request reached upstream: create=%d completion=%d", ds.createCalls, len(ds.normal))
+	}
+	out := decodeJSONBody(t, rec.Body.String())
+	errObj, _ := out["error"].(map[string]any)
+	if !strings.Contains(asString(errObj["message"]), "163840") {
+		t.Fatalf("expected provider limit in overflow error, got %#v", out)
 	}
 }
 

@@ -1,5 +1,20 @@
 # 更新日志
 
+## 2026-08-17 (1.1.8)
+
+修复 Codex Responses 流式请求在上游尚未产生任何可交付帧时被误显示为
+“stream disconnected”。网关现在延迟 `response.created`，直到真正有正文、
+推理、工具、压缩项或成功完成事件可发送；无输出的上游终止返回普通 JSON
+`429 upstream_empty_output`，本地输入超限返回 JSON `413`，不会先提交 SSE。
+已经发送可见事件后的真实上游读流失败仍严格返回
+`response.failed / upstream_stream_error`。新增请求大小、动态上游限额和失败
+阶段的持久化结构化日志支持：`DEEPSEEK_WEB_TO_API_LOG_FILE` 适用于 Windows
+脱离终端启动的二进制。
+
+订阅刷新增加跨订阅及手工节点的语义去重。相同有效出口配置只保留一条，
+且 URI 表示变化时保留原节点 ID 和账号绑定；刷新响应通过
+`skipped_duplicates` 报告被跳过的重复项，不会删除仍被账号引用的节点。
+
 ## 2026-08-16 (1.1.5)
 
 Fixed the Responses incremental chain when Current Input File (CIF) is enabled.

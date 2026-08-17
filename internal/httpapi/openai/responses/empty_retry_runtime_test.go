@@ -132,6 +132,9 @@ func TestConsumeResponsesStreamAttemptMarksContextCancelledState(t *testing.T) {
 	if streamRuntime.finalErrorMessage == "" {
 		t.Fatalf("expected cancelled final error message to be preserved")
 	}
+	if writeUnstartedResponsesStreamError(rec, streamRuntime) {
+		t.Fatal("client-cancelled streams must not write a trailing HTTP error")
+	}
 }
 
 func TestConsumeResponsesStreamAttemptMarksUnexpectedEOFAsFailure(t *testing.T) {
@@ -172,8 +175,14 @@ func TestConsumeResponsesStreamAttemptMarksUnexpectedEOFAsFailure(t *testing.T) 
 	if !streamRuntime.failed || streamRuntime.finalErrorStatus != http.StatusBadGateway || streamRuntime.finalErrorCode != "upstream_stream_error" {
 		t.Fatalf("unexpected stream failure: failed=%v status=%d code=%q", streamRuntime.failed, streamRuntime.finalErrorStatus, streamRuntime.finalErrorCode)
 	}
-	if !strings.Contains(rec.Body.String(), "upstream_stream_error") {
-		t.Fatalf("stream error was not sent to the client: %q", rec.Body.String())
+	if !streamRuntime.hasStarted() {
+		t.Fatal("partial upstream content must start the SSE response")
+	}
+	if writeUnstartedResponsesStreamError(rec, streamRuntime) {
+		t.Fatal("started streams must not append an HTTP error after SSE data")
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "event: response.failed") || !strings.Contains(rec.Body.String(), "upstream_stream_error") {
+		t.Fatalf("partial stream failure was not sent as response.failed: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
 

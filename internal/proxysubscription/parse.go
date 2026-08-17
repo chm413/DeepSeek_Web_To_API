@@ -81,6 +81,81 @@ func Parse(body []byte, subscriptionID string) (Result, error) {
 	return result, nil
 }
 
+// SemanticKey returns a stable key for the effective proxy configuration.
+// It intentionally ignores display names and subscription ownership, so a
+// node imported from multiple subscriptions (or added manually) is only kept
+// once by the subscription refresh service. The returned digest is suitable
+// for in-memory comparisons only and must not be exposed because its source
+// configuration can contain credentials.
+func SemanticKey(proxy config.Proxy) (string, error) {
+	proxy = config.NormalizeProxy(proxy)
+	proxyType := proxyuri.NormalizeType(proxy.Type)
+
+	var identity any
+	switch {
+	case proxyuri.IsCoreType(proxyType):
+		node, err := proxyuri.Parse(proxyType, proxy.URI)
+		if err != nil {
+			return "", err
+		}
+		normalizeOutboundIdentity(node.Outbound)
+		identity = struct {
+			Type     string         `json:"type"`
+			Outbound map[string]any `json:"outbound"`
+		}{
+			Type:     proxyType,
+			Outbound: node.Outbound,
+		}
+	case proxyType == "socks5" || proxyType == "socks5h":
+		identity = struct {
+			Type     string `json:"type"`
+			Host     string `json:"host"`
+			Port     int    `json:"port"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}{
+			Type:     proxyType,
+			Host:     strings.ToLower(strings.TrimSpace(proxy.Host)),
+			Port:     proxy.Port,
+			Username: proxy.Username,
+			Password: proxy.Password,
+		}
+	default:
+		return "", fmt.Errorf("unsupported proxy type %q", proxyType)
+	}
+
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("encode proxy identity: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("proxy_%x", sum[:16]), nil
+}
+
+func normalizeOutboundIdentity(outbound map[string]any) {
+	settings, _ := outbound["settings"].(map[string]any)
+	normalizeIdentityAddress(settings, "address")
+
+	stream, _ := outbound["streamSettings"].(map[string]any)
+	for _, section := range []string{"tlsSettings", "realitySettings"} {
+		values, _ := stream[section].(map[string]any)
+		normalizeIdentityAddress(values, "serverName")
+	}
+	for _, section := range []string{"xhttpSettings", "httpupgradeSettings"} {
+		values, _ := stream[section].(map[string]any)
+		normalizeIdentityAddress(values, "host")
+	}
+	ws, _ := stream["wsSettings"].(map[string]any)
+	headers, _ := ws["headers"].(map[string]any)
+	normalizeIdentityAddress(headers, "Host")
+}
+
+func normalizeIdentityAddress(values map[string]any, key string) {
+	if value, ok := values[key].(string); ok {
+		values[key] = strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
 func proxyFromURI(subscriptionID, raw string) (config.Proxy, error) {
 	raw = strings.TrimSpace(raw)
 	scheme := ""

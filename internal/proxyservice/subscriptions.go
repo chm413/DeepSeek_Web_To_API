@@ -18,14 +18,15 @@ type Store interface {
 }
 
 type SubscriptionRefreshResult struct {
-	SubscriptionID string   `json:"subscription_id"`
-	NodeCount      int      `json:"node_count"`
-	Added          int      `json:"added"`
-	Updated        int      `json:"updated"`
-	Removed        int      `json:"removed"`
-	Disabled       int      `json:"disabled"`
-	Invalid        int      `json:"invalid"`
-	Warnings       []string `json:"warnings,omitempty"`
+	SubscriptionID    string   `json:"subscription_id"`
+	NodeCount         int      `json:"node_count"`
+	Added             int      `json:"added"`
+	Updated           int      `json:"updated"`
+	Removed           int      `json:"removed"`
+	Disabled          int      `json:"disabled"`
+	SkippedDuplicates int      `json:"skipped_duplicates"`
+	Invalid           int      `json:"invalid"`
+	Warnings          []string `json:"warnings,omitempty"`
 }
 
 func RefreshSubscription(ctx context.Context, store Store, subscriptionID string) (SubscriptionRefreshResult, error) {
@@ -61,21 +62,49 @@ func RefreshSubscription(ctx context.Context, store Store, subscriptionID string
 			return errors.New("proxy subscription not found")
 		}
 		existing := make(map[string]config.Proxy)
+		existingBySemanticKey := make(map[string]config.Proxy)
+		configuredSemanticKeys := make(map[string]struct{})
 		assigned := make(map[string]bool)
 		for _, account := range cfg.Accounts {
 			assigned[strings.TrimSpace(account.ProxyID)] = true
 		}
-		for _, proxy := range cfg.Proxies {
-			proxy = config.NormalizeProxy(proxy)
+		for _, configured := range cfg.Proxies {
+			proxy := config.NormalizeProxy(configured)
+			if semanticKey, semanticErr := proxysubscription.SemanticKey(proxy); semanticErr == nil {
+				configuredSemanticKeys[semanticKey] = struct{}{}
+				if proxy.SubscriptionID == subscriptionID {
+					existingBySemanticKey[semanticKey] = proxy
+				}
+			}
 			if proxy.SubscriptionID == subscriptionID {
 				existing[proxy.ID] = proxy
 			}
 		}
 		incomingIDs := make(map[string]struct{}, len(parsed.Proxies))
+		updatedNodeIDs := make(map[string]struct{}, len(parsed.Proxies))
 		updatedNodes := make([]config.Proxy, 0, len(parsed.Proxies))
 		for _, proxy := range parsed.Proxies {
 			incomingIDs[proxy.ID] = struct{}{}
-			if previous, exists := existing[proxy.ID]; exists {
+			previous, exists := existing[proxy.ID]
+			if !exists {
+				semanticKey, semanticErr := proxysubscription.SemanticKey(proxy)
+				if semanticErr == nil {
+					if semanticPrevious, semanticExists := existingBySemanticKey[semanticKey]; semanticExists {
+						// Keep the prior ID so assigned accounts remain attached when a
+						// semantically identical node has a different URI representation.
+						proxy.ID = semanticPrevious.ID
+						incomingIDs[proxy.ID] = struct{}{}
+						previous = semanticPrevious
+						exists = true
+					} else if _, duplicate := configuredSemanticKeys[semanticKey]; duplicate {
+						result.SkippedDuplicates++
+						continue
+					} else {
+						configuredSemanticKeys[semanticKey] = struct{}{}
+					}
+				}
+			}
+			if exists {
 				proxy.Disabled = previous.Disabled
 				proxy.DisabledReason = previous.DisabledReason
 				proxy.DisabledAtUnix = previous.DisabledAtUnix
@@ -93,28 +122,44 @@ func RefreshSubscription(ctx context.Context, store Store, subscriptionID string
 					proxy.DisabledReason = ""
 					proxy.DisabledAtUnix = 0
 				}
+			}
+			if _, alreadyIncluded := updatedNodeIDs[proxy.ID]; alreadyIncluded {
+				result.SkippedDuplicates++
+				continue
+			}
+			updatedNodeIDs[proxy.ID] = struct{}{}
+			if exists {
 				result.Updated++
 			} else {
 				result.Added++
 			}
 			updatedNodes = append(updatedNodes, proxy)
 		}
+		if result.SkippedDuplicates > 0 {
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"skipped %d node(s) already present in another subscription or manual proxy configuration",
+				result.SkippedDuplicates,
+			))
+		}
 
 		kept := make([]config.Proxy, 0, len(cfg.Proxies)+len(updatedNodes))
-		for _, proxy := range cfg.Proxies {
-			proxy = config.NormalizeProxy(proxy)
+		for _, configured := range cfg.Proxies {
+			proxy := config.NormalizeProxy(configured)
 			if proxy.SubscriptionID != subscriptionID {
-				kept = append(kept, proxy)
+				// Never rewrite manually managed or other-subscription nodes while
+				// refreshing this subscription. In particular, an assigned node that
+				// matches an incoming semantic key remains authoritative.
+				kept = append(kept, configured)
 				continue
 			}
 			if _, exists := incomingIDs[proxy.ID]; exists {
 				continue
 			}
 			if assigned[proxy.ID] {
-				proxy.Disabled = true
-				proxy.DisabledReason = config.ProxyDisabledSubscriptionRemoved
-				proxy.DisabledAtUnix = now
-				kept = append(kept, proxy)
+				configured.Disabled = true
+				configured.DisabledReason = config.ProxyDisabledSubscriptionRemoved
+				configured.DisabledAtUnix = now
+				kept = append(kept, configured)
 				result.Disabled++
 			} else {
 				result.Removed++

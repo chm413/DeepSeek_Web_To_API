@@ -843,7 +843,6 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 		},
 	)
 	streamRuntime.refFileTokens = refFileTokens
-	streamRuntime.sendCreated()
 
 	streamengine.ConsumeSSE(streamengine.ConsumeConfig{
 		Context:             r.Context(),
@@ -870,6 +869,7 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 			streamRuntime.finalize("stop", false)
 		},
 	})
+	writeUnstartedResponsesStreamError(w, streamRuntime)
 }
 
 func logResponsesToolPolicyRejection(traceID string, policy promptcompat.ToolChoicePolicy, parsed toolcall.ToolCallParseResult, channel string) {

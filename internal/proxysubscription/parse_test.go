@@ -3,6 +3,8 @@ package proxysubscription
 import (
 	"encoding/base64"
 	"testing"
+
+	"DeepSeek_Web_To_API/internal/config"
 )
 
 const testVLESS = "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com#VLESS"
@@ -41,6 +43,29 @@ func TestParseKeepsStableNodeIDWhenDisplayNameChanges(t *testing.T) {
 	}
 	if first.Proxies[0].ID != second.Proxies[0].ID {
 		t.Fatalf("display name or query order changed stable id: %s != %s", first.Proxies[0].ID, second.Proxies[0].ID)
+	}
+}
+
+func TestSemanticKeyIgnoresSubscriptionAndDisplayName(t *testing.T) {
+	first, err := Parse([]byte("vless://11111111-1111-1111-1111-111111111111@EXAMPLE.com:443?encryption=none&security=tls&sni=EXAMPLE.com#First"), "sub-a")
+	if err != nil {
+		t.Fatalf("parse first node: %v", err)
+	}
+	second := config.Proxy{
+		ID:   "manual-node",
+		Type: "vless",
+		URI:  "vless://11111111-1111-1111-1111-111111111111@example.COM:443?security=tls&encryption=none&sni=example.COM#Manual",
+	}
+	firstKey, err := SemanticKey(first.Proxies[0])
+	if err != nil {
+		t.Fatalf("key first node: %v", err)
+	}
+	secondKey, err := SemanticKey(second)
+	if err != nil {
+		t.Fatalf("key second node: %v", err)
+	}
+	if firstKey != secondKey {
+		t.Fatalf("equivalent nodes got different semantic keys: %s != %s", firstKey, secondKey)
 	}
 }
 

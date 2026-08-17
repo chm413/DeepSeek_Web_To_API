@@ -34,7 +34,23 @@ func (s *responsesStreamRuntime) sendEvent(event string, payload map[string]any)
 }
 
 func (s *responsesStreamRuntime) sendCreated() {
+	s.start()
+}
+
+// start commits the Responses stream only after there is a deliverable output
+// event. An upstream stream that ends with no content can then be surfaced as
+// an ordinary HTTP error instead of a response.failed SSE terminal event.
+func (s *responsesStreamRuntime) start() {
+	if s == nil || s.started {
+		return
+	}
+	s.started = true
 	s.sendEvent("response.created", openaifmt.BuildResponsesCreatedPayload(s.responseID, s.model))
+	s.emitOutputPrefix()
+}
+
+func (s *responsesStreamRuntime) hasStarted() bool {
+	return s != nil && s.started
 }
 
 func (s *responsesStreamRuntime) emitOutputPrefix() {

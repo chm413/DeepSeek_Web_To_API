@@ -274,6 +274,33 @@ func TestHandleResponsesStreamFailsWhenUpstreamHasOnlyThinking(t *testing.T) {
 	}
 }
 
+func TestHandleResponsesStreamReturns429BeforeFirstFrameOnEmptyOutput(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rec := httptest.NewRecorder()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("data: [DONE]\\n")),
+	}
+
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_empty", "deepseek-v4-pro", "prompt", 0, true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "trace-empty")
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected pre-stream 429, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "event: response.") {
+		t.Fatalf("empty upstream output must not start an SSE response: %s", rec.Body.String())
+	}
+	out := decodeJSONBody(t, rec.Body.String())
+	errObj, _ := out["error"].(map[string]any)
+	if asString(errObj["code"]) != "upstream_empty_output" {
+		t.Fatalf("expected code=upstream_empty_output, got %#v", out)
+	}
+	if !strings.Contains(asString(errObj["message"]), "no output") {
+		t.Fatalf("error must explain empty upstream output, got %#v", out)
+	}
+}
+
 func TestHandleResponsesStreamPromotesThinkingToolCallsOnFinalizeWithoutMidstreamIntercept(t *testing.T) {
 	h := &Handler{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)

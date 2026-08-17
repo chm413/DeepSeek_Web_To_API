@@ -208,6 +208,7 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 			recordResponsesStreamHistory(streamRuntime, historySession)
 			logResponsesStreamTerminal(streamRuntime, attempts)
 			if streamRuntime.failed || streamRuntime.finalErrorMessage != "" {
+				writeUnstartedResponsesStreamError(w, streamRuntime)
 				return responsesCompletionOutcome{}
 			}
 			outcome := responsesOutcomeFromBody(streamRuntime.completedObject, streamRuntime.responseMessageID)
@@ -219,6 +220,7 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 			streamRuntime.finalize("stop", false)
 			recordResponsesStreamHistory(streamRuntime, historySession)
 			config.Logger.Info("[openai_empty_retry] terminal empty output", "surface", "responses", "stream", true, "retry_attempts", attempts, "success_source", "none", "error_code", streamRuntime.finalErrorCode)
+			writeUnstartedResponsesStreamError(w, streamRuntime)
 			return responsesCompletionOutcome{}
 		}
 		attempts++
@@ -229,6 +231,7 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 			streamRuntime.finalize("stop", false)
 			recordResponsesStreamHistory(streamRuntime, historySession)
 			config.Logger.Info("[openai_empty_retry] terminal empty output", "surface", "responses", "stream", true, "retry_attempts", attempts, "success_source", "none", "error_code", streamRuntime.finalErrorCode)
+			writeUnstartedResponsesStreamError(w, streamRuntime)
 			return responsesCompletionOutcome{}
 		}
 		retryCall, err := shared.CallEmptyOutputRetry(r.Context(), h.DS, h.Auth, a, payload, retryPayload, retryPow, rootReq, promptLimit, activeSessionID)
@@ -236,10 +239,12 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 			if message, limited := shared.RootSessionPromptLimitMessage(err); limited {
 				streamRuntime.failResponse(http.StatusRequestEntityTooLarge, message, "prompt_too_large")
 				recordResponsesStreamHistory(streamRuntime, historySession)
+				writeUnstartedResponsesStreamError(w, streamRuntime)
 				return responsesCompletionOutcome{}
 			}
 			failResponsesStreamCompletionError(streamRuntime, historySession, err)
 			config.Logger.Warn("[openai_empty_retry] retry request failed", "surface", "responses", "stream", true, "retry_attempt", attempts, "error", err)
+			writeUnstartedResponsesStreamError(w, streamRuntime)
 			return responsesCompletionOutcome{}
 		}
 		pow = retryCall.Pow
@@ -253,6 +258,7 @@ func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.
 			body, _ := io.ReadAll(retryCall.Response.Body)
 			streamRuntime.failResponse(retryCall.Response.StatusCode, strings.TrimSpace(string(body)), "error")
 			recordResponsesStreamHistory(streamRuntime, historySession)
+			writeUnstartedResponsesStreamError(w, streamRuntime)
 			return responsesCompletionOutcome{}
 		}
 		streamRuntime.finalPrompt = usagePromptWithEmptyOutputRetry(streamRuntime.finalPrompt, attempts)
@@ -295,8 +301,9 @@ func (h *Handler) prepareResponsesStreamRuntime(w http.ResponseWriter, resp *htt
 	)
 	streamRuntime.refFileTokens = refFileTokens
 	streamRuntime.outputPrefix = cloneAnySlice(outputPrefix)
-	streamRuntime.sendCreated()
-	streamRuntime.emitOutputPrefix()
+	if len(streamRuntime.outputPrefix) > 0 {
+		streamRuntime.start()
+	}
 	return streamRuntime, initialType, true
 }
 

@@ -27,6 +27,7 @@ func (b *responsesDeltaBatch) flush() {
 	if b.kind == "" || b.text.Len() == 0 {
 		return
 	}
+	b.runtime.start()
 	text := b.text.String()
 	switch b.kind {
 	case "reasoning":

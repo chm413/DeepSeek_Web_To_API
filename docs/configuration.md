@@ -251,6 +251,12 @@ DEEPSEEK_WEB_TO_API_CONFIG_PATH=data/config.json
 
 也支持 `base64:<value>` 兼容形式（管理台导出的 base64 字符串可直接粘贴）。`config.example.json` 是 `.env.example` 中 CONFIG_JSON 的展开版，二者字段集合**逐字段等价**（自动校验脚本：`python3 -c "import json,re;..."`）。
 
+Windows 等以脱离终端方式启动二进制的环境可设置
+`DEEPSEEK_WEB_TO_API_LOG_FILE=logs/ds2api.log`。服务会以追加方式把结构化
+运行日志直接写到该文件，不依赖 launcher 的 stdout/stderr 重定向。日志保留
+trace ID、请求大小、动态输入上限和状态分类，不记录 API Key、账号密码、Token、
+提示词正文或上游响应正文。
+
 **章节来源**
 - [config.example.json](file://config.example.json)
 - [internal/config/store_runtime_accessors.go](file://internal/config/store_runtime_accessors.go)

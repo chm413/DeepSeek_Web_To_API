@@ -4,8 +4,10 @@ import (
 	"net/http"
 
 	"DeepSeek_Web_To_API/internal/auth"
+	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/httpapi/historycapture"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
+	streamengine "DeepSeek_Web_To_API/internal/stream"
 )
 
 func writeCompletionCallError(w http.ResponseWriter, historySession *historycapture.Session, err error, thinking, content string) {
@@ -74,4 +76,27 @@ func failResponsesStreamCompletionError(streamRuntime *responsesStreamRuntime, h
 	}
 	streamRuntime.failResponse(detail.Status, detail.Message, detail.Code)
 	recordResponsesStreamHistory(streamRuntime, historySession)
+}
+
+// writeUnstartedResponsesStreamError preserves an HTTP error when the upstream
+// produced no deliverable stream event. Once a stream has started, the
+// Responses protocol requires response.failed instead because its HTTP status
+// is already committed.
+func writeUnstartedResponsesStreamError(w http.ResponseWriter, streamRuntime *responsesStreamRuntime) bool {
+	if streamRuntime == nil || streamRuntime.hasStarted() || streamRuntime.finalErrorMessage == "" {
+		return false
+	}
+	if streamRuntime.finalErrorCode == string(streamengine.StopReasonContextCancelled) {
+		return false
+	}
+	status := streamRuntime.finalErrorStatus
+	if status < http.StatusBadRequest {
+		status = http.StatusBadGateway
+	}
+	config.Logger.Warn("[responses_stream] returning pre-stream upstream failure as HTTP error",
+		"trace_id", streamRuntime.traceID,
+		"status", status,
+		"code", streamRuntime.finalErrorCode)
+	writeOpenAIErrorWithCode(w, status, streamRuntime.finalErrorMessage, streamRuntime.finalErrorCode)
+	return true
 }

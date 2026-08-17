@@ -37,6 +37,7 @@ func (s *responsesStreamRuntime) ensureMessageItemAdded() {
 	if s.messageAdded {
 		return
 	}
+	s.start()
 	itemID := s.ensureMessageItemID()
 	item := map[string]any{
 		"id":     itemID,
@@ -183,6 +184,7 @@ func (s *responsesStreamRuntime) ensureFunctionItemAdded(callIndex int, name str
 	if fnName == "" {
 		return
 	}
+	s.start()
 	outputIndex := s.ensureFunctionOutputIndex(callIndex)
 	itemID := s.ensureFunctionItemID(callIndex)
 	callID := s.ensureToolCallID(callIndex)
