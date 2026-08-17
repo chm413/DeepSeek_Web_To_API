@@ -6,6 +6,7 @@
 - [.github/workflows/quality-gates.yml](file://.github/workflows/quality-gates.yml)
 - [.github/workflows/release-artifacts.yml](file://.github/workflows/release-artifacts.yml)
 - [scripts/lint.sh](file://scripts/lint.sh)
+- [scripts/ci/select-go-toolchain.sh](file://scripts/ci/select-go-toolchain.sh)
 - [tests/scripts/run-unit-all.sh](file://tests/scripts/run-unit-all.sh)
 - [tests/scripts/run-unit-go.sh](file://tests/scripts/run-unit-go.sh)
 - [tests/scripts/check-refactor-line-gate.sh](file://tests/scripts/check-refactor-line-gate.sh)
@@ -92,7 +93,8 @@ REL_BUILD --> REL_UPLOAD
 - `run-unit-all.sh`：串行运行 `tests/scripts/run-unit-go.sh`（`go test ./...`）和 `tests/scripts/run-unit-node.sh`。
 - `run-unit-go.sh`：执行 `go test ./...`（支持传参，本地可追加 `-race -count=1`）。
 - `npm run build --prefix webui`：验证管理台可生产构建。
-- `quality-gates.yml`：在 push/PR 上运行 lint（ubuntu）、Go 单测（macOS + Windows 双平台）、完整单测套件（ubuntu）、WebUI build，以及 dev/main push 时的跨平台构建。Go 版本：`1.26.x`；Node 版本：`24`；golangci-lint 版本：`v2.11.4`。
+- `scripts/ci/select-go-toolchain.sh`：优先使用 Runner 已安装的 Go；版本不匹配时通过 Go 内置工具链下载器选择精确的官方 Go 版本。它不依赖 `actions/setup-go`，避免 GitHub Action 下载限流阻断门禁。
+- `quality-gates.yml`：在 push/PR 上运行 lint（ubuntu）、Go 单测（macOS + Windows 双平台）、完整单测套件（ubuntu）、WebUI build，以及 dev/main push 时的跨平台构建。Go 版本：`1.26.0`；Node 版本：`24`；golangci-lint 版本：`v2.11.4`。
 - `release-artifacts.yml`：推送版本 tag、发布 GitHub Release 或手动触发时，先执行"Release Blocking Gates"（lint + refactor + run-unit-all），再构建压缩包、Docker 镜像和 checksum。构建时通过 `BUILD_VERSION` 环境变量注入版本字符串（与 `scripts/deploy_107.py` 使用相同的 `-X` ldflags 机制）。
 
 **章节来源**
