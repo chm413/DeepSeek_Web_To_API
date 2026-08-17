@@ -147,7 +147,7 @@ sequenceDiagram
 | 设置 | 运行时限流、兼容性、缓存、**安全策略（含 auto_ban）**、别名、模型 | `PUT /admin/settings` |
 | Dev Capture | 原始上游 payload 抽样（调试用） | `devcapture/*` |
 | 导入/导出 | 配置 JSON 全量导入导出 | `configmgmt/*` |
-| 版本检测 | 当前版本 vs GitHub latest release | `GET /admin/version` |
+| 应用更新 | 服务端版本、Release 状态、校验下载、应用与回滚 | `GET/POST/PUT /admin/updates*` |
 
 页面文案支持中英文，翻译资源在 `webui/src/locales`。
 
@@ -228,9 +228,11 @@ v1.0.7 修复：移除了之前 path-policy 中硬编码 TTL 覆盖逻辑（该�
 - [internal/httpapi/admin/metrics/handler.go](file://internal/httpapi/admin/metrics/handler.go)
 - [internal/chathistory/metrics.go](file://internal/chathistory/metrics.go)
 
-### 新版本检测
+### 应用更新
 
-`DashboardShell` 启动后通过 `/admin/version` 读取当前版本，再每 30 秒请求 GitHub API 的 latest release。若仓库还没有 Release，则回退读取最新 tag。前端用语义化版本比较确认远端版本大于当前版本后，在侧边栏版本卡片显示"发现新版本"，并通过 toast 提醒一次；点击提示会打开 GitHub Releases 页面。临时网络错误或 GitHub 限流不会清空已经发现的更新提示，下一次成功轮询会自动修正状态。`/admin/version` 本身不主动拉取远端，只返回当前编译版本和 `update_policy=self_managed`。
+`DashboardShell` 通过认证后的 `/admin/updates` 读取服务端版本状态，侧边栏只在服务端确认存在更新时提示。设置页可保存自动检查、自动下载和自动应用策略，并提供手动检查、校验下载、应用和回滚操作。浏览器不再直接请求 GitHub，因而不会让多个管理员页面分别消耗 GitHub API 配额。
+
+安装能力仅在使用镜像入口脚本的 Docker 容器内可用。服务端只接受稳定 Release，校验同 Release `sha256sums.txt` 后暂存当前平台归档；候选版本成功监听端口后才变为当前版本。详见 [Docker Self-Update](../self-update.md)。
 
 **章节来源**
 - [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
@@ -249,7 +251,7 @@ v1.0.7 修复：移除了之前 path-policy 中硬编码 TTL 覆盖逻辑（该�
 - **页面仍显示旧内容**：确认浏览器缓存、`static/admin` 是否已重新构建、服务是否重启。
 - **登录后立刻退出**：检查 Admin JWT secret、JWT 过期时间、系统时间；确认 `localStorage` 中的 JWT 未被手动清除。
 - **总览数据为 0**：检查 `/admin/metrics/overview`、`/admin/queue/status` 是否返回 200；确认 `data/` 目录下 SQLite 文件可读。
-- **没有新版本提醒**：确认浏览器能访问 `api.github.com`，以及 GitHub 仓库是否存在大于当前 `/admin/version` 的 Release 或 tag。
+- **没有新版本提醒**：在“设置 > 应用更新”查看服务端的最近检查时间和错误详情；确认运行服务的主机能访问 GitHub，且仓库存在大于当前 `/admin/version` 的稳定 Release。浏览器无需直接访问 GitHub。
 - **WebUI 自动构建失败**：确认部署环境有 npm，或提前构建并复制 `static/admin`。
 - **设置保存后未生效**：查看 Admin API 日志，确认 `Store.Update` 无报错；安全策略热重载依赖 `policyCache.signature` 置空——若 SQLite 写入失败仅记录 warn，策略仍然从 config 端生效。
 - **成功率显示偏低**：确认 `FailureRateExcludedStatusCodes` 覆盖了所有已知基础设施错误码；安全拦截（403 `policy_blocked`）正常情况下计入 `excluded_from_failure_rate` 而非 `failed`。

@@ -31,6 +31,10 @@ func proxyPolicyConfigured(p ProxyPolicyConfig) bool {
 		p.TestConcurrency > 0
 }
 
+func appUpdateConfigured(c AppUpdateConfig) bool {
+	return c.Enabled != nil || c.AutoDownload != nil || c.AutoApply != nil || c.CheckIntervalMinutes > 0
+}
+
 func (c Config) MarshalJSON() ([]byte, error) {
 	m := map[string]any{}
 	for k, v := range c.AdditionalFields {
@@ -103,6 +107,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	}
 	if promptLimitConfigured(c.PromptLimit) {
 		m["prompt_limit"] = c.PromptLimit
+	}
+	if appUpdateConfigured(c.AppUpdate) {
+		m["app_update"] = c.AppUpdate
 	}
 	return json.Marshal(m)
 }
@@ -206,6 +213,10 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 			}
 		case "prompt_limit":
 			if err := json.Unmarshal(v, &c.PromptLimit); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
+		case "app_update":
+			if err := json.Unmarshal(v, &c.AppUpdate); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
 		default:
@@ -326,6 +337,12 @@ func (c Config) Clone() Config {
 			SummaryCompactionThreshold:          c.PromptLimit.SummaryCompactionThreshold,
 			IncrementalMaxTurns:                 cloneIntPtr(c.PromptLimit.IncrementalMaxTurns),
 			IncrementalRotationKeepRecent:       c.PromptLimit.IncrementalRotationKeepRecent,
+		},
+		AppUpdate: AppUpdateConfig{
+			Enabled:              cloneBoolPtr(c.AppUpdate.Enabled),
+			AutoDownload:         cloneBoolPtr(c.AppUpdate.AutoDownload),
+			AutoApply:            cloneBoolPtr(c.AppUpdate.AutoApply),
+			CheckIntervalMinutes: c.AppUpdate.CheckIntervalMinutes,
 		},
 		AdditionalFields: map[string]any{},
 	}

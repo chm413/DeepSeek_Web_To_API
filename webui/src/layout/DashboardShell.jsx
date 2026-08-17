@@ -2,8 +2,6 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react
 import { useLocation, useNavigate } from 'react-router-dom'
 import {
     Activity,
-    BellRing,
-    ExternalLink,
     Gauge,
     Globe,
     History,
@@ -36,92 +34,9 @@ const BatchImport = lazy(() => import('../components/BatchImport'))
 const SettingsContainer = lazy(() => import('../features/settings/SettingsContainer'))
 const ProxyManagerContainer = lazy(() => import('../features/proxy/ProxyManagerContainer'))
 
-const GITHUB_RELEASE_API = 'https://api.github.com/repos/chm413/DeepSeek_Web_To_API/releases/latest'
-const GITHUB_TAGS_API = 'https://api.github.com/repos/chm413/DeepSeek_Web_To_API/tags?per_page=1'
-const GITHUB_RELEASES_URL = 'https://github.com/chm413/DeepSeek_Web_To_API/releases'
-const ALLOWED_UPDATE_HOST_PREFIXES = [
-    'https://github.com/chm413/DeepSeek_Web_To_API/',
-]
-// 10-minute interval — adopted from CNB PR #15. GitHub's unauthenticated
-// REST API rate-limits to 60 req/h per IP; the previous 30s polling
-// emitted 120 req/h, exhausting the quota and triggering 403 responses
-// for every other admin user behind the same NAT. 10 min = 6 req/h is
-// well under the limit while still surfacing new releases promptly.
-const VERSION_CHECK_INTERVAL_MS = 600_000
+const UPDATE_STATUS_REFRESH_INTERVAL_MS = 60_000
 const VERSION_NOTIFY_STORAGE_KEY = 'deepseek-web-to-api_notified_update_tag'
-const WEBUI_API_CONTRACT_VERSION = 2
-
-// safeUpdateURL filters the update-notification href so a compromised /
-// rate-limit-evasion / hostile GitHub API response cannot point the
-// "Update available" link at a `javascript:` URL or a phishing domain.
-// Anything that does not start with the canonical project
-// release prefix falls back to the static GITHUB_RELEASES_URL.
-const safeUpdateURL = (url) => {
-    if (typeof url !== 'string') {
-        return GITHUB_RELEASES_URL
-    }
-    const trimmed = url.trim()
-    if (!trimmed) {
-        return GITHUB_RELEASES_URL
-    }
-    for (const prefix of ALLOWED_UPDATE_HOST_PREFIXES) {
-        if (trimmed.startsWith(prefix)) {
-            return trimmed
-        }
-    }
-    return GITHUB_RELEASES_URL
-}
-
-const normalizeVersionTag = (value) => String(value || '').trim().replace(/^v/i, '')
-
-const parseSemver = (value) => {
-    const normalized = normalizeVersionTag(value)
-    const match = normalized.match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/)
-    if (!match) return null
-    return match.slice(1, 4).map(part => Number.parseInt(part, 10))
-}
-
-const compareSemver = (left, right) => {
-    const a = parseSemver(left)
-    const b = parseSemver(right)
-    if (!a || !b) return 0
-    for (let i = 0; i < 3; i += 1) {
-        if (a[i] > b[i]) return 1
-        if (a[i] < b[i]) return -1
-    }
-    return 0
-}
-
-const getLatestGitHubVersion = async (signal) => {
-    const releaseRes = await fetch(GITHUB_RELEASE_API, {
-        signal,
-        headers: { Accept: 'application/vnd.github+json' },
-    })
-    if (releaseRes.ok) {
-        const release = await releaseRes.json()
-        return {
-            tag: release.tag_name || release.name,
-            url: release.html_url || GITHUB_RELEASES_URL,
-        }
-    }
-    if (releaseRes.status !== 404) {
-        throw new Error(`GitHub release check failed: ${releaseRes.status}`)
-    }
-
-    const tagsRes = await fetch(GITHUB_TAGS_API, {
-        signal,
-        headers: { Accept: 'application/vnd.github+json' },
-    })
-    if (!tagsRes.ok) {
-        throw new Error(`GitHub tag check failed: ${tagsRes.status}`)
-    }
-    const tags = await tagsRes.json()
-    const latestTag = Array.isArray(tags) ? tags[0] : null
-    return {
-        tag: latestTag?.name,
-        url: latestTag?.name ? `${GITHUB_RELEASES_URL}/tag/${latestTag.name}` : GITHUB_RELEASES_URL,
-    }
-}
+const WEBUI_API_CONTRACT_VERSION = 3
 
 function TabLoadingFallback({ label }) {
     return (
@@ -145,7 +60,7 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [versionInfo, setVersionInfo] = useState(null)
     const [versionCheckComplete, setVersionCheckComplete] = useState(false)
-    const [availableUpdate, setAvailableUpdate] = useState(null)
+    const [updateStatus, setUpdateStatus] = useState(null)
 
     const navItems = [
         { id: 'overview', label: t('nav.overview.label'), icon: LayoutDashboard, description: t('nav.overview.desc') },
@@ -212,49 +127,38 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
     }, [authFetch])
 
     useEffect(() => {
-        const currentVersion = versionInfo?.current_version || versionInfo?.current_tag
-        if (!currentVersion) return undefined
-
         let disposed = false
-        let activeController = null
-
-        async function checkGitHubVersion() {
-            if (activeController) {
-                activeController.abort()
-            }
-            activeController = new AbortController()
+        async function loadUpdateStatus() {
             try {
-                const latest = await getLatestGitHubVersion(activeController.signal)
-                if (disposed || !latest?.tag) return
-
-                const isNewer = compareSemver(latest.tag, currentVersion) > 0
-                if (!isNewer) {
-                    setAvailableUpdate(null)
-                    return
-                }
-
-                setAvailableUpdate(latest)
-                const notifiedTag = sessionStorage.getItem(VERSION_NOTIFY_STORAGE_KEY)
-                if (notifiedTag !== latest.tag) {
-                    sessionStorage.setItem(VERSION_NOTIFY_STORAGE_KEY, latest.tag)
-                    showMessage('success', t('sidebar.updateAvailableToast', { version: latest.tag }))
+                const res = await authFetch('/admin/updates')
+                if (!res.ok) return
+                const data = await res.json()
+                if (disposed) return
+                setUpdateStatus(data)
+                const latestTag = data?.status?.latest_tag
+                if (data?.status?.update_available && latestTag) {
+                    const notifiedTag = sessionStorage.getItem(VERSION_NOTIFY_STORAGE_KEY)
+                    if (notifiedTag !== latestTag) {
+                        sessionStorage.setItem(VERSION_NOTIFY_STORAGE_KEY, latestTag)
+                        showMessage('success', t('sidebar.updateAvailableToast', { version: latestTag }))
+                    }
                 }
             } catch (_err) {
-                // Keep the last positive result visible if GitHub is rate-limited
-                // or briefly unreachable; the next successful poll will correct it.
+                // Update checks are owned by the server. A temporary status read
+                // failure must not affect the rest of the admin console.
             }
         }
-
-        checkGitHubVersion()
-        const timer = window.setInterval(checkGitHubVersion, VERSION_CHECK_INTERVAL_MS)
+        loadUpdateStatus()
+        const timer = window.setInterval(loadUpdateStatus, UPDATE_STATUS_REFRESH_INTERVAL_MS)
         return () => {
             disposed = true
             window.clearInterval(timer)
-            if (activeController) {
-                activeController.abort()
-            }
         }
-    }, [showMessage, t, versionInfo?.current_tag, versionInfo?.current_version])
+    }, [authFetch, showMessage, t])
+
+    const availableUpdate = updateStatus?.status?.update_available
+        ? { tag: updateStatus.status.latest_tag }
+        : null
 
     const serverAPIContractVersion = Number(versionInfo?.api_contract_version || 0)
     const hasAPIContractMismatch = versionCheckComplete
@@ -301,7 +205,7 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
             case 'import':
                 return <BatchImport onRefresh={fetchConfig} onMessage={showMessage} authFetch={authFetch} />
             case 'settings':
-                return <SettingsContainer onRefresh={fetchConfig} onMessage={showMessage} authFetch={authFetch} onForceLogout={onForceLogout} />
+                return <SettingsContainer onRefresh={fetchConfig} onMessage={showMessage} authFetch={authFetch} onForceLogout={onForceLogout} onUpdateStatus={setUpdateStatus} />
             default:
                 return null
         }
@@ -384,22 +288,20 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
                             <span className="font-mono text-foreground">{versionInfo?.current_tag || '-'}</span>
                         </div>
                         {availableUpdate && (
-                            <a
-                                className="version-update-link mt-3"
-                                href={safeUpdateURL(availableUpdate.url)}
-                                target="_blank"
-                                rel="noreferrer noopener"
+                            <button
+                                type="button"
+                                className="version-update-link mt-3 w-full text-left"
+                                onClick={() => navigateToTab('settings')}
                                 aria-live="polite"
                             >
                                 <span className="version-update-icon">
-                                    <BellRing className="w-3.5 h-3.5" />
+                                    <RefreshCw className="w-3.5 h-3.5" />
                                 </span>
                                 <span className="min-w-0 flex-1">
                                     <span className="block text-[11px] font-black leading-tight">{t('sidebar.updateAvailable')}</span>
                                     <span className="block mt-0.5 truncate font-mono text-[10px] opacity-80">{availableUpdate.tag}</span>
                                 </span>
-                                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                            </a>
+                            </button>
                         )}
                     </div>
                     <div className="mt-3 flex items-center gap-2">

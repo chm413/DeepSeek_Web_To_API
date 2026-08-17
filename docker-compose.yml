@@ -9,13 +9,16 @@ services:
       # Host port is configurable via DEEPSEEK_WEB_TO_API_HOST_PORT; container listens on 5001.
       - "${DEEPSEEK_WEB_TO_API_HOST_PORT:-6011}:5001"
     volumes:
-      - ./data:/app/data   # config, SQLite, cache, logs, and auto-downloaded Xray core
+      - ./data:/app/data   # config, SQLite, cache, logs, Xray core, and verified self-update releases
     environment:
       - TZ=Asia/Shanghai
       - DEEPSEEK_WEB_TO_API_BIND_ADDR=0.0.0.0
       - DEEPSEEK_WEB_TO_API_ENV_WRITEBACK=true
       - DEEPSEEK_WEB_TO_API_CONFIG_PATH=/app/data/config.json
       - DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH=/app/data/accounts.sqlite
+      # The image entrypoint launches a checksum-verified version from this
+      # persistent directory, otherwise it falls back to the image binary.
+      - DEEPSEEK_WEB_TO_API_SELF_UPDATE_ROOT=/app/data/self-update
     healthcheck:
       test: ["CMD", "/usr/local/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5001/healthz"]
       interval: 30s

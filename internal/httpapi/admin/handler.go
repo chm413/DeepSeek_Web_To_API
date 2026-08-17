@@ -14,8 +14,10 @@ import (
 	adminrawsamples "DeepSeek_Web_To_API/internal/httpapi/admin/rawsamples"
 	adminsettings "DeepSeek_Web_To_API/internal/httpapi/admin/settings"
 	adminshared "DeepSeek_Web_To_API/internal/httpapi/admin/shared"
+	adminupdates "DeepSeek_Web_To_API/internal/httpapi/admin/updates"
 	adminversion "DeepSeek_Web_To_API/internal/httpapi/admin/version"
 	"DeepSeek_Web_To_API/internal/safetystore"
+	"DeepSeek_Web_To_API/internal/selfupdate"
 )
 
 type Handler struct {
@@ -27,6 +29,7 @@ type Handler struct {
 	ResponseCache adminshared.ResponseCacheRuntimeProvider
 	SafetyWords   *safetystore.WordsStore
 	SafetyIPs     *safetystore.IPsStore
+	Updater       *selfupdate.Manager
 }
 
 func RegisterRoutes(r chi.Router, h *Handler) {
@@ -40,6 +43,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	historyHandler := &adminhistory.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	devCaptureHandler := &admindevcapture.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	versionHandler := &adminversion.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
+	updatesHandler := &adminupdates.Handler{Updater: h.Updater}
 	metricsHandler := &adminmetrics.Handler{Store: deps.Store, Pool: deps.Pool, ChatHistory: deps.ChatHistory, ResponseCache: deps.ResponseCache}
 
 	adminauth.RegisterPublicRoutes(r, authHandler)
@@ -53,6 +57,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 		admindevcapture.RegisterRoutes(pr, devCaptureHandler)
 		adminhistory.RegisterRoutes(pr, historyHandler)
 		adminversion.RegisterRoutes(pr, versionHandler)
+		adminupdates.RegisterRoutes(pr, updatesHandler)
 		adminmetrics.RegisterRoutes(pr, metricsHandler)
 	})
 }

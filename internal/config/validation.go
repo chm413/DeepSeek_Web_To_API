@@ -52,6 +52,9 @@ func ValidateConfig(c Config) error {
 	if err := ValidatePromptLimitConfig(c.PromptLimit); err != nil {
 		return err
 	}
+	if err := ValidateAppUpdateConfig(c.AppUpdate); err != nil {
+		return err
+	}
 	if err := ValidateAccountProxyReferences(c.Accounts, c.Proxies); err != nil {
 		return err
 	}
@@ -66,6 +69,16 @@ func ValidatePromptLimitConfig(promptLimit PromptLimitConfig) error {
 		return err
 	}
 	return ValidateIntRange("prompt_limit.session_chunking_commit_timeout_seconds", promptLimit.SessionChunkingCommitTimeoutSeconds, 5, 300, false)
+}
+
+func ValidateAppUpdateConfig(appUpdate AppUpdateConfig) error {
+	if err := ValidateIntRange("app_update.check_interval_minutes", appUpdate.CheckIntervalMinutes, 5, 10080, false); err != nil {
+		return err
+	}
+	if appUpdate.AutoApply != nil && *appUpdate.AutoApply && (appUpdate.AutoDownload == nil || !*appUpdate.AutoDownload) {
+		return fmt.Errorf("app_update.auto_apply requires app_update.auto_download")
+	}
+	return nil
 }
 
 func ValidateProxyConfig(proxies []Proxy) error {

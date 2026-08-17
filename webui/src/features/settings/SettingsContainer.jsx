@@ -12,8 +12,9 @@ import CompatibilitySection from './CompatibilitySection'
 import AutoDeleteSection from './AutoDeleteSection'
 import ModelSection from './ModelSection'
 import BackupSection from './BackupSection'
+import UpdateSection from './UpdateSection'
 
-export default function SettingsContainer({ onRefresh, onMessage, authFetch, onForceLogout }) {
+export default function SettingsContainer({ onRefresh, onMessage, authFetch, onForceLogout, onUpdateStatus }) {
     const { t } = useI18n()
     const apiFetch = authFetch || fetch
 
@@ -80,6 +81,8 @@ export default function SettingsContainer({ onRefresh, onMessage, authFetch, onF
             <AutoDeleteSection t={t} form={form} setForm={setForm} />
 
             <ModelSection t={t} form={form} setForm={setForm} />
+
+            <UpdateSection t={t} authFetch={apiFetch} onMessage={onMessage} onStatusChange={onUpdateStatus} />
 
             <BackupSection
                 t={t}

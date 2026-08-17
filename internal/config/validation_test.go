@@ -64,3 +64,14 @@ func TestValidateConfigAcceptsLegacyAutoDeleteSessions(t *testing.T) {
 		t.Fatalf("expected legacy auto_delete.sessions config to remain valid, got %v", err)
 	}
 }
+
+func TestValidateAppUpdateRequiresAutoDownloadForAutoApply(t *testing.T) {
+	autoApply := true
+	if err := ValidateAppUpdateConfig(AppUpdateConfig{AutoApply: &autoApply}); err == nil {
+		t.Fatal("expected auto_apply without auto_download to be rejected")
+	}
+	autoDownload := true
+	if err := ValidateAppUpdateConfig(AppUpdateConfig{AutoApply: &autoApply, AutoDownload: &autoDownload}); err != nil {
+		t.Fatalf("expected matching automatic update policy to be valid: %v", err)
+	}
+}

@@ -34,6 +34,7 @@ import (
 	"DeepSeek_Web_To_API/internal/responsecache"
 	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/safetystore"
+	"DeepSeek_Web_To_API/internal/selfupdate"
 	"DeepSeek_Web_To_API/internal/upstreamsession"
 	"DeepSeek_Web_To_API/internal/webui"
 )
@@ -43,6 +44,7 @@ type App struct {
 	Pool                     *account.Pool
 	Resolver                 *auth.Resolver
 	DS                       *dsclient.Client
+	Updater                  *selfupdate.Manager
 	Router                   http.Handler
 	stopAccountHealthMonitor context.CancelFunc
 	stopProxyMonitor         context.CancelFunc
@@ -125,7 +127,8 @@ func NewApp() (*App, error) {
 		SemanticKey:    store.ResponseCacheSemanticKey(),
 		OnHit:          responsesHandler.OnProtocolResponseCacheHit,
 	})
-	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache, SafetyWords: safetyWordsStore, SafetyIPs: safetyIPsStore}
+	updater := selfupdate.New(store, selfupdate.Options{})
+	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache, SafetyWords: safetyWordsStore, SafetyIPs: safetyIPsStore, Updater: updater}
 	webuiHandler := webui.NewHandler(store.StaticAdminDir())
 
 	r := chi.NewRouter()
@@ -209,7 +212,7 @@ func NewApp() (*App, error) {
 		http.NotFound(w, req)
 	})
 
-	app := &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}
+	app := &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Updater: updater, Router: r}
 	proxyMonitorCtx, stopProxyMonitor := context.WithCancel(context.Background())
 	app.stopProxyMonitor = stopProxyMonitor
 	startProxyMonitor(proxyMonitorCtx, store, pool, dsClient)
@@ -219,6 +222,36 @@ func NewApp() (*App, error) {
 		startAccountHealthMonitor(monitorCtx, store, pool, resolver, dsClient, time.Duration(intervalMinutes)*time.Minute)
 	}
 	return app, nil
+}
+
+// StartSelfUpdate starts periodic release checks after the main process has
+// completed its network and admin-security initialization.
+func (a *App) StartSelfUpdate(ctx context.Context) {
+	if a == nil || a.Updater == nil {
+		return
+	}
+	a.Updater.Start(ctx)
+}
+
+func (a *App) ConfirmSelfUpdateStartup() error {
+	if a == nil || a.Updater == nil {
+		return nil
+	}
+	return a.Updater.ConfirmStartup()
+}
+
+func (a *App) SelfUpdateRestartRequests() <-chan struct{} {
+	if a == nil || a.Updater == nil {
+		return nil
+	}
+	return a.Updater.RestartRequests()
+}
+
+func (a *App) SelfUpdateRestartExitCode() int {
+	if a == nil || a.Updater == nil {
+		return 75
+	}
+	return a.Updater.RestartExitCode()
 }
 
 func (a *App) Close() {
@@ -359,9 +392,8 @@ func securityHeaders(next http.Handler) http.Handler {
 		// only — the public API plane returns JSON / SSE consumed by
 		// SDKs that have no DOM, and shipping CSP there is noise.
 		// `default-src 'self'` blocks every external resource by
-		// default; `connect-src 'self' https://api.github.com` lets
-		// the dashboard's "check for new release" probe still reach
-		// the GitHub API; `script-src 'self'` blocks inline scripts
+		// default. Release checks are server-side so the dashboard only
+		// needs `connect-src 'self'`; `script-src 'self'` blocks inline scripts
 		// (the React build emits hashed asset bundles, no inline);
 		// `style-src 'self' 'unsafe-inline'` is required by Tailwind
 		// keyframe + utility-class injection at runtime.
@@ -376,7 +408,7 @@ func securityHeaders(next http.Handler) http.Handler {
 					"style-src 'self' 'unsafe-inline'; "+
 					"img-src 'self' data:; "+
 					"font-src 'self' data:; "+
-					"connect-src 'self' https://api.github.com; "+
+					"connect-src 'self'; "+
 					"frame-ancestors 'none'; "+
 					"base-uri 'self'; "+
 					"form-action 'self'")

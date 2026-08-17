@@ -103,6 +103,12 @@
     "token_refresh_interval_hours": 6,
     "account_health_check_interval_minutes": 0
   },
+  "app_update": {
+    "enabled": true,
+    "auto_download": false,
+    "auto_apply": false,
+    "check_interval_minutes": 360
+  },
   "responses": {
     "store_ttl_seconds": 900
   },

@@ -276,9 +276,15 @@ PUT /admin/settings
 - [internal/server/router.go](file://internal/server/router.go)
 - [internal/httpapi/requestbody/json_utf8.go](file://internal/httpapi/requestbody/json_utf8.go)
 
-### /admin/version 策略
+### /admin/version and update policy
 
-`GET /admin/version` 仅返回编译期写入的当前版本和 `update_policy=self_managed`，不向 GitHub 发起主动拉取，不暴露任何凭据或配置。版本检测的 GitHub API 调用仅在前端 `DashboardShell` 发起，速率限制和网络错误对后端无影响，gracefully degrade（失败不清空已检测结果）。
+`GET /admin/version` returns the build version and the Web UI API contract.
+Release checks now run server-side through the authenticated `/admin/updates`
+API, so browser sessions do not individually query GitHub. The updater exposes
+no credentials or local paths, verifies the exact release archive SHA-256
+before staging, and only permits installation inside the bundled Docker
+entrypoint. See [Docker Self-Update](self-update.md) for the storage layout,
+rollback flow, and remaining release-publisher trust boundary.
 
 **章节来源**
 - [internal/httpapi/admin/version/handler_version.go](file://internal/httpapi/admin/version/handler_version.go)

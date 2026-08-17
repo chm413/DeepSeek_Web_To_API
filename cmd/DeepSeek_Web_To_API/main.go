@@ -18,6 +18,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	config.ApplyLegacyEnvAliases()
 	if err := config.LoadDotEnv(); err != nil {
 		config.Logger.Warn("[dotenv] load failed", "error", err)
@@ -27,7 +31,7 @@ func main() {
 	app, err := server.NewApp()
 	if err != nil {
 		config.Logger.Error("server initialization failed", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	defer app.Close()
 	defer xrayproxy.Default().StopAll()
@@ -40,7 +44,7 @@ func main() {
 	webui.EnsureBuiltOnStartup(app.Store)
 	if err := auth.ValidateAdminRuntimeSecurity(app.Store); err != nil {
 		config.Logger.Error("admin runtime security config invalid", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	port := app.Store.ServerPort()
 	bindAddr := app.Store.ServerBindAddr()
@@ -73,7 +77,15 @@ func main() {
 		lanURL = fmt.Sprintf("http://%s:%s", lanIP, port)
 	}
 
-	// Start server in a goroutine so we can listen for shutdown signals.
+	// Bind before starting the serving goroutine. A pending self-update is only
+	// promoted after this succeeds, which gives the Docker entrypoint a simple
+	// rollback boundary for a broken candidate binary.
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		config.Logger.Error("server listener initialization failed", "error", err)
+		return 1
+	}
+	serverErr := make(chan error, 1)
 	go func() {
 		if lanURL != "" {
 			config.Logger.Info("starting deepseek-web-to-api", "bind", srv.Addr, "port", port, "local_url", localURL, "lan_url", lanURL, "lan_ip", lanIP)
@@ -81,17 +93,35 @@ func main() {
 			config.Logger.Info("starting deepseek-web-to-api", "bind", srv.Addr, "port", port, "local_url", localURL)
 			config.Logger.Warn("lan ip not detected; check active network interfaces")
 		}
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			config.Logger.Error("server stopped unexpectedly", "error", err)
-			os.Exit(1)
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
 		}
 	}()
+	if err := app.ConfirmSelfUpdateStartup(); err != nil {
+		config.Logger.Error("self-update candidate readiness confirmation failed", "error", err)
+		_ = srv.Close()
+		return 1
+	}
+	updateCtx, stopUpdateChecks := context.WithCancel(context.Background())
+	defer stopUpdateChecks()
+	app.StartSelfUpdate(updateCtx)
 
-	// Wait for interrupt signal (Ctrl+C / SIGTERM).
+	// Wait for an interrupt signal (Ctrl+C / SIGTERM), a verified self-update
+	// restart request, or a listener failure.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	sig := <-quit
-	config.Logger.Info("shutdown signal received", "signal", sig.String())
+	defer signal.Stop(quit)
+	exitCode := 0
+	select {
+	case sig := <-quit:
+		config.Logger.Info("shutdown signal received", "signal", sig.String())
+	case <-app.SelfUpdateRestartRequests():
+		exitCode = app.SelfUpdateRestartExitCode()
+		config.Logger.Info("self-update restart requested", "exit_code", exitCode)
+	case err := <-serverErr:
+		config.Logger.Error("server stopped unexpectedly", "error", err)
+		return 1
+	}
 
 	// Graceful shutdown: allow up to 10 seconds for in-flight requests to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -99,9 +129,10 @@ func main() {
 
 	if err := srv.Shutdown(ctx); err != nil {
 		config.Logger.Error("graceful shutdown failed, forcing exit", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	config.Logger.Info("server gracefully stopped")
+	return exitCode
 }
 
 func detectLANIPv4() string {

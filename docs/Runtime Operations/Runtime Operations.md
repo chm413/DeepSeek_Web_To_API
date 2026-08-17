@@ -165,9 +165,11 @@ v1.0.12 起，单账号 429 切换成功不进入失败计数，`history.failed`
 
 **重要**：v1.0.7 修复了路径级别硬编码 TTL 覆盖 Store 配置的 bug（`internal/responsecache/path_policy.go` 中已移除路径级 TTL 覆盖）。现在 WebUI 中修改 `cache.response.memory_ttl_seconds` / `disk_ttl_seconds` 后，`PUT /admin/settings` 立即调用 `applyResponseCacheSettings`，变更直接反映到 `/admin/metrics/overview.cache` 和实际缓存行为，不再出现"改了配置但实际 TTL 不变"的问题。
 
-### 版本检查
+### 版本检查与 Docker 自更新
 
-管理台侧边栏先调用 `/admin/version` 显示当前版本，再由浏览器直接访问 GitHub API，每 30 秒检查一次最新 Release；若没有 Release，则回退到最新 tag。只有远端语义化版本大于当前版本时才提示用户，提示链接指向 GitHub Releases。该轮询发生在浏览器侧，不经过后端代理，也不会影响服务健康探针或业务 API。
+管理台侧边栏通过认证后的 `/admin/updates` 读取服务端状态，不再由每个浏览器直接轮询 GitHub。服务端按 `app_update.check_interval_minutes` 检查最新稳定 Release，展示当前版本、最新版本、检查时间、下载状态和错误原因。自动检查默认开启；自动下载和自动应用默认关闭。
+
+Docker 自更新会先下载同 Release 的 `sha256sums.txt`，校验当前架构归档的 SHA-256，再将二进制和 Web UI 安全解包到持久化卷。应用更新会优雅退出应用进程，镜像入口脚本启动候选版本；候选版本成功监听端口后才提升为当前版本，启动失败会回退。详见 [Docker Self-Update](../self-update.md)。
 
 `/admin/version` 返回：
 
@@ -238,7 +240,7 @@ SKIP_BUILD=1 DST_PASSWORD=<root-pwd> python3 scripts/deploy_107.py
 - 缓存命中下降：检查请求体是否每次变化、是否跨调用方、是否被 `Cache-Control` 绕过。确认 WebUI 中 TTL 设置已保存（`PUT /admin/settings` 返回 `success:true`）。
 - 账号负载一直 0：确认是否真实有 in-flight 请求；短请求结束后占用槽位会快速释放。
 - 等待队列长期增加：增大账号数量、每账号并发或全局并发，或排查账号登录失败。
-- 版本提醒不出现：先确认 `/admin/version` 返回非 `dev` 版本（`source` 为 `build-ldflags`），再检查浏览器网络面板中 GitHub API 请求是否被防火墙、CORS 或限流拦截。若 `/admin/version` 的 `source` 为 `default`（`dev`），说明部署时未注入版本，重新使用 `scripts/deploy_107.py` 或带 `-X` ldflags 的构建命令部署。
+- 版本提醒不出现：先确认 `/admin/version` 返回非 `dev` 版本（`source` 为 `build-ldflags`），再到“设置 > 应用更新”查看服务端检查时间和错误详情，确认运行服务的主机可访问 GitHub。浏览器不再直接请求 GitHub API。若 `/admin/version` 的 `source` 为 `default`（`dev`），说明部署时未注入版本，重新使用 `scripts/deploy_107.py` 或带 `-X` ldflags 的构建命令部署。
 - 部署后服务未启动：查看 `systemctl status deepseek-web-to-api` 和 `journalctl -u deepseek-web-to-api -n 50`。如需回滚，执行 `mv /opt/deepseek-web-to-api/deepseek-web-to-api.bak.<ts> /opt/deepseek-web-to-api/deepseek-web-to-api && systemctl restart deepseek-web-to-api`。
 - `scripts/deploy_107.py` sha256 不匹配：可能是 SCP 传输截断，脚本会自动删除 `.new` 文件并报错；检查网络或磁盘空间后重试。
 

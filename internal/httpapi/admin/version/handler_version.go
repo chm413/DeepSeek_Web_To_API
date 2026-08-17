@@ -9,7 +9,7 @@ import (
 
 // APIContractVersion is incremented when the WebUI requires new admin routes
 // or response fields that older server binaries do not provide.
-const APIContractVersion = 2
+const APIContractVersion = 3
 
 func (h *Handler) getVersion(w http.ResponseWriter, _ *http.Request) {
 	current, source := version.Current()
@@ -19,7 +19,8 @@ func (h *Handler) getVersion(w http.ResponseWriter, _ *http.Request) {
 		"current_version":      current,
 		"current_tag":          version.Tag(current),
 		"source":               source,
-		"update_policy":        "self_managed",
+		"update_policy":        "server_managed",
+		"self_update_api":      true,
 		"checked_at":           time.Now().UTC().Format(time.RFC3339),
 	}
 

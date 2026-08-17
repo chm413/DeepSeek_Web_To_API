@@ -4,7 +4,7 @@ Language: [中文](README.MD) | [English](README.en.md)
 
 DeepSeek Web To API is a self-hosted Go gateway that exposes DeepSeek Web sessions through OpenAI, Anthropic Claude, and Gemini-compatible APIs. It includes an admin console for accounts, sessions, caches, logs, and proxy routing.
 
-Current version: **v1.1.3**
+Current version: **v1.1.9**
 
 ## Features
 
@@ -98,11 +98,12 @@ npm run build --prefix webui
 bash ./scripts/lint.sh
 ```
 
-GitHub Actions runs Go, WebUI, cross-platform, and Docker build gates on pushes and pull requests. A `VERSION` change on `main`, or a version tag, builds Windows/Linux/macOS archives, checksums, `linux/amd64` and `linux/arm64` images, and creates or updates the GitHub Release.
+`VERSION` at the repository root is the release-version source. Push a matching version tag, for example `v1.1.9`, to run the release gates and publish Windows/Linux/macOS archives, checksums, and `linux/amd64` and `linux/arm64` GHCR images. The workflow creates or updates the matching GitHub Release. It can also be dispatched manually; a tag that disagrees with `VERSION` fails explicitly rather than entering the update channel with the wrong version.
 
 ## Documentation
 
 - [Deployment](docs/deployment.md)
+- [Docker self-update](docs/self-update.md)
 - [Configuration](docs/configuration.md)
 - [Xray and proxy subscriptions](docs/xray-proxy.md)
 - [Batch account API](docs/account-batch-api.md)

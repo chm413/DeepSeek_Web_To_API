@@ -34,6 +34,7 @@ type Config struct {
 	CurrentInputFile   CurrentInputFileConfig  `json:"current_input_file,omitempty"`
 	ThinkingInjection  ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
 	PromptLimit        PromptLimitConfig       `json:"prompt_limit,omitempty"`
+	AppUpdate          AppUpdateConfig         `json:"app_update,omitempty"`
 	AdditionalFields   map[string]any          `json:"-"`
 }
 
@@ -397,6 +398,16 @@ type CurrentInputFileConfig struct {
 type ThinkingInjectionConfig struct {
 	Enabled *bool  `json:"enabled,omitempty"`
 	Prompt  string `json:"prompt,omitempty"`
+}
+
+// AppUpdateConfig governs the optional self-update service. The service only
+// applies releases inside a container started by the bundled entrypoint; the
+// check itself is safe to enable in every deployment.
+type AppUpdateConfig struct {
+	Enabled              *bool `json:"enabled,omitempty"`
+	AutoDownload         *bool `json:"auto_download,omitempty"`
+	AutoApply            *bool `json:"auto_apply,omitempty"`
+	CheckIntervalMinutes int   `json:"check_interval_minutes,omitempty"`
 }
 
 // PromptLimitSettings is a fully-resolved, defaults-applied snapshot of the
