@@ -27,8 +27,11 @@ type sessionChunkingDSStub struct {
 	rawCalls       int
 	rawPrompts     []string
 	rawSessions    []string
+	rawThinking    []bool
 	emptyControl   int
 	emptyFragment  int
+	idOnlyFragment int
+	idOnlyControl  int
 	uniqueSessions bool
 }
 
@@ -85,9 +88,21 @@ func (s *sessionChunkingDSStub) callCompletionRaw(ctx context.Context, a *auth.R
 	prompt, _ := payload["prompt"].(string)
 	s.rawPrompts = append(s.rawPrompts, prompt)
 	s.rawSessions = append(s.rawSessions, fmt.Sprint(payload["chat_session_id"]))
+	thinking, _ := payload["thinking_enabled"].(bool)
+	s.rawThinking = append(s.rawThinking, thinking)
 	if s.emptyFragment > 0 && strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
 		s.emptyFragment--
 		return chunkingEmptySSE(), nil
+	}
+	if s.idOnlyFragment > 0 && strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
+		s.idOnlyFragment--
+		s.messageID++
+		return chunkingMessageIDOnlySSE(s.messageID), nil
+	}
+	if s.idOnlyControl > 0 && strings.Contains(prompt, "[OVERSIZED_REQUEST_CONTROL") {
+		s.idOnlyControl--
+		s.messageID++
+		return chunkingMessageIDOnlySSE(s.messageID), nil
 	}
 	if s.emptyControl > 0 && strings.Contains(prompt, "[OVERSIZED_REQUEST_CONTROL") {
 		s.emptyControl--
@@ -208,6 +223,76 @@ func TestTryPrepareSessionChunkingRetriesEmptyControlStream(t *testing.T) {
 		if !strings.Contains(prompt, "[FINAL_RESPONSE_FORMAT_REQUIREMENTS_REPEAT]") {
 			t.Fatalf("raw retry %d omitted format requirements: %q", index, prompt)
 		}
+		if strings.Contains(prompt, "[OVERSIZED_REQUEST_CONTROL") && !ds.rawThinking[index] {
+			t.Fatalf("control retry %d did not require a reasoning acknowledgement: %q", index, prompt)
+		}
+		if strings.Contains(prompt, "type=probe") && !strings.Contains(prompt, "Checkpoint nonce:") {
+			t.Fatalf("probe retry %d omitted its random checkpoint: %q", index, prompt)
+		}
+	}
+}
+
+func TestTryPrepareSessionChunkingVerifiesMessageIDOnlyFragmentWithCheckpoint(t *testing.T) {
+	oldDelay := sessionChunkTransitionDelay
+	sessionChunkTransitionDelay = 0
+	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
+
+	ds := &sessionChunkingDSStub{idOnlyFragment: 1}
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.SessionChunkingEnable = true
+	cfg.MaxCharsExpert = 10000
+	cfg.SessionChunkingTargetRatio = 0.9
+	cfg.SessionChunkingMaxChunks = 16
+	cfg.SessionChunkingCommitTimeoutSeconds = 5
+	req := promptcompat.StandardRequest{
+		ResolvedModel:           "deepseek-v4-pro",
+		FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
+		IncrementalFormatPrompt: "Return exactly one JSON object.",
+	}
+	prepared, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
+	if err != nil || prepared == nil {
+		t.Fatalf("message-id-only fragment was not checkpointed: prepared=%+v err=%v", prepared, err)
+	}
+	if ds.idOnlyFragment != 0 {
+		t.Fatalf("message-id-only fragment was not exercised: %#v", ds)
+	}
+	foundCheckpoint := false
+	for index, prompt := range ds.rawPrompts {
+		if strings.Contains(prompt, "type=probe") {
+			foundCheckpoint = true
+			if !ds.rawThinking[index] {
+				t.Fatalf("checkpoint did not require thinking: %q", prompt)
+			}
+		}
+	}
+	if !foundCheckpoint {
+		t.Fatalf("message-id-only fragment did not issue a checkpoint: %#v", ds.rawPrompts)
+	}
+}
+
+func TestTryPrepareSessionChunkingAcceptsCompletedMessageIDOnlyControl(t *testing.T) {
+	oldDelay := sessionChunkTransitionDelay
+	sessionChunkTransitionDelay = 0
+	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
+
+	ds := &sessionChunkingDSStub{idOnlyControl: 1}
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.SessionChunkingEnable = true
+	cfg.MaxCharsExpert = 10000
+	cfg.SessionChunkingTargetRatio = 0.9
+	cfg.SessionChunkingMaxChunks = 16
+	cfg.SessionChunkingCommitTimeoutSeconds = 5
+	req := promptcompat.StandardRequest{
+		ResolvedModel:           "deepseek-v4-pro",
+		FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
+		IncrementalFormatPrompt: "Return exactly one JSON object.",
+	}
+	prepared, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
+	if err != nil || prepared == nil {
+		t.Fatalf("message-id-only control was not accepted: prepared=%+v err=%v", prepared, err)
+	}
+	if ds.idOnlyControl != 0 {
+		t.Fatalf("message-id-only control was not exercised: %#v", ds)
 	}
 }
 
@@ -369,6 +454,11 @@ func chunkingEmptySSE() *http.Response {
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
 	}
+}
+
+func chunkingMessageIDOnlySSE(messageID int) *http.Response {
+	body := fmt.Sprintf("data: {\"response_message_id\":%d}\ndata: [DONE]\n", messageID)
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
 
 func TestTryPrepareSessionChunkingIsDisabledByDefault(t *testing.T) {

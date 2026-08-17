@@ -81,6 +81,10 @@ func proxyCacheKey(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) string
 }
 
 func proxyDialContext(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) (trans.DialContextFunc, error) {
+	return proxyDialContextWithStore(proxyCfg, coreCfg, nil)
+}
+
+func proxyDialContextWithStore(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig, store *config.Store) (trans.DialContextFunc, error) {
 	proxyCfg = config.NormalizeProxy(proxyCfg)
 	if proxyuri.IsCoreType(proxyCfg.Type) {
 		if _, err := proxyuri.Parse(proxyCfg.Type, proxyCfg.URI); err != nil {
@@ -88,6 +92,9 @@ func proxyDialContext(proxyCfg config.Proxy, coreCfg config.ProxyCoreConfig) (tr
 		}
 		spec := xrayproxy.Spec{ID: proxyCfg.ID, Type: proxyCfg.Type, URI: proxyCfg.URI}
 		settings := xrayproxy.SettingsFromConfig(coreCfg)
+		if store != nil {
+			settings = xrayproxy.SettingsFromStore(store)
+		}
 		return func(ctx context.Context, network, address string) (net.Conn, error) {
 			localAddress, err := xrayproxy.Default().Ensure(ctx, spec, settings)
 			if err != nil {
@@ -206,7 +213,7 @@ func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
 		return cached
 	}
 
-	dialContext, err := proxyDialContext(proxyCfg, coreCfg)
+	dialContext, err := proxyDialContextWithStore(proxyCfg, coreCfg, c.Store)
 	if err != nil {
 		config.Logger.Warn("[proxy] build dialer failed", "proxy_id", proxyCfg.ID, "error", err)
 		dialContext = func(context.Context, string, string) (net.Conn, error) {

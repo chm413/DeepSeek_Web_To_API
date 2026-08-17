@@ -264,6 +264,8 @@ func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
 					c.Accounts[i].DisabledReason = ""
 					c.Accounts[i].DisabledAtUnix = 0
 				}
+				c.Accounts[i].CooldownState = ""
+				c.Accounts[i].CooldownUntilUnix = 0
 			}
 			return nil
 		}

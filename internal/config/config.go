@@ -42,23 +42,27 @@ type Config struct {
 }
 
 type Account struct {
-	Name           string `json:"name,omitempty"`
-	Remark         string `json:"remark,omitempty"`
-	Email          string `json:"email,omitempty"`
-	Mobile         string `json:"mobile,omitempty"`
-	Password       string `json:"password,omitempty"`
-	Token          string `json:"token,omitempty"`
-	ProxyID        string `json:"proxy_id,omitempty"`
-	ProxyAutoRoute bool   `json:"proxy_auto_route,omitempty"`
-	Disabled       bool   `json:"disabled,omitempty"`
-	DisabledReason string `json:"disabled_reason,omitempty"`
-	DisabledAtUnix int64  `json:"disabled_at_unix,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Remark            string `json:"remark,omitempty"`
+	Email             string `json:"email,omitempty"`
+	Mobile            string `json:"mobile,omitempty"`
+	Password          string `json:"password,omitempty"`
+	Token             string `json:"token,omitempty"`
+	ProxyID           string `json:"proxy_id,omitempty"`
+	ProxyAutoRoute    bool   `json:"proxy_auto_route,omitempty"`
+	Disabled          bool   `json:"disabled,omitempty"`
+	DisabledReason    string `json:"disabled_reason,omitempty"`
+	DisabledAtUnix    int64  `json:"disabled_at_unix,omitempty"`
+	CooldownState     string `json:"cooldown_state,omitempty"`
+	CooldownUntilUnix int64  `json:"cooldown_until_unix,omitempty"`
 }
 
 const (
 	AccountDisabledManual             = "manual"
 	AccountDisabledInvalidCredentials = "invalid_credentials"
 	AccountDisabledUpstreamBanned     = "upstream_banned"
+	AccountCooldownRateLimited        = "rate_limited"
+	AccountCooldownTemporarilyMuted   = "temporarily_muted"
 )
 
 type APIKey struct {
@@ -98,6 +102,9 @@ type ProxyCoreConfig struct {
 	AutoDownloadDisabled  bool   `json:"auto_download_disabled,omitempty"`
 	DownloadDir           string `json:"download_dir,omitempty"`
 	DownloadVersion       string `json:"download_version,omitempty"`
+	// InstalledVersion records the version from the local .version marker after
+	// a managed Xray download. It is status metadata, not a requested version.
+	InstalledVersion string `json:"installed_version,omitempty"`
 }
 
 type ProxyPolicyConfig struct {
@@ -212,6 +219,7 @@ func (c *Config) NormalizeCredentials() {
 		c.Accounts[i] = NormalizeAccountIdentity(c.Accounts[i])
 		c.Accounts[i].Name = strings.TrimSpace(c.Accounts[i].Name)
 		c.Accounts[i].Remark = strings.TrimSpace(c.Accounts[i].Remark)
+		c.Accounts[i].CooldownState, c.Accounts[i].CooldownUntilUnix = normalizeAccountCooldown(c.Accounts[i].CooldownState, c.Accounts[i].CooldownUntilUnix)
 	}
 	for i := range c.Proxies {
 		c.Proxies[i] = NormalizeProxy(c.Proxies[i])
@@ -226,6 +234,7 @@ func (c *Config) NormalizeCredentials() {
 	c.ProxyCore.RuntimeDir = strings.TrimSpace(c.ProxyCore.RuntimeDir)
 	c.ProxyCore.DownloadDir = strings.TrimSpace(c.ProxyCore.DownloadDir)
 	c.ProxyCore.DownloadVersion = strings.TrimSpace(c.ProxyCore.DownloadVersion)
+	c.ProxyCore.InstalledVersion = strings.TrimSpace(c.ProxyCore.InstalledVersion)
 	c.ProxyPolicy.FallbackProxyID = strings.TrimSpace(c.ProxyPolicy.FallbackProxyID)
 
 	c.normalizeModelAliases()

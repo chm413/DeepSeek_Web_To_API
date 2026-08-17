@@ -9,13 +9,9 @@ import (
 	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
-func proxyCoreSettings(core config.ProxyCoreConfig) xrayproxy.Settings {
-	return xrayproxy.SettingsFromConfig(core)
-}
-
 func (h *Handler) getProxyCore(w http.ResponseWriter, r *http.Request) {
 	core := h.Store.Snapshot().ProxyCore
-	status := xrayproxy.Probe(r.Context(), proxyCoreSettings(core))
+	status := xrayproxy.ProbeWithStore(r.Context(), h.Store)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"config": map[string]any{
 			"xray_binary_path":        core.XrayBinaryPath,
@@ -24,12 +20,14 @@ func (h *Handler) getProxyCore(w http.ResponseWriter, r *http.Request) {
 			"auto_download":           !core.AutoDownloadDisabled,
 			"download_dir":            core.DownloadDir,
 			"download_version":        core.DownloadVersion,
+			"installed_version":       core.InstalledVersion,
 		},
 		"status": status,
 	})
 }
 
 func (h *Handler) updateProxyCore(w http.ResponseWriter, r *http.Request) {
+	previous := h.Store.Snapshot().ProxyCore
 	var req struct {
 		XrayBinaryPath        string `json:"xray_binary_path"`
 		RuntimeDir            string `json:"runtime_dir"`
@@ -52,6 +50,9 @@ func (h *Handler) updateProxyCore(w http.ResponseWriter, r *http.Request) {
 	if req.AutoDownload != nil {
 		core.AutoDownloadDisabled = !*req.AutoDownload
 	}
+	if sameCoreInstallationTarget(previous, core) {
+		core.InstalledVersion = previous.InstalledVersion
+	}
 	if err := config.ValidateProxyCoreConfig(core); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
@@ -69,22 +70,29 @@ func (h *Handler) updateProxyCore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Pool.Reset()
-	status := xrayproxy.Probe(r.Context(), proxyCoreSettings(core))
+	status := xrayproxy.ProbeWithStore(r.Context(), h.Store)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": status})
 }
 
 func (h *Handler) downloadProxyCore(w http.ResponseWriter, r *http.Request) {
-	core := h.Store.Snapshot().ProxyCore
+	settings := xrayproxy.SettingsFromStore(h.Store)
 	xrayproxy.Default().StopAll()
-	binaryPath, err := xrayproxy.DownloadCore(r.Context(), proxyCoreSettings(core), true)
+	binaryPath, err := xrayproxy.DownloadCore(r.Context(), settings, true)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
+	xrayproxy.PersistInstalledCore(settings, binaryPath)
 	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
-	status := xrayproxy.Probe(r.Context(), proxyCoreSettings(core))
+	status := xrayproxy.ProbeWithStore(r.Context(), h.Store)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "binary_path": binaryPath, "status": status})
+}
+
+func sameCoreInstallationTarget(left, right config.ProxyCoreConfig) bool {
+	return strings.TrimSpace(left.XrayBinaryPath) == strings.TrimSpace(right.XrayBinaryPath) &&
+		strings.TrimSpace(left.DownloadDir) == strings.TrimSpace(right.DownloadDir) &&
+		strings.TrimSpace(left.DownloadVersion) == strings.TrimSpace(right.DownloadVersion)
 }

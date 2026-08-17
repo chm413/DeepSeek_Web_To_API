@@ -82,13 +82,18 @@ function proxyDeletionConflictSummary(data) {
 
 function proxyDeletionBlockedMessage(t, summary) {
     const parts = []
-    if (summary.accountCount > 0) {
-        parts.push(t('proxyManager.deleteBlockedAccounts', { count: summary.accountCount }))
-    }
     if (summary.fallbackCount > 0) {
         parts.push(t('proxyManager.deleteBlockedFallback', { count: summary.fallbackCount }))
     }
     return parts.join(' ')
+}
+
+function proxyDeletionConfirmation(t, proxy, accountCount) {
+    const name = proxy.name || `${proxy.host}:${proxy.port}`
+    if (accountCount > 0) {
+        return t('proxyManager.deleteConfirmRouted', { name, count: accountCount })
+    }
+    return t('proxyManager.deleteConfirmSafe', { name })
 }
 
 function ProxyStatusBadge({ t, proxy, result, testing = false }) {
@@ -286,7 +291,7 @@ function ProxiesTable({
     )
 }
 
-function CoreStatusPanel({ t, status, form, setForm, loading, downloading, onRefresh, onSave, onDownload }) {
+function CoreStatusPanel({ t, status, installedVersion, form, setForm, loading, downloading, onRefresh, onSave, onDownload }) {
     const available = Boolean(status?.available)
     return (
         <div className="ops-panel overflow-hidden" data-testid="xray-core-status">
@@ -312,6 +317,11 @@ function CoreStatusPanel({ t, status, form, setForm, loading, downloading, onRef
                             <span className="text-[10px] text-muted-foreground tabular-nums">
                                 {t('proxyManager.coreRoutes', { count: Number(status?.active_routes) || 0 })}
                             </span>
+                            {installedVersion && (
+                                <span className="text-[10px] text-muted-foreground tabular-nums">
+                                    {t('proxyManager.coreInstalledVersion', { version: installedVersion })}
+                                </span>
+                            )}
                         </div>
                         <div className="mt-0.5 truncate text-xs text-muted-foreground" title={status?.binary_path || status?.error || ''}>
                             {status?.version || status?.error || t('proxyManager.coreAutoDetect')}
@@ -581,6 +591,7 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
     const [batchLoading, setBatchLoading] = useState(false)
     const [coreStatus, setCoreStatus] = useState(null)
     const [coreForm, setCoreForm] = useState({ xray_binary_path: '', runtime_dir: '', startup_timeout_seconds: 10, auto_download: true, download_dir: '', download_version: '' })
+    const [installedCoreVersion, setInstalledCoreVersion] = useState('')
     const [savingCore, setSavingCore] = useState(false)
     const [downloadingCore, setDownloadingCore] = useState(false)
     const [policy, setPolicy] = useState(DEFAULT_POLICY)
@@ -618,6 +629,7 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
             if (!res.ok) return
             setCoreStatus(data.status || null)
+            setInstalledCoreVersion(data.config?.installed_version || '')
             setCoreForm({
                 xray_binary_path: data.config?.xray_binary_path || '', runtime_dir: data.config?.runtime_dir || '',
                 startup_timeout_seconds: Number(data.config?.startup_timeout_seconds) || 10,
@@ -667,7 +679,9 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
             const res = await apiFetch('/admin/proxies/core', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(coreForm) })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
             if (!res.ok) { onMessage('error', data.detail || t('messages.requestFailed')); return }
-            setCoreStatus(data.status || null); await refreshAllState(); onMessage('success', t('proxyManager.coreSaved'))
+            setCoreStatus(data.status || null)
+            await Promise.all([refreshAllState(), loadCoreStatus()])
+            onMessage('success', t('proxyManager.coreSaved'))
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) } finally { setSavingCore(false) }
     }
 
@@ -677,7 +691,9 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
             const res = await apiFetch('/admin/proxies/core/download', { method: 'POST' })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
             if (!res.ok) { onMessage('error', data.detail || t('messages.requestFailed')); return }
-            setCoreStatus(data.status || null); onMessage('success', t('proxyManager.coreDownloaded'))
+            setCoreStatus(data.status || null)
+            await Promise.all([refreshAllState(), loadCoreStatus()])
+            onMessage('success', t('proxyManager.coreDownloaded'))
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) } finally { setDownloadingCore(false) }
     }
 
@@ -693,11 +709,11 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
 
     const deleteProxy = async (proxy) => {
         const references = proxyDeletionSummary([proxy])
-        if (references.accountCount > 0 || references.fallbackCount > 0) {
+        if (references.fallbackCount > 0) {
             onMessage('error', proxyDeletionBlockedMessage(t, references))
             return
         }
-        if (!confirm(t('proxyManager.deleteConfirmSafe', { name: proxy.name || `${proxy.host}:${proxy.port}` }))) return
+        if (!confirm(proxyDeletionConfirmation(t, proxy, references.accountCount))) return
         try {
             const res = await apiFetch(`/admin/proxies/${encodeURIComponent(proxy.id)}`, { method: 'DELETE' })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
@@ -706,7 +722,9 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
                 onMessage('error', proxyDeletionBlockedMessage(t, conflict) || data.detail || t('messages.deleteFailed'))
                 return
             }
-            await refreshAllState(); onMessage('success', t('messages.deleted'))
+            await refreshAllState()
+            const moved = Array.isArray(data.route_changes) ? data.route_changes.length : 0
+            onMessage('success', moved > 0 ? t('proxyManager.deleteRouteMigrated', { count: moved }) : t('messages.deleted'))
             setTestResults(previous => { const next = { ...previous }; delete next[proxy.id]; return next })
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) }
     }
@@ -746,11 +764,14 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
         if (action === 'delete') {
             const selectedProxies = proxies.filter(proxy => selected.has(proxy.id))
             const references = proxyDeletionSummary(selectedProxies)
-            if (references.accountCount > 0 || references.fallbackCount > 0) {
+            if (references.fallbackCount > 0) {
                 onMessage('error', proxyDeletionBlockedMessage(t, references))
                 return
             }
-            if (!confirm(t('proxyManager.deleteSelectedConfirm', { count: proxyIDs.length }))) return
+            const confirmation = references.accountCount > 0
+                ? t('proxyManager.deleteSelectedConfirmRouted', { count: proxyIDs.length, accounts: references.accountCount })
+                : t('proxyManager.deleteSelectedConfirm', { count: proxyIDs.length })
+            if (!confirm(confirmation)) return
         }
         setBatchLoading(true)
         try {
@@ -761,7 +782,12 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
                 onMessage('error', proxyDeletionBlockedMessage(t, conflict) || data.detail || t('messages.requestFailed'))
                 return
             }
-            setSelected(new Set()); await refreshAllState(); onMessage('success', t('proxyManager.batchActionComplete', { count: data.affected || 0 }))
+            setSelected(new Set())
+            await refreshAllState()
+            const moved = Array.isArray(data.route_changes) ? data.route_changes.length : 0
+            onMessage('success', action === 'delete' && moved > 0
+                ? t('proxyManager.batchDeleteRouteMigrated', { count: data.affected || 0, accounts: moved })
+                : t('proxyManager.batchActionComplete', { count: data.affected || 0 }))
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) } finally { setBatchLoading(false) }
     }
 
@@ -812,11 +838,11 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
 
     const selectedProxies = proxies.filter(proxy => selected.has(proxy.id))
     const selectedDeletionReferences = proxyDeletionSummary(selectedProxies)
-    const selectedDeletionBlocked = selectedDeletionReferences.accountCount > 0 || selectedDeletionReferences.fallbackCount > 0
+    const selectedDeletionBlocked = selectedDeletionReferences.fallbackCount > 0
 
     return (
         <div className="space-y-6">
-            <CoreStatusPanel t={t} status={coreStatus} form={coreForm} setForm={setCoreForm} loading={savingCore} downloading={downloadingCore} onRefresh={loadCoreStatus} onSave={saveCoreSettings} onDownload={downloadCore} />
+            <CoreStatusPanel t={t} status={coreStatus} installedVersion={installedCoreVersion} form={coreForm} setForm={setCoreForm} loading={savingCore} downloading={downloadingCore} onRefresh={loadCoreStatus} onSave={saveCoreSettings} onDownload={downloadCore} />
             <ProxyPolicyPanel t={t} policy={policy} setPolicy={setPolicy} proxies={proxies} loading={savingPolicy} onSave={savePolicy} />
             <ProxySubscriptionsPanel t={t} subscriptions={subscriptions} busy={subscriptionBusy} onCreate={createSubscription} onUpdate={updateSubscription} onDelete={deleteSubscription} onRefresh={refreshSubscription} onRefreshAll={refreshAllSubscriptions} />
 

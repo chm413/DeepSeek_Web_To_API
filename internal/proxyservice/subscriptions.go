@@ -176,7 +176,7 @@ func RefreshSubscription(ctx context.Context, store Store, subscriptionID string
 		_ = recordSubscriptionFailure(store, subscriptionID, now, err)
 		return SubscriptionRefreshResult{}, err
 	}
-	if syncErr := xrayproxy.SyncAssigned(ctx, store.Snapshot()); syncErr != nil {
+	if syncErr := xrayproxy.SyncAssignedWithStore(ctx, store); syncErr != nil {
 		return result, fmt.Errorf("subscription updated but xray route sync failed: %w", syncErr)
 	}
 	return result, nil

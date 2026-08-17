@@ -485,6 +485,7 @@ func (m *Manager) extractVerifiedArchive(archivePath string, release *Release, c
 	if strings.TrimSpace(archiveTag) == "" {
 		return ErrInvalidRelease
 	}
+	archiveRoot := strings.TrimSuffix(prefix, "/")
 	reader := tar.NewReader(gzipReader)
 	var total int64
 	entries := 0
@@ -513,8 +514,17 @@ func (m *Manager) extractVerifiedArchive(archivePath string, release *Release, c
 		if err != nil {
 			return err
 		}
+		// tar writers are permitted to emit the top-level directory header
+		// without its conventional trailing slash. Accept that directory only;
+		// every runtime file must still live below the exact release root.
+		if name == archiveRoot {
+			if header.Typeflag != tar.TypeDir {
+				return fmt.Errorf("release archive contains an unexpected top-level path %q (expected directory %q)", name, archiveRoot)
+			}
+			continue
+		}
 		if !strings.HasPrefix(name, prefix) {
-			return errors.New("release archive contains an unexpected top-level path")
+			return fmt.Errorf("release archive contains an unexpected top-level path %q (expected root %q)", name, archiveRoot)
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:

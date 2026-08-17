@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,9 +43,15 @@ func ResolveOrDownload(ctx context.Context, settings Settings) (string, error) {
 	}
 	downloadDir := effectiveDownloadDir(settings)
 	if resolved, ok := executableFile(filepath.Join(downloadDir, xrayExecutableName())); ok {
+		PersistInstalledCore(settings, resolved)
 		return resolved, nil
 	}
-	return DownloadCore(ctx, settings, false)
+	resolved, err := DownloadCore(ctx, settings, false)
+	if err != nil {
+		return "", err
+	}
+	PersistInstalledCore(settings, resolved)
+	return resolved, nil
 }
 
 func DownloadCore(ctx context.Context, settings Settings, force bool) (string, error) {
@@ -98,12 +105,76 @@ func DownloadCore(ctx context.Context, settings Settings, force bool) (string, e
 
 func effectiveDownloadDir(settings Settings) string {
 	if value := strings.TrimSpace(os.ExpandEnv(settings.DownloadDir)); value != "" {
-		return filepath.Clean(value)
+		return absoluteDownloadDir(value)
 	}
 	if value := strings.TrimSpace(os.ExpandEnv(settings.BinaryPath)); value != "" {
-		return filepath.Dir(filepath.Clean(value))
+		return absoluteDownloadDir(filepath.Dir(value))
 	}
-	return filepath.Join("data", "xray")
+	return absoluteDownloadDir(filepath.Join("data", "xray"))
+}
+
+func absoluteDownloadDir(value string) string {
+	value = filepath.Clean(value)
+	if absolute, err := filepath.Abs(value); err == nil {
+		return absolute
+	}
+	return value
+}
+
+// PersistInstalledCore records an automatically managed Xray installation
+// through the optional settings callback. Persistence failures must not turn a
+// working local core into an unavailable proxy route, so they are logged.
+func PersistInstalledCore(settings Settings, binaryPath string) {
+	callback := settings.PersistInstallation
+	if callback == nil {
+		return
+	}
+	installation, ok := managedInstallation(settings, binaryPath)
+	if !ok {
+		return
+	}
+	if err := callback(installation); err != nil {
+		slog.Warn("[xray_proxy] persist managed core installation failed", "error", err)
+	}
+}
+
+func managedInstallation(settings Settings, binaryPath string) (Installation, bool) {
+	binaryPath, ok := executableFile(binaryPath)
+	if !ok {
+		return Installation{}, false
+	}
+	downloadDir := effectiveDownloadDir(settings)
+	expected := filepath.Join(downloadDir, xrayExecutableName())
+	if !sameLocalPath(binaryPath, expected) {
+		return Installation{}, false
+	}
+	return Installation{
+		BinaryPath:  binaryPath,
+		DownloadDir: downloadDir,
+		Version:     installedVersion(downloadDir),
+	}, true
+}
+
+func installedVersion(downloadDir string) string {
+	file, err := os.Open(filepath.Join(downloadDir, ".version"))
+	if err != nil {
+		return ""
+	}
+	content, readErr := io.ReadAll(io.LimitReader(file, 257))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(content) > 256 {
+		return ""
+	}
+	return strings.TrimSpace(string(content))
+}
+
+func sameLocalPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func fetchReleaseMetadata(ctx context.Context, version string) (releaseMetadata, error) {

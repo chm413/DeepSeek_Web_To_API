@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+
 	"DeepSeek_Web_To_API/internal/config"
 )
 
@@ -116,7 +118,7 @@ func TestProxyBatchActionDisablesSelectedNodes(t *testing.T) {
 	}
 }
 
-func TestProxyBatchDeleteRejectsAccountAndFallbackReferencesAtomically(t *testing.T) {
+func TestProxyBatchDeleteRejectsSelectedFallbackAtomically(t *testing.T) {
 	router := newHTTPAdminHarness(t, `{
 		"accounts":[{"email":"user@example.com","password":"pwd","proxy_id":"proxy-1"}],
 		"proxies":[
@@ -145,14 +147,8 @@ func TestProxyBatchDeleteRejectsAccountAndFallbackReferencesAtomically(t *testin
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode conflict: %v", err)
 	}
-	if len(payload.References) != 2 {
-		t.Fatalf("expected account and fallback references, got %#v", payload.References)
-	}
-	if payload.References[0].ProxyID != "proxy-1" || payload.References[0].AccountCount != 1 || payload.References[0].FallbackRoute {
-		t.Fatalf("unexpected account reference: %#v", payload.References[0])
-	}
-	if payload.References[1].ProxyID != "proxy-2" || payload.References[1].AccountCount != 0 || !payload.References[1].FallbackRoute {
-		t.Fatalf("unexpected fallback reference: %#v", payload.References[1])
+	if len(payload.References) != 1 || payload.References[0].ProxyID != "proxy-2" || payload.References[0].AccountCount != 0 || !payload.References[0].FallbackRoute {
+		t.Fatalf("unexpected fallback reference: %#v", payload.References)
 	}
 
 	listRec := httptest.NewRecorder()
@@ -168,6 +164,64 @@ func TestProxyBatchDeleteRejectsAccountAndFallbackReferencesAtomically(t *testin
 	}
 	if len(listing.Items) != 3 || !listing.Items[1].IsFallback {
 		t.Fatalf("blocked batch deletion changed proxy state: %#v", listing.Items)
+	}
+}
+
+func TestProxyBatchDeleteMigratesManualAndAutomaticRoutes(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_policy":{"auto_route_enabled":true,"fallback_proxy_id":"fallback"},
+		"proxies":[
+			{"id":"retired","type":"socks5","host":"127.0.0.1","port":1080},
+			{"id":"fallback","type":"socks5","host":"127.0.0.1","port":1081},
+			{"id":"healthy","type":"socks5","host":"127.0.0.1","port":1082,"last_test_at_unix":10,"last_test_success":true,"last_latency_ms":30}
+		],
+		"accounts":[
+			{"email":"manual@example.com","password":"pwd","token":"manual-token","proxy_id":"retired"},
+			{"email":"automatic@example.com","password":"pwd","token":"automatic-token","proxy_id":"retired","proxy_auto_route":true}
+		]
+	}`)
+	h.DS = nil // Persisted routes must be correct before relogin can run.
+	r := chi.NewRouter()
+	r.Post("/admin/proxies/actions", h.proxyBatchAction)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, adminReq(http.MethodPost, "/admin/proxies/actions", []byte(`{"proxy_ids":["retired"],"action":"delete"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected route migration, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	snapshot := h.Store.Snapshot()
+	if len(snapshot.Proxies) != 2 {
+		t.Fatalf("unexpected proxies after deletion: %#v", snapshot.Proxies)
+	}
+	accounts := map[string]config.Account{}
+	for _, account := range snapshot.Accounts {
+		accounts[account.Identifier()] = account
+	}
+	manual := accounts["manual@example.com"]
+	if manual.ProxyID != "fallback" || manual.Token != "" || manual.ProxyAutoRoute {
+		t.Fatalf("manual route was not moved to fallback: %#v", manual)
+	}
+	automatic := accounts["automatic@example.com"]
+	if automatic.ProxyID != "healthy" || automatic.Token != "" || !automatic.ProxyAutoRoute {
+		t.Fatalf("automatic route was not reassigned to a tested node: %#v", automatic)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("node_deleted")) || bytes.Contains(rec.Body.Bytes(), []byte(`"to_proxy_id":""`)) {
+		t.Fatalf("unexpected route migration result: %s", rec.Body.String())
+	}
+}
+
+func TestProxyBatchDeleteRejectsAutomaticRouteWithoutHealthyReplacement(t *testing.T) {
+	router := newHTTPAdminHarness(t, `{
+		"proxy_policy":{"auto_route_enabled":true},
+		"proxies":[{"id":"retired","type":"socks5","host":"127.0.0.1","port":1080}],
+		"accounts":[{"email":"automatic@example.com","password":"pwd","proxy_id":"retired","proxy_auto_route":true}]
+	}`, &testingDSMock{})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/proxies/actions", []byte(`{"proxy_ids":["retired"],"action":"delete"}`)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected safe rejection, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("no tested replacement node")) {
+		t.Fatalf("unexpected deletion error: %s", rec.Body.String())
 	}
 }
 

@@ -2,6 +2,7 @@ package proxyservice
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -99,6 +100,148 @@ func ReconcileAutoRoutes(store Store) ([]AutoRouteChange, error) {
 		return nil, err
 	}
 	return changes, nil
+}
+
+// ReassignDeletedProxyRoutes moves accounts away from proxies that are about to
+// be removed. Manual assignments move to the configured fallback route, while
+// automatic assignments are balanced across the remaining healthy route pool.
+// The caller removes the selected proxies only after this function succeeds,
+// so a deletion can remain atomic when there is no safe replacement route.
+func ReassignDeletedProxyRoutes(cfg *config.Config, deleted map[string]struct{}) ([]AutoRouteChange, error) {
+	if cfg == nil || len(deleted) == 0 {
+		return nil, nil
+	}
+
+	wanted := make(map[string]struct{}, len(deleted))
+	for id := range deleted {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+
+	remaining := make(map[string]config.Proxy, len(cfg.Proxies))
+	available := make(map[string]config.Proxy, len(cfg.Proxies))
+	for _, raw := range cfg.Proxies {
+		proxy := config.NormalizeProxy(raw)
+		if _, removing := wanted[proxy.ID]; removing {
+			continue
+		}
+		remaining[proxy.ID] = proxy
+		if proxyAvailableForRouting(proxy) {
+			available[proxy.ID] = proxy
+		}
+	}
+
+	fallbackID := strings.TrimSpace(cfg.ProxyPolicy.FallbackProxyID)
+	if fallbackID != "" {
+		if _, removing := wanted[fallbackID]; removing {
+			return nil, fmt.Errorf("configured fallback proxy %s is selected for deletion", fallbackID)
+		}
+	}
+
+	manual := make([]int, 0)
+	automatic := make([]int, 0)
+	for index := range cfg.Accounts {
+		account := &cfg.Accounts[index]
+		if _, removing := wanted[strings.TrimSpace(account.ProxyID)]; !removing {
+			continue
+		}
+		if account.ProxyAutoRoute {
+			automatic = append(automatic, index)
+			continue
+		}
+		manual = append(manual, index)
+	}
+
+	if len(manual) > 0 {
+		if fallbackID == "" {
+			return nil, errors.New("cannot delete assigned proxy without a configured fallback proxy")
+		}
+		fallback, exists := remaining[fallbackID]
+		if !exists {
+			return nil, fmt.Errorf("configured fallback proxy %s is unavailable", fallbackID)
+		}
+		if fallback.Disabled {
+			return nil, fmt.Errorf("configured fallback proxy %s is disabled", fallbackID)
+		}
+	}
+	if len(automatic) > 0 && !cfg.ProxyPolicy.AutoRouteEnabled() {
+		return nil, errors.New("cannot delete an automatic proxy route while automatic routing is disabled")
+	}
+	if len(automatic) > 0 && len(available) == 0 {
+		return nil, errors.New("cannot delete an automatic proxy route because no tested replacement node is available")
+	}
+
+	sort.Slice(manual, func(i, j int) bool {
+		return accountSortKey(cfg.Accounts[manual[i]], manual[i]) < accountSortKey(cfg.Accounts[manual[j]], manual[j])
+	})
+	sort.Slice(automatic, func(i, j int) bool {
+		return accountSortKey(cfg.Accounts[automatic[i]], automatic[i]) < accountSortKey(cfg.Accounts[automatic[j]], automatic[j])
+	})
+
+	counts := activeAssignmentsExcluding(*cfg, wanted)
+	changes := make([]AutoRouteChange, 0, len(manual)+len(automatic))
+	move := func(index int, targetID, reason string) {
+		account := &cfg.Accounts[index]
+		fromID := strings.TrimSpace(account.ProxyID)
+		if fromID == targetID {
+			return
+		}
+		account.ProxyID = targetID
+		account.Token = ""
+		if account.Disabled {
+			return
+		}
+		changes = append(changes, AutoRouteChange{
+			AccountID:   account.Identifier(),
+			FromProxyID: fromID,
+			ToProxyID:   targetID,
+			Reason:      reason,
+		})
+	}
+
+	for _, index := range manual {
+		move(index, fallbackID, "node_deleted_fallback")
+		if !cfg.Accounts[index].Disabled {
+			counts[fallbackID]++
+		}
+	}
+	for _, index := range automatic {
+		nextID := leastAssignedRoute(available, counts)
+		if nextID == "" {
+			return nil, errors.New("cannot delete an automatic proxy route because no tested replacement node is available")
+		}
+		move(index, nextID, "node_deleted")
+		if !cfg.Accounts[index].Disabled {
+			counts[nextID]++
+		}
+	}
+	return changes, nil
+}
+
+func activeAssignmentsExcluding(cfg config.Config, excluded map[string]struct{}) map[string]int {
+	counts := make(map[string]int)
+	for _, account := range cfg.Accounts {
+		if account.Disabled {
+			continue
+		}
+		proxyID := strings.TrimSpace(account.ProxyID)
+		if proxyID == "" {
+			continue
+		}
+		if _, removed := excluded[proxyID]; removed {
+			continue
+		}
+		counts[proxyID]++
+	}
+	return counts
+}
+
+func accountSortKey(account config.Account, index int) string {
+	return fmt.Sprintf("%s\x00%08d", account.Identifier(), index)
 }
 
 func planAutoRouteChanges(cfg config.Config) []AutoRouteChange {

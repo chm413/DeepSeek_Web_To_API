@@ -44,6 +44,60 @@ func TestResolverSkipsAccountReportedAsTemporarilyMuted(t *testing.T) {
 	}
 }
 
+func TestResolverPersistsTemporaryMuteForRestart(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[{"email":"muted@example.com","password":"pwd"}]
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+	until := time.Now().Add(time.Hour)
+	resolver.MarkAccountHealth("muted@example.com", &AccountHealthError{
+		State: account.HealthTemporarilyMuted,
+		Until: until,
+		Code:  50006,
+	})
+
+	stored, ok := store.FindAccount("muted@example.com")
+	if !ok || stored.CooldownState != config.AccountCooldownTemporarilyMuted || stored.CooldownUntilUnix != until.Unix() {
+		t.Fatalf("expected persisted mute state, got %#v, %v", stored, ok)
+	}
+	restarted := account.NewPool(store)
+	if health, ok := restarted.AccountHealth("muted@example.com"); !ok || health.State != account.HealthTemporarilyMuted {
+		t.Fatalf("expected mute after restart, got %#v, %v", health, ok)
+	}
+}
+
+func TestSuccessfulLoginClearsPersistedCooldown(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[{"email":"muted@example.com","password":"pwd"}]
+	}`)
+	store := config.LoadStore()
+	if err := store.SetAccountCooldown("muted@example.com", config.AccountCooldownTemporarilyMuted, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+	pool := account.NewPool(store)
+	resolver := NewResolver(store, pool, func(_ context.Context, _ config.Account) (string, error) {
+		return "fresh-token", nil
+	})
+	acc, ok := store.FindAccount("muted@example.com")
+	if !ok {
+		t.Fatal("expected seeded account")
+	}
+	a := &RequestAuth{UseConfigToken: true, AccountID: acc.Identifier(), Account: acc}
+	if err := resolver.loginAndPersist(context.Background(), a); err != nil {
+		t.Fatalf("successful login: %v", err)
+	}
+	stored, ok := store.FindAccount("muted@example.com")
+	if !ok || stored.CooldownState != "" || stored.CooldownUntilUnix != 0 {
+		t.Fatalf("expected cooldown cleared after successful login, got %#v, %v", stored, ok)
+	}
+}
+
 func TestResolverPermanentlyBannedAccountIsPersistentlyDisabled(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
 		"keys":["managed-key"],

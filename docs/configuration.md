@@ -164,7 +164,7 @@ STORE --> ALIASES
 | --- | --- | --- |
 | `safety.*` | `banned_content[]`、`banned_regex[]`、`jailbreak.{enabled,patterns[]}`、`auto_ban.{enabled,threshold,window_seconds}`、`blocked_ips[]`、`allowed_ips[]`、`blocked_conversation_ids[]` | requestguard policyCache、safety SQLite 镜像写入 |
 | `cache.response.*` | `memory_ttl_seconds`、`disk_ttl_seconds`、`memory_max_bytes`、`disk_max_bytes`、`max_body_bytes`、`semantic_key`、`dir` | ResponseCache（`ApplyOptions`） |
-| `runtime.*` | `account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`account_health_check_interval_minutes` | Account Pool；账号健康巡检间隔为 `0` 时关闭，启用或修改后需重启服务 |
+| `runtime.*` | `account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`account_health_check_interval_minutes` | Account Pool；账号健康巡检间隔为 `0` 时关闭，启用后按轮询每次只检查一个可用账号，启用或修改后需重启服务 |
 | `current_input_file.*` | `enabled`、`min_chars` | 请求预处理 |
 | `thinking_injection.*` | `enabled`、`prompt` | 请求预处理 |
 | `auto_delete.*` | `mode`、`sessions` | 历史自动清理 |

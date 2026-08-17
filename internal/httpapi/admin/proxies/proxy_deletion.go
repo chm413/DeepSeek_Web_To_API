@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/proxyservice"
 )
 
 const proxyDeletionReferencePreviewLimit = 25
@@ -28,6 +29,17 @@ type proxyDeletionConflictError struct {
 
 func (e *proxyDeletionConflictError) Error() string {
 	return "proxy deletion is blocked while selected proxies are referenced by accounts or the fallback route"
+}
+
+type proxyDeletionRouteError struct {
+	err error
+}
+
+func (e *proxyDeletionRouteError) Error() string {
+	if e == nil || e.err == nil {
+		return "proxy deletion cannot safely migrate its assigned routes"
+	}
+	return e.err.Error()
 }
 
 func proxyDeletionReferences(cfg config.Config, wanted map[string]struct{}) []proxyDeletionReference {
@@ -79,20 +91,59 @@ func proxyDeletionReferences(cfg config.Config, wanted map[string]struct{}) []pr
 }
 
 func ensureProxyDeletionAllowed(cfg config.Config, wanted map[string]struct{}) error {
-	if references := proxyDeletionReferences(cfg, wanted); len(references) > 0 {
-		return &proxyDeletionConflictError{References: references}
+	references := proxyDeletionReferences(cfg, wanted)
+	fallbackReferences := make([]proxyDeletionReference, 0, len(references))
+	for _, reference := range references {
+		if reference.FallbackRoute {
+			fallbackReferences = append(fallbackReferences, reference)
+		}
+	}
+	if len(fallbackReferences) > 0 {
+		return &proxyDeletionConflictError{References: fallbackReferences}
 	}
 	return nil
 }
 
+// applyProxyDeletionRoutes plans all route moves before removing a node. A
+// manual assignment must land on the configured fallback, while an automatic
+// assignment must land on another tested route. This prevents a successful
+// delete from silently leaving an account on direct egress.
+func applyProxyDeletionRoutes(cfg *config.Config, wanted map[string]struct{}) ([]proxyservice.AutoRouteChange, error) {
+	if cfg == nil {
+		return nil, errors.New("proxy deletion config is nil")
+	}
+	if err := ensureProxyDeletionAllowed(*cfg, wanted); err != nil {
+		return nil, err
+	}
+	changes, err := proxyservice.ReassignDeletedProxyRoutes(cfg, wanted)
+	if err != nil {
+		return nil, &proxyDeletionRouteError{err: err}
+	}
+	kept := make([]config.Proxy, 0, len(cfg.Proxies))
+	for _, raw := range cfg.Proxies {
+		proxy := config.NormalizeProxy(raw)
+		if _, removing := wanted[proxy.ID]; removing {
+			continue
+		}
+		kept = append(kept, proxy)
+	}
+	cfg.Proxies = kept
+	return changes, nil
+}
+
 func writeProxyDeletionConflict(w http.ResponseWriter, err error) bool {
 	var conflict *proxyDeletionConflictError
-	if !errors.As(err, &conflict) {
-		return false
+	if errors.As(err, &conflict) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"detail":     conflict.Error(),
+			"references": conflict.References,
+		})
+		return true
 	}
-	writeJSON(w, http.StatusConflict, map[string]any{
-		"detail":     conflict.Error(),
-		"references": conflict.References,
-	})
-	return true
+	var routing *proxyDeletionRouteError
+	if errors.As(err, &routing) {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": routing.Error()})
+		return true
+	}
+	return false
 }

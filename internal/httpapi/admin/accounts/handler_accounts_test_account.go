@@ -68,15 +68,24 @@ func (h *Handler) recordAccountHealth(identifier string, err error, result map[s
 		result["health_until"] = healthErr.Until
 	}
 	recorder, canRecord := h.Pool.(interface {
+		MarkRateLimited(string, time.Time, string)
 		MarkTemporaryMute(string, time.Time, string)
 		MarkPermanentlyBanned(string, string)
 		MarkInvalidCredentials(string, string)
 	})
 	switch healthErr.State {
-	case account.HealthTemporarilyMuted:
+	case account.HealthRateLimited:
+		until := accountTestCooldownUntil(healthErr.State, healthErr.Until)
 		if canRecord {
-			recorder.MarkTemporaryMute(identifier, healthErr.Until, healthErr.Error())
+			recorder.MarkRateLimited(identifier, until, healthErr.Error())
 		}
+		h.persistAccountCooldown(identifier, healthErr.State, until, result)
+	case account.HealthTemporarilyMuted:
+		until := accountTestCooldownUntil(healthErr.State, healthErr.Until)
+		if canRecord {
+			recorder.MarkTemporaryMute(identifier, until, healthErr.Error())
+		}
+		h.persistAccountCooldown(identifier, healthErr.State, until, result)
 	case account.HealthPermanentlyBanned:
 		if canRecord {
 			recorder.MarkPermanentlyBanned(identifier, healthErr.Error())
@@ -102,6 +111,45 @@ func (h *Handler) clearAccountHealth(identifier string) {
 	if clearer, ok := h.Pool.(interface{ ClearHealth(string) }); ok {
 		clearer.ClearHealth(identifier)
 	}
+	if err := h.Store.Update(func(c *config.Config) error {
+		for i := range c.Accounts {
+			if !accountMatchesIdentifier(c.Accounts[i], identifier) {
+				continue
+			}
+			c.Accounts[i].CooldownState = ""
+			c.Accounts[i].CooldownUntilUnix = 0
+			return nil
+		}
+		return newRequestError("账号不存在")
+	}); err != nil {
+		config.Logger.Warn("[admin_account] clear persisted cooldown failed", "account", identifier, "error", err)
+	}
+}
+
+func (h *Handler) persistAccountCooldown(identifier string, state account.HealthState, until time.Time, result map[string]any) {
+	if err := h.Store.Update(func(c *config.Config) error {
+		for i := range c.Accounts {
+			if !accountMatchesIdentifier(c.Accounts[i], identifier) {
+				continue
+			}
+			c.Accounts[i].CooldownState = string(state)
+			c.Accounts[i].CooldownUntilUnix = until.Unix()
+			return nil
+		}
+		return newRequestError("账号不存在")
+	}); err != nil {
+		result["config_warning"] = "temporary account cooldown persistence failed: " + err.Error()
+	}
+}
+
+func accountTestCooldownUntil(state account.HealthState, until time.Time) time.Time {
+	if !until.IsZero() {
+		return until
+	}
+	if state == account.HealthTemporarilyMuted {
+		return time.Now().Add(7 * 24 * time.Hour)
+	}
+	return time.Now().Add(time.Minute)
 }
 
 func newAccountTestResult(identifier, model string, configWritable bool) map[string]any {

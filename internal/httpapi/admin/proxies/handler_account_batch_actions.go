@@ -150,6 +150,8 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 					account.DisabledReason = ""
 					account.DisabledAtUnix = 0
 				}
+				account.CooldownState = ""
+				account.CooldownUntilUnix = 0
 				affected++
 			}
 		}

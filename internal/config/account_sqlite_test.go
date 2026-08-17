@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAccountSQLiteMigratesFileBackedAccountsAndKeepsConfigClean(t *testing.T) {
@@ -186,5 +187,40 @@ func TestAccountSQLiteMergesAccountsStillPresentInLegacyConfig(t *testing.T) {
 	}
 	if accounts[1].Email != "new@example.com" {
 		t.Fatalf("missing legacy account import: %#v", accounts)
+	}
+}
+
+func TestAccountSQLitePersistsCooldownAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	accountsPath := filepath.Join(dir, "accounts.sqlite")
+	body := `{"accounts":[{"email":"muted@example.com","password":"p"}],"storage":{"accounts_sqlite_path":` + quoteJSON(accountsPath) + `}}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", "")
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	until := time.Now().Add(time.Hour)
+	if err := store.SetAccountCooldown("muted@example.com", AccountCooldownTemporarilyMuted, until); err != nil {
+		t.Fatalf("set cooldown: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reloaded, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer func() { _ = reloaded.Close() }()
+	acc, ok := reloaded.FindAccount("muted@example.com")
+	if !ok || acc.CooldownState != AccountCooldownTemporarilyMuted || acc.CooldownUntilUnix != until.Unix() {
+		t.Fatalf("expected durable cooldown, got %#v, %v", acc, ok)
 	}
 }

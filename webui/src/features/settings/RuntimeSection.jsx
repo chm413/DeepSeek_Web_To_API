@@ -71,6 +71,7 @@ export default function RuntimeSection({ t, form, setForm }) {
                         }))}
                         className="w-full bg-background border border-border rounded-lg px-3 py-2"
                     />
+                    <span className="block text-xs leading-5 text-muted-foreground">{t('settings.accountHealthCheckHint')}</span>
                 </label>
             </div>
         </div>

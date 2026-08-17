@@ -59,10 +59,10 @@ func TestProxies(ctx context.Context, store Store, proxyIDs []string, concurrenc
 		}
 	}
 	if len(coreSpecs) > 0 {
-		if _, err := xrayproxy.Default().EnsureMany(ctx, coreSpecs, xrayproxy.SettingsFromConfig(snapshot.ProxyCore)); err != nil {
+		if _, err := xrayproxy.Default().EnsureMany(ctx, coreSpecs, xrayproxy.SettingsFromStore(store)); err != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			if syncErr := xrayproxy.SyncAssigned(cleanupCtx, store.Snapshot()); syncErr != nil {
+			if syncErr := xrayproxy.SyncAssignedWithStore(cleanupCtx, store); syncErr != nil {
 				config.Logger.Warn("[proxy_test] restore assigned xray routes after startup failure", "error", syncErr)
 			}
 			return nil, err
@@ -70,7 +70,7 @@ func TestProxies(ctx context.Context, store Store, proxyIDs []string, concurrenc
 		defer func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			if err := xrayproxy.SyncAssigned(cleanupCtx, store.Snapshot()); err != nil {
+			if err := xrayproxy.SyncAssignedWithStore(cleanupCtx, store); err != nil {
 				config.Logger.Warn("[proxy_test] restore assigned xray routes failed", "error", err)
 			}
 		}()
@@ -109,7 +109,7 @@ func TestProxies(ctx context.Context, store Store, proxyIDs []string, concurrenc
 	if err := applyTestResults(store, out); err != nil {
 		return nil, err
 	}
-	if err := xrayproxy.SyncAssigned(ctx, store.Snapshot()); err != nil {
+	if err := xrayproxy.SyncAssignedWithStore(ctx, store); err != nil {
 		return out, fmt.Errorf("proxy tests completed but xray route sync failed: %w", err)
 	}
 	return out, nil

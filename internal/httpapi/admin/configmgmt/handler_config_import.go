@@ -226,7 +226,7 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	xrayproxy.Default().StopAll()
-	if err := xrayproxy.SyncAssigned(r.Context(), h.Store.Snapshot()); err != nil {
+	if err := xrayproxy.SyncAssignedWithStore(r.Context(), h.Store); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "config imported but xray route sync failed: " + err.Error()})
 		return
 	}

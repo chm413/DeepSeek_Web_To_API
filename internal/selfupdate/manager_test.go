@@ -139,6 +139,53 @@ func TestManagerRejectsTraversalArchive(t *testing.T) {
 	}
 }
 
+func TestManagerStagesArchiveWithBareTopLevelDirectory(t *testing.T) {
+	const tag = "v1.2.0"
+	archive := releaseArchiveWithBareTopLevelDirectory(t, tag, "amd64")
+	checksum := sha256.Sum256(archive)
+	server := releaseServer(t, tag, "amd64", archive, hex.EncodeToString(checksum[:]))
+	defer server.Close()
+
+	container := true
+	manager := New(nil, Options{
+		Root:           t.TempDir(),
+		GitHubAPI:      server.URL,
+		HTTPClient:     server.Client(),
+		GOOS:           "linux",
+		GOARCH:         "amd64",
+		CurrentVersion: func() string { return "1.1.9" },
+		Container:      &container,
+	})
+	if _, err := manager.Download(context.Background(), tag); err != nil {
+		t.Fatalf("stage archive with bare top-level directory: %v", err)
+	}
+	if staged, err := manager.stagedRelease(tag); err != nil || !staged {
+		t.Fatalf("release was not staged: staged=%v err=%v", staged, err)
+	}
+}
+
+func TestManagerRejectsRegularFileAtReleaseRoot(t *testing.T) {
+	const tag = "v1.2.0"
+	archive := releaseArchiveWithBareRootFile(t, tag, "amd64")
+	checksum := sha256.Sum256(archive)
+	server := releaseServer(t, tag, "amd64", archive, hex.EncodeToString(checksum[:]))
+	defer server.Close()
+
+	container := true
+	manager := New(nil, Options{
+		Root:           t.TempDir(),
+		GitHubAPI:      server.URL,
+		HTTPClient:     server.Client(),
+		GOOS:           "linux",
+		GOARCH:         "amd64",
+		CurrentVersion: func() string { return "1.1.9" },
+		Container:      &container,
+	})
+	if _, err := manager.Download(context.Background(), tag); err == nil || !strings.Contains(err.Error(), "unexpected top-level path") {
+		t.Fatalf("expected regular top-level root file to fail, got %v", err)
+	}
+}
+
 func TestManagerUpdateSettingsPersistsAndRejectsAutoApplyOutsideContainer(t *testing.T) {
 	store := &memoryStore{}
 	container := false
@@ -310,6 +357,11 @@ func releaseArchive(t *testing.T, tag, arch string, extra map[string][]byte) []b
 	gzipWriter := gzip.NewWriter(&buffer)
 	tarWriter := tar.NewWriter(gzipWriter)
 	prefix := "deepseek-web-to-api_" + tag + "_linux_" + arch + "/"
+	// GNU tar writes this directory header for the release layout produced by
+	// scripts/build-release-archives.sh.
+	if err := tarWriter.WriteHeader(&tar.Header{Name: prefix, Mode: 0o755, Typeflag: tar.TypeDir}); err != nil {
+		t.Fatalf("write release root directory: %v", err)
+	}
 	write := func(name string, data []byte, mode int64) {
 		t.Helper()
 		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
@@ -319,11 +371,62 @@ func releaseArchive(t *testing.T, tag, arch string, extra map[string][]byte) []b
 			t.Fatalf("write archive data: %v", err)
 		}
 	}
+	write(prefix+"README.MD", []byte("# DeepSeek Web To API\n"), 0o644)
+	write(prefix+"README.en.md", []byte("# DeepSeek Web To API\n"), 0o644)
+	write(prefix+".env.example", []byte("PORT=5000\n"), 0o640)
+	write(prefix+"LICENSE", []byte("license\n"), 0o644)
 	write(prefix+"deepseek-web-to-api", []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	write(prefix+"static/admin/index.html", []byte("<!doctype html>"), 0o644)
 	write(prefix+"config.example.json", []byte("{}"), 0o640)
 	for name, data := range extra {
 		write(prefix+name, data, 0o644)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar archive: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip archive: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func releaseArchiveWithBareTopLevelDirectory(t *testing.T, tag, arch string) []byte {
+	t.Helper()
+	return releaseArchiveWithRootHeader(t, tag, arch, tar.TypeDir, nil)
+}
+
+func releaseArchiveWithBareRootFile(t *testing.T, tag, arch string) []byte {
+	t.Helper()
+	return releaseArchiveWithRootHeader(t, tag, arch, tar.TypeReg, []byte("not a directory"))
+}
+
+func releaseArchiveWithRootHeader(t *testing.T, tag, arch string, rootType byte, rootData []byte) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	prefix := "deepseek-web-to-api_" + tag + "_linux_" + arch + "/"
+	root := strings.TrimSuffix(prefix, "/")
+	if err := tarWriter.WriteHeader(&tar.Header{Name: root, Mode: 0o755, Size: int64(len(rootData)), Typeflag: rootType}); err != nil {
+		t.Fatalf("write root archive header: %v", err)
+	}
+	if len(rootData) > 0 {
+		if _, err := tarWriter.Write(rootData); err != nil {
+			t.Fatalf("write root archive data: %v", err)
+		}
+	}
+	if rootType == tar.TypeDir {
+		write := func(name string, data []byte, mode int64) {
+			t.Helper()
+			if err := tarWriter.WriteHeader(&tar.Header{Name: prefix + name, Mode: mode, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
+				t.Fatalf("write archive header: %v", err)
+			}
+			if _, err := tarWriter.Write(data); err != nil {
+				t.Fatalf("write archive data: %v", err)
+			}
+		}
+		write("deepseek-web-to-api", []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		write("static/admin/index.html", []byte("<!doctype html>"), 0o644)
 	}
 	if err := tarWriter.Close(); err != nil {
 		t.Fatalf("close tar archive: %v", err)

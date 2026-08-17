@@ -167,7 +167,7 @@ func TestAddProxyDoesNotFailOnUnrelatedInvalidRuntimeConfig(t *testing.T) {
 	}
 }
 
-func TestDeleteProxyRejectsAssignedAccountReferenceWithoutMutatingRoutes(t *testing.T) {
+func TestDeleteProxyRejectsAssignedAccountWithoutFallbackWithoutMutatingRoutes(t *testing.T) {
 	h := newAdminProxyTestHandler(t, `{
 		"proxies":[{"id":"proxy-1","name":"Node 1","type":"socks5","host":"127.0.0.1","port":1080}],
 		"accounts":[{"email":"u@example.com","password":"pwd","proxy_id":"proxy-1"}]
@@ -193,18 +193,38 @@ func TestDeleteProxyRejectsAssignedAccountReferenceWithoutMutatingRoutes(t *test
 	if snap.Accounts[0].ProxyID != "proxy-1" {
 		t.Fatalf("assigned route was silently cleared: %#v", snap.Accounts[0])
 	}
-	var payload struct {
-		References []struct {
-			ProxyID            string   `json:"proxy_id"`
-			AccountCount       int      `json:"account_count"`
-			AccountIdentifiers []string `json:"account_identifiers"`
-		} `json:"references"`
+	if !bytes.Contains(rec.Body.Bytes(), []byte("configured fallback")) {
+		t.Fatalf("expected fallback routing error, got %s", rec.Body.String())
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode conflict: %v", err)
+}
+
+func TestDeleteProxyMigratesAssignedAccountToFallback(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxies":[
+			{"id":"proxy-1","name":"Retired","type":"socks5","host":"127.0.0.1","port":1080},
+			{"id":"proxy-2","name":"Fallback","type":"socks5","host":"127.0.0.1","port":1081}
+		],
+		"proxy_policy":{"fallback_proxy_id":"proxy-2"},
+		"accounts":[{"email":"u@example.com","password":"pwd","token":"stale","proxy_id":"proxy-1"}]
+	}`)
+	h.DS = nil // Verify the persisted routing change independently of relogin.
+
+	r := chi.NewRouter()
+	r.Delete("/admin/proxies/{proxyID}", h.deleteProxy)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/admin/proxies/proxy-1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected fallback migration, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(payload.References) != 1 || payload.References[0].ProxyID != "proxy-1" || payload.References[0].AccountCount != 1 || len(payload.References[0].AccountIdentifiers) != 1 || payload.References[0].AccountIdentifiers[0] != "u@example.com" {
-		t.Fatalf("unexpected deletion references: %#v", payload.References)
+	snap := h.Store.Snapshot()
+	if len(snap.Proxies) != 1 || snap.Proxies[0].ID != "proxy-2" {
+		t.Fatalf("unexpected remaining proxies: %#v", snap.Proxies)
+	}
+	if len(snap.Accounts) != 1 || snap.Accounts[0].ProxyID != "proxy-2" || snap.Accounts[0].Token != "" {
+		t.Fatalf("manual account was not moved to fallback with token invalidation: %#v", snap.Accounts)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("node_deleted_fallback")) {
+		t.Fatalf("missing route-change summary: %s", rec.Body.String())
 	}
 }
 

@@ -27,6 +27,17 @@ type Settings struct {
 	AutoDownload    bool
 	DownloadDir     string
 	DownloadVersion string
+	// PersistInstallation is set by store-aware callers. It receives only
+	// local core metadata after an automatic download or managed-core reuse.
+	PersistInstallation func(Installation) error
+}
+
+// Installation describes a managed Xray installation without exposing proxy
+// credentials or node configuration.
+type Installation struct {
+	BinaryPath  string
+	DownloadDir string
+	Version     string
 }
 
 type Status struct {

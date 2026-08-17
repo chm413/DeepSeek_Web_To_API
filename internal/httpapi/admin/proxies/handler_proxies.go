@@ -165,6 +165,7 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 	if decoded, err := url.PathUnescape(proxyID); err == nil {
 		proxyID = decoded
 	}
+	var routeChanges []proxyservice.AutoRouteChange
 	err := h.Store.Update(func(c *config.Config) error {
 		idx := -1
 		for i, existing := range c.Proxies {
@@ -177,10 +178,11 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		if idx < 0 {
 			return newRequestError("代理不存在")
 		}
-		if err := ensureProxyDeletionAllowed(*c, map[string]struct{}{strings.TrimSpace(proxyID): {}}); err != nil {
-			return err
+		var routeErr error
+		routeChanges, routeErr = applyProxyDeletionRoutes(c, map[string]struct{}{strings.TrimSpace(proxyID): {}})
+		if routeErr != nil {
+			return routeErr
 		}
-		c.Proxies = append(c.Proxies[:idx], c.Proxies[idx+1:]...)
 		return validateProxyMutation(c)
 	})
 	if err != nil {
@@ -198,8 +200,13 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
+	relogin := h.reloginRouteChanges(r.Context(), routeChanges, false)
 	h.Pool.Reset()
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+	response := map[string]any{"success": true, "route_changes": routeChanges}
+	if len(relogin) > 0 {
+		response["relogin"] = relogin
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) testProxy(w http.ResponseWriter, r *http.Request) {
@@ -338,7 +345,7 @@ func (h *Handler) reconcileAndSyncProxyRoutes(ctx context.Context) (map[string]m
 	if err != nil {
 		return nil, err
 	}
-	if err := syncProxyRoutes(ctx, h.Store.Snapshot()); err != nil {
+	if err := syncProxyRoutes(ctx, h.Store); err != nil {
 		return nil, err
 	}
 	results := h.reloginAutoRouteChanges(ctx, changes)
@@ -406,8 +413,8 @@ func (h *Handler) reloginRouteChanges(ctx context.Context, changes []proxyservic
 	return results
 }
 
-func syncProxyRoutes(ctx context.Context, cfg config.Config) error {
+func syncProxyRoutes(ctx context.Context, store xrayproxy.CoreConfigStore) error {
 	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	return xrayproxy.SyncAssigned(syncCtx, cfg)
+	return xrayproxy.SyncAssignedWithStore(syncCtx, store)
 }

@@ -21,7 +21,7 @@ func promptLimitConfigured(p PromptLimitConfig) bool {
 func proxyCoreConfigured(c ProxyCoreConfig) bool {
 	return strings.TrimSpace(c.XrayBinaryPath) != "" || strings.TrimSpace(c.RuntimeDir) != "" ||
 		c.StartupTimeoutSeconds > 0 || c.AutoDownloadDisabled || strings.TrimSpace(c.DownloadDir) != "" ||
-		strings.TrimSpace(c.DownloadVersion) != ""
+		strings.TrimSpace(c.DownloadVersion) != "" || strings.TrimSpace(c.InstalledVersion) != ""
 }
 
 func proxyPolicyConfigured(p ProxyPolicyConfig) bool {

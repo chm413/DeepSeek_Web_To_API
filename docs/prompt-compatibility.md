@@ -77,12 +77,20 @@ prompt. A Flash no-thinking planner selects a semantically safe UTF-16 split
 boundary, and the gateway validates that boundary before use. Each non-final
 fragment is sent on one fixed upstream session and branch. The gateway waits
 until both a `response_message_id` and the first reasoning/content fragment
-arrive, closes that response stream, sends a random probe, sends an explicit
-cancel/retain-context control turn, and then advances to the next fragment.
-Probe and cancellation turns are committed only when their response message ID
-actually advances beyond the current parent. Empty or prematurely closed
-control streams are retried up to four times with incremental backoff, so the
-final fragment is never attached to an unfinished parent response.
+arrive, closes that response stream, sends a random checkpoint probe, sends an
+explicit cancel/retain-context control turn, and then advances to the next
+fragment. Probe and cancellation turns explicitly request a short reasoning
+acknowledgement and are closed as soon as that acknowledgement plus a new
+response message ID arrive. This avoids treating the web backend's legitimate
+no-thinking immediate `[DONE]` response as a committed control turn. Empty or
+prematurely closed control streams are retried up to four times with
+incremental backoff, so the final fragment is never attached to an unfinished
+parent response. A completed control stream that advances the response ID is
+also accepted when the backend omits its visible acknowledgement; an immediate
+`[DONE]` without a new ID is not. If an intermediate fragment itself has a new
+response ID but ends without visible content, that ID is only a provisional
+parent: the random checkpoint must successfully acknowledge it before any later
+fragment can be attached.
 The final fragment is sent to the originally requested model as a pinned child
 turn. Every fragment, probe, cancellation turn, and final turn repeats the
 request's forced response-format prompt. The original `StandardRequest`, usage

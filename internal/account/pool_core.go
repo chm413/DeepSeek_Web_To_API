@@ -39,7 +39,11 @@ func NewPool(store *config.Store) *Pool {
 }
 
 func (p *Pool) Reset() {
+	if p == nil || p.store == nil {
+		return
+	}
 	accounts := p.store.Accounts()
+	now := time.Now()
 	sort.SliceStable(accounts, func(i, j int) bool {
 		iHas := accounts[i].Token != ""
 		jHas := accounts[j].Token != ""
@@ -49,6 +53,7 @@ func (p *Pool) Reset() {
 		return iHas
 	})
 	ids := make([]string, 0, len(accounts))
+	persistedHealth := make(map[string]Health, len(accounts))
 	for _, a := range accounts {
 		if a.Disabled {
 			continue
@@ -56,6 +61,9 @@ func (p *Pool) Reset() {
 		id := a.Identifier()
 		if id != "" {
 			ids = append(ids, id)
+			if health, ok := persistedCooldownHealth(a, now); ok {
+				persistedHealth[id] = health
+			}
 		}
 	}
 	if p.store != nil {
@@ -85,7 +93,18 @@ func (p *Pool) Reset() {
 	for id := range p.health {
 		if _, ok := active[id]; !ok {
 			delete(p.health, id)
+			continue
 		}
+		if persisted, ok := persistedHealth[id]; ok {
+			p.health[id] = persisted
+			continue
+		}
+		if health := p.health[id]; isTransientHealth(health.State) && !health.Until.After(now) {
+			delete(p.health, id)
+		}
+	}
+	for id, health := range persistedHealth {
+		p.health[id] = health
 	}
 	p.recommendedConcurrency = recommended
 	p.maxQueueSize = queueLimit
@@ -99,6 +118,23 @@ func (p *Pool) Reset() {
 		"max_queue_size", p.maxQueueSize,
 	)
 	warnLowGlobalMaxInflight(p.globalMaxInflight, p.maxInflightPerAccount, len(ids))
+}
+
+func persistedCooldownHealth(acc config.Account, now time.Time) (Health, bool) {
+	until := time.Unix(acc.CooldownUntilUnix, 0)
+	if !until.After(now) {
+		return Health{}, false
+	}
+	state := HealthState(acc.CooldownState)
+	if state != HealthRateLimited && state != HealthTemporarilyMuted {
+		return Health{}, false
+	}
+	return Health{
+		State:     state,
+		Until:     until,
+		Reason:    "restored persisted cooldown",
+		UpdatedAt: now,
+	}, true
 }
 
 func (p *Pool) Release(accountID string) {
@@ -118,6 +154,18 @@ func (p *Pool) Release(accountID string) {
 	}
 	p.inUse[accountID] = count - 1
 	p.notifyWaiterLocked()
+}
+
+// AccountInUse reports whether an account currently owns at least one request
+// slot. Background checks use this to avoid competing with a real completion
+// on the same upstream account.
+func (p *Pool) AccountInUse(accountID string) bool {
+	if p == nil || accountID == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inUse[accountID] > 0
 }
 
 func (p *Pool) Status() map[string]any {

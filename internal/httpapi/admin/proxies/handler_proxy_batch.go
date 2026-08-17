@@ -74,6 +74,7 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	affected := 0
+	var routeChanges []proxyservice.AutoRouteChange
 	err := h.Store.Update(func(cfg *config.Config) error {
 		now := time.Now().Unix()
 		if action == "delete" {
@@ -87,19 +88,12 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 			if len(found) != len(wanted) {
 				return newRequestError("one or more selected proxies do not exist")
 			}
-			if err := ensureProxyDeletionAllowed(*cfg, wanted); err != nil {
-				return err
+			var routeErr error
+			routeChanges, routeErr = applyProxyDeletionRoutes(cfg, wanted)
+			if routeErr != nil {
+				return routeErr
 			}
-			kept := make([]config.Proxy, 0, len(cfg.Proxies))
-			for _, proxy := range cfg.Proxies {
-				proxy = config.NormalizeProxy(proxy)
-				if _, exists := wanted[proxy.ID]; !exists {
-					kept = append(kept, proxy)
-					continue
-				}
-				affected++
-			}
-			cfg.Proxies = kept
+			affected = len(wanted)
 		} else {
 			for i := range cfg.Proxies {
 				proxy := config.NormalizeProxy(cfg.Proxies[i])
@@ -133,6 +127,14 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
+	relogin := h.reloginRouteChanges(r.Context(), routeChanges, false)
 	h.Pool.Reset()
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "action": action, "affected": affected})
+	response := map[string]any{"success": true, "action": action, "affected": affected}
+	if action == "delete" {
+		response["route_changes"] = routeChanges
+		if len(relogin) > 0 {
+			response["relogin"] = relogin
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }

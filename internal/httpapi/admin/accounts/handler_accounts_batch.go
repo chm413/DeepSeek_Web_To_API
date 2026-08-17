@@ -288,6 +288,8 @@ func mergeBatchAccount(existing, incoming config.Account, input batchAccountInpu
 			existing.DisabledReason = ""
 			existing.DisabledAtUnix = 0
 		}
+		existing.CooldownState = ""
+		existing.CooldownUntilUnix = 0
 	}
 	return existing
 }

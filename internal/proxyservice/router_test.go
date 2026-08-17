@@ -68,3 +68,54 @@ func TestReconcileAutoRoutesMovesOnlyFailedAssignments(t *testing.T) {
 		t.Fatalf("manual route should stay untouched: %#v", snapshot.Accounts[1])
 	}
 }
+
+func TestReassignDeletedProxyRoutesUsesFallbackAndHealthyAutomaticRoute(t *testing.T) {
+	enabled := true
+	cfg := config.Config{
+		ProxyPolicy: config.ProxyPolicyConfig{AutomaticRoutingEnabled: &enabled, FallbackProxyID: "fallback"},
+		Proxies: []config.Proxy{
+			{ID: "retired", Type: "socks5", Host: "127.0.0.1", Port: 1080},
+			{ID: "fallback", Type: "socks5", Host: "127.0.0.1", Port: 1081},
+			{ID: "healthy", Type: "socks5", Host: "127.0.0.1", Port: 1082, LastTestAtUnix: 1, LastTestSuccess: true},
+		},
+		Accounts: []config.Account{
+			{Email: "manual@example.com", Password: "pwd", Token: "manual-token", ProxyID: "retired"},
+			{Email: "automatic@example.com", Password: "pwd", Token: "automatic-token", ProxyID: "retired", ProxyAutoRoute: true},
+		},
+	}
+
+	changes, err := ReassignDeletedProxyRoutes(&cfg, map[string]struct{}{"retired": {}})
+	if err != nil {
+		t.Fatalf("reassign routes: %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("unexpected route changes: %#v", changes)
+	}
+	if cfg.Accounts[0].ProxyID != "fallback" || cfg.Accounts[0].Token != "" {
+		t.Fatalf("manual account did not move to fallback: %#v", cfg.Accounts[0])
+	}
+	if cfg.Accounts[1].ProxyID != "healthy" || cfg.Accounts[1].Token != "" {
+		t.Fatalf("automatic account did not move to healthy replacement: %#v", cfg.Accounts[1])
+	}
+	for _, change := range changes {
+		if change.ToProxyID == "" {
+			t.Fatalf("deletion produced a direct route: %#v", change)
+		}
+	}
+}
+
+func TestReassignDeletedProxyRoutesRejectsAutomaticDeletionWithoutReplacementAtomically(t *testing.T) {
+	enabled := true
+	cfg := config.Config{
+		ProxyPolicy: config.ProxyPolicyConfig{AutomaticRoutingEnabled: &enabled},
+		Proxies:     []config.Proxy{{ID: "retired", Type: "socks5", Host: "127.0.0.1", Port: 1080}},
+		Accounts:    []config.Account{{Email: "automatic@example.com", Password: "pwd", Token: "keep", ProxyID: "retired", ProxyAutoRoute: true}},
+	}
+	before := cfg.Accounts[0]
+	if _, err := ReassignDeletedProxyRoutes(&cfg, map[string]struct{}{"retired": {}}); err == nil {
+		t.Fatal("expected missing replacement to reject deletion")
+	}
+	if cfg.Accounts[0] != before || len(cfg.Proxies) != 1 || cfg.Proxies[0].ID != "retired" {
+		t.Fatalf("failed route plan mutated config: before=%#v after=%#v", before, cfg)
+	}
+}

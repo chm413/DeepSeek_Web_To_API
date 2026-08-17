@@ -19,6 +19,8 @@ SOCKS5/SOCKS5H 由 Go HTTP 客户端直接使用，不进入 Xray 配置；Shado
 
 默认启用 Xray 自动下载。应用从官方 `XTLS/Xray-core` GitHub Releases 获取当前平台的压缩包，提取 Xray 可执行文件、`geoip.dat` 和 `geosite.dat`，默认保存到 `data/xray`。
 
+自动下载成功，或后续发现该受管理目录中的现有核心后，服务会把解析后的绝对 `download_dir` 和本地 `.version` 标记写回 `proxy_core`。`installed_version` 仅表示当前已安装版本；它不会覆盖用户设置的 `download_version`，因此固定版本与“最新稳定版”请求仍按原配置生效。这样进程重启、工作目录变化或容器重新拉起时会复用同一份已下载核心，而不会重复下载。
+
 查找顺序：
 
 1. `proxy_core.xray_binary_path`。
@@ -37,12 +39,13 @@ Docker 容器以非 root 用户运行，`/app/data` 可写；Compose 将其映�
     "startup_timeout_seconds": 10,
     "auto_download_disabled": false,
     "download_dir": "data/xray",
-    "download_version": ""
+    "download_version": "",
+    "installed_version": ""
   }
 }
 ```
 
-`download_version` 留空表示最新稳定版；也可固定为 `v26.3.27` 等明确版本。管理台可手动触发重新下载。
+`download_version` 留空表示最新稳定版；也可固定为 `v26.3.27` 等明确版本。`installed_version` 由服务端维护，不需要手动填写。管理台可手动触发重新下载。
 
 ## 机场订阅
 

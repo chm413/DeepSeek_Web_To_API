@@ -93,3 +93,25 @@ func TestPoolRateLimitAndRuntimeStatus(t *testing.T) {
 		t.Fatal("rate-limit cooldown should expire")
 	}
 }
+
+func TestPoolRestoresPersistedCooldownAfterRestart(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"accounts":[{"email":"muted@example.com","password":"pwd"}]
+	}`)
+	store := config.LoadStore()
+	until := time.Now().Add(time.Hour)
+	if err := store.SetAccountCooldown("muted@example.com", config.AccountCooldownTemporarilyMuted, until); err != nil {
+		t.Fatalf("persist cooldown: %v", err)
+	}
+
+	// A fresh pool models a server restart: it must restore the persisted mute
+	// before selecting an account for any new request.
+	restarted := NewPool(store)
+	health, ok := restarted.AccountHealth("muted@example.com")
+	if !ok || health.State != HealthTemporarilyMuted || health.Until.Unix() != until.Unix() {
+		t.Fatalf("expected restored cooldown, got %#v, %v", health, ok)
+	}
+	if _, ok := restarted.Acquire("muted@example.com", nil); ok {
+		t.Fatal("restored muted account must not be acquired")
+	}
+}

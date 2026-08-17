@@ -28,6 +28,7 @@ func (h *Handler) getConfig(w http.ResponseWriter, _ *http.Request) {
 			"auto_download":           !snap.ProxyCore.AutoDownloadDisabled,
 			"download_dir":            snap.ProxyCore.DownloadDir,
 			"download_version":        snap.ProxyCore.DownloadVersion,
+			"installed_version":       snap.ProxyCore.InstalledVersion,
 		},
 		"proxy_policy": map[string]any{
 			"health_check_enabled":                 snap.ProxyPolicy.HealthChecksEnabled(),

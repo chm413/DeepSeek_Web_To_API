@@ -30,6 +30,15 @@ scheduled polling. The configured monitor is started with the server, so
 changing this setting requires a restart; real-time response inspection does
 not require the monitor.
 
+Scheduled checks are deliberately conservative: each interval selects one
+eligible account in round-robin order, then skips accounts that are temporarily
+muted, rate-limited, currently serving a request, or have no saved Token. With
+`N` eligible accounts, one complete sweep therefore takes roughly `N` intervals.
+A scheduled check never turns a tokenless account into a password-login
+attempt. This keeps background observability from creating a burst against the
+same upstream exit; use an explicit account test or a real routed request when
+a tokenless account needs to log in.
+
 The upstream response code `40012` means `USER_IS_BANNED`; `50006` means
 `MUTED`. These codes are treated as account health signals only when they are
 returned by an authenticated upstream account request.
@@ -51,11 +60,16 @@ error response. The stream bytes are passed through unchanged.
 - `disabled`: an operator manually disabled the account. Disabled accounts are
   rejected by both normal rotation and explicit target-account requests.
 
-Temporary mute expiry and the latest detailed health reason remain
-process-local. Permanent automatic disable state is stored with the account in
-the configured accounts SQLite database or JSON account list, so quarantine
-survives process restarts. Passwords, proxy credentials, tokens, and upstream
-response bodies are not written to health logs.
+Temporary mute and account-wide 429 cooldown state are stored with the account
+in the configured accounts SQLite database or JSON account list. Only the
+state and Unix expiry are stored; the detailed upstream reason remains
+process-local. A startup restores an unexpired cooldown before the account can
+enter pool rotation. Permanent automatic disable state is stored separately
+with `disabled=true`, so `50006` is never converted into a permanent disable.
+An active cooldown is not shortened by the scheduled monitor: it expires at
+the upstream-provided time, or is cleared by a confirmed successful login or
+an explicit enable/disable action. Passwords, proxy credentials, tokens, and
+upstream response bodies are not written to health logs.
 
 The admin account list returns `enabled`, `disabled`, `disabled_reason`,
 `disabled_at`, and `account_state`. Accounts can be enabled or disabled from

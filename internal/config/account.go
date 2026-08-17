@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 func (a Account) Identifier() string {
 	a = NormalizeAccountIdentity(a)
@@ -23,6 +26,20 @@ func NormalizeAccountIdentity(a Account) Account {
 	}
 	a.Mobile = NormalizeMobileForStorage(a.Mobile)
 	return a
+}
+
+// normalizeAccountCooldown keeps only known, unexpired account-wide cooldowns.
+// The reason is intentionally runtime-only so upstream response text is never
+// persisted beside account credentials.
+func normalizeAccountCooldown(state string, untilUnix int64) (string, int64) {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state != AccountCooldownRateLimited && state != AccountCooldownTemporarilyMuted {
+		return "", 0
+	}
+	if untilUnix <= time.Now().Unix() {
+		return "", 0
+	}
+	return state, untilUnix
 }
 
 func looksLikeEmailIdentifier(raw string) bool {

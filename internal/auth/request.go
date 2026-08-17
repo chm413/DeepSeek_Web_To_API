@@ -303,7 +303,13 @@ func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 	if r.Pool != nil {
 		r.Pool.ClearHealth(a.AccountID)
 	}
-	return r.Store.UpdateAccountToken(a.AccountID, token)
+	if err := r.Store.UpdateAccountToken(a.AccountID, token); err != nil {
+		return err
+	}
+	if err := r.Store.ClearAccountCooldown(a.AccountID); err != nil {
+		config.Logger.Warn("[account_health] clear cooldown after successful login failed", "account", a.AccountID, "error", err)
+	}
+	return nil
 }
 
 func (r *Resolver) recordAccountHealth(accountID string, err error) {
@@ -316,15 +322,25 @@ func (r *Resolver) recordAccountHealth(accountID string, err error) {
 	}
 	switch healthErr.State {
 	case account.HealthRateLimited:
+		until := resolvedAccountCooldownUntil(healthErr.State, healthErr.Until)
 		if r.Pool != nil {
-			r.Pool.MarkRateLimited(accountID, healthErr.Until, healthErr.Error())
+			r.Pool.MarkRateLimited(accountID, until, healthErr.Error())
+			if current, ok := r.Pool.AccountHealth(accountID); ok && current.State == healthErr.State {
+				until = current.Until
+			}
 		}
-		config.Logger.Warn("[account_health] account entered rate-limit cooldown", "account", accountID, "state", healthErr.State, "code", healthErr.Code, "until", healthErr.Until)
+		r.persistAccountCooldown(accountID, healthErr.State, until)
+		config.Logger.Warn("[account_health] account entered rate-limit cooldown", "account", accountID, "state", healthErr.State, "code", healthErr.Code, "until", until)
 	case account.HealthTemporarilyMuted:
+		until := resolvedAccountCooldownUntil(healthErr.State, healthErr.Until)
 		if r.Pool != nil {
-			r.Pool.MarkTemporaryMute(accountID, healthErr.Until, healthErr.Error())
+			r.Pool.MarkTemporaryMute(accountID, until, healthErr.Error())
+			if current, ok := r.Pool.AccountHealth(accountID); ok && current.State == healthErr.State {
+				until = current.Until
+			}
 		}
-		config.Logger.Warn("[account_health] account marked temporarily muted", "account", accountID, "state", healthErr.State, "code", healthErr.Code, "until", healthErr.Until)
+		r.persistAccountCooldown(accountID, healthErr.State, until)
+		config.Logger.Warn("[account_health] account marked temporarily muted", "account", accountID, "state", healthErr.State, "code", healthErr.Code, "until", until)
 	case account.HealthInvalidCredentials:
 		if r.Pool != nil {
 			r.Pool.MarkInvalidCredentials(accountID, healthErr.Error())
@@ -335,6 +351,29 @@ func (r *Resolver) recordAccountHealth(accountID string, err error) {
 			r.Pool.MarkPermanentlyBanned(accountID, healthErr.Error())
 		}
 		r.persistAutomaticAccountDisable(accountID, config.AccountDisabledUpstreamBanned, healthErr)
+	}
+}
+
+func resolvedAccountCooldownUntil(state account.HealthState, requested time.Time) time.Time {
+	if !requested.IsZero() {
+		return requested
+	}
+	switch state {
+	case account.HealthTemporarilyMuted:
+		return time.Now().Add(7 * 24 * time.Hour)
+	case account.HealthRateLimited:
+		return time.Now().Add(time.Minute)
+	default:
+		return time.Time{}
+	}
+}
+
+func (r *Resolver) persistAccountCooldown(accountID string, state account.HealthState, until time.Time) {
+	if r == nil || r.Store == nil {
+		return
+	}
+	if err := r.Store.SetAccountCooldown(accountID, string(state), until); err != nil {
+		config.Logger.Error("[account_health] persist transient cooldown failed", "account", accountID, "state", state, "until", until, "error", err)
 	}
 }
 

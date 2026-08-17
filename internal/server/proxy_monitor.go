@@ -28,7 +28,7 @@ func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.P
 		config.Logger.Info("[proxy_monitor] started")
 		defer config.Logger.Info("[proxy_monitor] stopped")
 		initialCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		status := xrayproxy.Probe(initialCtx, xrayproxy.SettingsFromConfig(store.Snapshot().ProxyCore))
+		status := xrayproxy.ProbeWithStore(initialCtx, store)
 		cancel()
 		if status.Available {
 			config.Logger.Info("[proxy_monitor] xray ready", "version", status.Version, "binary_path", status.BinaryPath)
@@ -137,7 +137,7 @@ func reloginProxyRouteChanges(parent context.Context, store *config.Store, pool 
 func syncAssignedProxyRoutes(parent context.Context, store *config.Store) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
-	if err := xrayproxy.SyncAssigned(ctx, store.Snapshot()); err != nil {
+	if err := xrayproxy.SyncAssignedWithStore(ctx, store); err != nil {
 		config.Logger.Warn("[proxy_monitor] xray route sync failed", "error", err)
 		return
 	}

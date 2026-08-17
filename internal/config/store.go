@@ -237,10 +237,53 @@ func (s *Store) SetAccountDisabled(identifier string, disabled bool, reason stri
 				cfg.Accounts[i].DisabledReason = ""
 				cfg.Accounts[i].DisabledAtUnix = 0
 			}
+			cfg.Accounts[i].CooldownState = ""
+			cfg.Accounts[i].CooldownUntilUnix = 0
 			return nil
 		}
 		return errors.New("account not found")
 	})
+}
+
+// SetAccountCooldown persists a transient upstream account cooldown without
+// storing upstream response details. Expired or unknown states clear instead.
+func (s *Store) SetAccountCooldown(identifier, state string, until time.Time) error {
+	if s == nil {
+		return errors.New("store is nil")
+	}
+	identifier = strings.TrimSpace(identifier)
+	state, untilUnix := normalizeAccountCooldown(state, until.Unix())
+	if identifier == "" {
+		return errors.New("account identifier is required")
+	}
+	if current, ok := s.FindAccount(identifier); ok && current.CooldownState == state && current.CooldownUntilUnix == untilUnix {
+		return nil
+	}
+	return s.Update(func(cfg *Config) error {
+		for i := range cfg.Accounts {
+			if !accountIdentifiersMatch(cfg.Accounts[i], identifier) {
+				continue
+			}
+			cfg.Accounts[i].CooldownState = state
+			cfg.Accounts[i].CooldownUntilUnix = untilUnix
+			return nil
+		}
+		return errors.New("account not found")
+	})
+}
+
+func (s *Store) ClearAccountCooldown(identifier string) error {
+	if s == nil {
+		return errors.New("store is nil")
+	}
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return errors.New("account identifier is required")
+	}
+	if current, ok := s.FindAccount(identifier); ok && current.CooldownState == "" && current.CooldownUntilUnix == 0 {
+		return nil
+	}
+	return s.SetAccountCooldown(identifier, "", time.Time{})
 }
 
 func accountIdentifiersMatch(acc Account, identifier string) bool {
