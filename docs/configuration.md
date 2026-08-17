@@ -180,7 +180,7 @@ STORE --> ALIASES
 - 账号不再需要写入 JSON；在管理台"批量导入"中粘贴 `账号:密码` 文本即可写入 `accounts.sqlite`。
 - 若旧 JSON 中仍有 `accounts`，账号 SQLite 为空时会自动迁移，随后保存配置时会剥离 `accounts` 字段；兼容旧导入格式中把邮箱误写到 `mobile` 字段的账号，加载和导入时会自动归一到 `email`。
 - 账号 token 不写回结构化配置文件；运行态 token 保存在账号 SQLite 中。
-- 代理支持 `socks5`、`socks5h`，以及由本机 Xray core 托管的 `vless`、`vmess`、`hysteria2`（`hy2` 会归一为 `hysteria2`）。账号的 `proxy_id` 必须引用已存在代理；Xray 节点使用分享链接保存，管理接口只返回 `has_uri`，不会回显链接中的凭据。详见 [Xray 代理协议](xray-proxy.md)。
+- 代理支持 `socks5`、`socks5h`，以及由本机 Xray core 托管的 `shadowsocks`（使用 `ss://`）、`vless`、`vmess`、`hysteria2`（`hy2` 会归一为 `hysteria2`）。账号的 `proxy_id` 必须引用已存在代理；Xray 节点使用分享链接保存，管理接口只返回 `has_uri`，不会回显链接中的凭据。Shadowsocks 插件传输不受此 Xray 集成支持。详见 [Xray 代理协议](xray-proxy.md)。
 
 ### 缓存配置（完整热重载）
 

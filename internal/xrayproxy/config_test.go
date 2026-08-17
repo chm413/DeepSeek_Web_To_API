@@ -30,6 +30,30 @@ func TestBuildConfigCreatesLocalSOCKSAndVLESSOutbound(t *testing.T) {
 	}
 }
 
+func TestBuildConfigCreatesShadowsocksOutbound(t *testing.T) {
+	encoded, err := BuildConfig(Spec{
+		ID:   "shadowsocks-1",
+		Type: "ss",
+		URI:  "ss://YWVzLTI1Ni1nY206eHJheS1wYXNzd29yZA@ss.example.com:8388#SS",
+	}, 23457)
+	if err != nil {
+		t.Fatalf("build Shadowsocks config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(encoded, &config); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	outbounds := config["outbounds"].([]any)
+	outbound := outbounds[0].(map[string]any)
+	if outbound["protocol"] != "shadowsocks" {
+		t.Fatalf("unexpected outbound: %#v", outbound)
+	}
+	settings := outbound["settings"].(map[string]any)
+	if len(settings) != 4 || settings["address"] != "ss.example.com" || settings["port"] != float64(8388) || settings["method"] != "aes-256-gcm" || settings["password"] != "xray-password" {
+		t.Fatalf("unexpected Shadowsocks settings: %#v", settings)
+	}
+}
+
 func TestBuildConfigManyCreatesIndependentRoutes(t *testing.T) {
 	encoded, err := BuildConfigMany([]Route{
 		{Spec: Spec{ID: "vless-1", Type: "vless", URI: "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com"}, SocksPort: 23001},

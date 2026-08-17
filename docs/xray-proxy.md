@@ -1,6 +1,6 @@
 # Xray 代理、订阅与健康检测
 
-应用支持 SOCKS5/SOCKS5H，以及由 Xray 承载的 VLESS、VMess、Hysteria2/HY2 节点。节点可手动添加，也可从机场订阅导入。
+应用支持 SOCKS5/SOCKS5H，以及由 Xray 承载的 Shadowsocks（`ss://`）、VLESS、VMess、Hysteria2/HY2 节点。节点可手动添加，也可从机场订阅导入。
 
 ## 共享进程模型
 
@@ -13,7 +13,7 @@
 - 单节点或批量测试可临时加入共享配置；完成后恢复账号路由集合。
 - 节点、账号路由、核心设置或兜底策略变化时，应用原子重建共享配置并重启该进程。
 
-SOCKS5/SOCKS5H 由 Go HTTP 客户端直接使用，不进入 Xray 配置。
+SOCKS5/SOCKS5H 由 Go HTTP 客户端直接使用，不进入 Xray 配置；Shadowsocks 和其他核心节点由共享 Xray 进程承载。
 
 ## 自动下载
 
@@ -48,9 +48,12 @@ Docker 容器以非 root 用户运行，`/app/data` 可写；Compose 将其映�
 
 支持以下订阅内容：
 
-- 一行一个 `vless://`、`vmess://`、`hysteria2://` 或 `hy2://` 链接。
+- 一行一个 `ss://`、`vless://`、`vmess://`、`hysteria2://` 或 `hy2://` 链接。
 - 上述 URI 列表的 base64 编码。
-- Clash YAML 或 JSON 的 `proxies` 列表。
+- Clash YAML 或 JSON 的 `proxies` 列表，包括 `type: ss` 或 `type: shadowsocks` 节点。
+
+Shadowsocks 使用 SIP002 `ss://` 链接。Shadowsocks 插件传输不受此 Xray 集成支持：URI 中的 `plugin` 参数，以及 Clash 节点中的 `plugin` 和 `plugin-opts` 会被拒绝，而不会被忽略。
+Clash 节点的 `udp`、`tfo`、`tcp-fast-open` 和 `skip-cert-verify: false` 为兼容性元数据，可保留在订阅中；`skip-cert-verify: true` 仍会被拒绝。未加引号的数值密码可导入，但需要保留前导零的密码应使用 YAML 引号。
 
 订阅 URL 可能包含认证信息，按敏感字段处理。列表、读取和更新响应仅返回 `has_url`，不会回显 URL；编辑时 URL 留空保留已有值。
 
@@ -138,6 +141,7 @@ Docker 容器以非 root 用户运行，`/app/data` 可写；Compose 将其映�
 
 | 类型 | 当前支持 |
 | --- | --- |
+| Shadowsocks | SIP002 `ss://`；插件传输不支持 |
 | VLESS | TCP/RAW、WebSocket、gRPC、XHTTP/SplitHTTP、HTTPUpgrade；TLS、REALITY |
 | VMess | 标准 base64 JSON、`alterId=0`；TCP、WebSocket、gRPC、XHTTP/SplitHTTP、HTTPUpgrade；TLS |
 | Hysteria2 | `hysteria2://` 和 `hy2://`、TLS、auth |

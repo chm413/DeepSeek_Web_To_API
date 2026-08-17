@@ -25,6 +25,8 @@ func NormalizeType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "hy2", "hysteria2":
 		return "hysteria2"
+	case "ss", "shadowsocks":
+		return "shadowsocks"
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
@@ -32,7 +34,7 @@ func NormalizeType(value string) string {
 
 func IsCoreType(value string) bool {
 	switch NormalizeType(value) {
-	case "vless", "vmess", "hysteria2":
+	case "vless", "vmess", "hysteria2", "shadowsocks":
 		return true
 	default:
 		return false
@@ -52,6 +54,8 @@ func Parse(proxyType, rawURI string) (Node, error) {
 		return parseVMess(rawURI)
 	case "hysteria2":
 		return parseHysteria2(rawURI)
+	case "shadowsocks":
+		return parseShadowsocks(rawURI)
 	default:
 		return Node{}, fmt.Errorf("unsupported core proxy type: %s", proxyType)
 	}
@@ -238,6 +242,156 @@ func parseHysteria2(rawURI string) (Node, error) {
 			"streamSettings": stream,
 		},
 	}, nil
+}
+
+// Xray documents these AEAD and Shadowsocks 2022 methods for its Shadowsocks
+// outbound. Older stream ciphers are deliberately excluded because they are
+// not part of the supported secure method set for this integration.
+var shadowsocksMethods = map[string]struct{}{
+	"2022-blake3-aes-128-gcm":       {},
+	"2022-blake3-aes-256-gcm":       {},
+	"2022-blake3-chacha20-poly1305": {},
+	"aes-128-gcm":                   {},
+	"aes-256-gcm":                   {},
+	"chacha20-poly1305":             {},
+	"chacha20-ietf-poly1305":        {},
+	"xchacha20-poly1305":            {},
+	"xchacha20-ietf-poly1305":       {},
+}
+
+func parseShadowsocks(rawURI string) (Node, error) {
+	u, displayName, err := parseShadowsocksURL(rawURI)
+	if err != nil {
+		return Node{}, err
+	}
+	address, port, err := endpoint(u)
+	if err != nil {
+		return Node{}, fmt.Errorf("invalid Shadowsocks endpoint: %w", err)
+	}
+	method, password, err := parseShadowsocksCredentials(u)
+	if err != nil {
+		return Node{}, err
+	}
+	return Node{
+		Type:        "shadowsocks",
+		Address:     address,
+		Port:        port,
+		DisplayName: displayName,
+		Outbound: map[string]any{
+			"tag":      "proxy",
+			"protocol": "shadowsocks",
+			"settings": map[string]any{
+				"address":  address,
+				"port":     port,
+				"method":   method,
+				"password": password,
+			},
+		},
+	}, nil
+}
+
+func parseShadowsocksURL(rawURI string) (*url.URL, string, error) {
+	original, err := url.Parse(rawURI)
+	if err != nil || !strings.EqualFold(original.Scheme, "ss") {
+		return nil, "", errors.New("invalid Shadowsocks URI")
+	}
+	if err := validateShadowsocksParameters(original); err != nil {
+		return nil, "", err
+	}
+	displayName := fragmentName(original)
+	if original.User != nil {
+		if err := validateShadowsocksURLShape(original); err != nil {
+			return nil, "", err
+		}
+		return original, displayName, nil
+	}
+
+	separator := strings.Index(rawURI, "://")
+	if separator < 0 {
+		return nil, "", errors.New("invalid Shadowsocks URI")
+	}
+	payload := rawURI[separator+3:]
+	if fragmentIndex := strings.IndexByte(payload, '#'); fragmentIndex >= 0 {
+		payload = payload[:fragmentIndex]
+	}
+	if strings.Contains(payload, "?") {
+		return nil, "", errors.New("shadowsocks URI parameters are not supported by this Xray integration")
+	}
+	payload, err = url.PathUnescape(payload)
+	if err != nil {
+		return nil, "", errors.New("invalid legacy Shadowsocks base64 payload")
+	}
+	decoded, err := decodeBase64(payload)
+	if err != nil {
+		return nil, "", errors.New("invalid legacy Shadowsocks base64 payload")
+	}
+	legacy, err := url.Parse("ss://" + string(decoded))
+	if err != nil {
+		return nil, "", errors.New("invalid legacy Shadowsocks URI")
+	}
+	if err := validateShadowsocksParameters(legacy); err != nil {
+		return nil, "", err
+	}
+	if err := validateShadowsocksURLShape(legacy); err != nil {
+		return nil, "", err
+	}
+	return legacy, displayName, nil
+}
+
+func validateShadowsocksParameters(u *url.URL) error {
+	if u == nil || (!u.ForceQuery && u.RawQuery == "") {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(u.RawQuery), "plugin") {
+		return errors.New("shadowsocks plugins are not supported by this Xray integration")
+	}
+	return errors.New("shadowsocks URI parameters are not supported by this Xray integration")
+}
+
+func validateShadowsocksURLShape(u *url.URL) error {
+	if u == nil || u.User == nil {
+		return errors.New("shadowsocks credentials are required")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return errors.New("shadowsocks endpoint is required")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return errors.New("shadowsocks URI path is not supported")
+	}
+	return nil
+}
+
+func parseShadowsocksCredentials(u *url.URL) (string, string, error) {
+	if u == nil || u.User == nil {
+		return "", "", errors.New("shadowsocks credentials are required")
+	}
+	credential := u.User.Username()
+	if password, ok := u.User.Password(); ok {
+		return validateShadowsocksCredentials(credential, password)
+	}
+	if method, password, ok := strings.Cut(credential, ":"); ok {
+		return validateShadowsocksCredentials(method, password)
+	}
+	decoded, err := decodeBase64(credential)
+	if err != nil {
+		return "", "", errors.New("invalid Shadowsocks base64 userinfo")
+	}
+	method, password, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return "", "", errors.New("invalid Shadowsocks credentials")
+	}
+	return validateShadowsocksCredentials(method, password)
+}
+
+func validateShadowsocksCredentials(method, password string) (string, string, error) {
+	method = strings.ToLower(strings.TrimSpace(method))
+	if _, ok := shadowsocksMethods[method]; !ok {
+		return "", "", errors.New("unsupported Shadowsocks cipher")
+	}
+	if password == "" {
+		return "", "", errors.New("shadowsocks password is required")
+	}
+	return method, password, nil
 }
 
 func buildStreamSettings(query url.Values, defaultNetwork, defaultSecurity string) (map[string]any, error) {

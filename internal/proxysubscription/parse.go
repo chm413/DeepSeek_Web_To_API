@@ -76,7 +76,7 @@ func Parse(body []byte, subscriptionID string) (Result, error) {
 		}
 	}
 	if len(result.Proxies) == 0 {
-		return result, errors.New("subscription contains no supported VLESS, VMess, or Hysteria2 nodes")
+		return result, errors.New("subscription contains no supported VLESS, VMess, Hysteria2, or Shadowsocks nodes")
 	}
 	return result, nil
 }
@@ -162,7 +162,7 @@ func proxyFromURI(subscriptionID, raw string) (config.Proxy, error) {
 	if parsed, err := url.Parse(raw); err == nil {
 		scheme = proxyuri.NormalizeType(parsed.Scheme)
 	}
-	if scheme != "vless" && scheme != "vmess" && scheme != "hysteria2" {
+	if scheme != "vless" && scheme != "vmess" && scheme != "hysteria2" && scheme != "shadowsocks" {
 		return config.Proxy{}, fmt.Errorf("unsupported subscription node scheme %q", scheme)
 	}
 	node, err := proxyuri.Parse(scheme, raw)
@@ -192,7 +192,8 @@ func subscriptionLines(text string) []string {
 		}
 		lower := strings.ToLower(line)
 		if strings.HasPrefix(lower, "vless://") || strings.HasPrefix(lower, "vmess://") ||
-			strings.HasPrefix(lower, "hysteria2://") || strings.HasPrefix(lower, "hy2://") {
+			strings.HasPrefix(lower, "hysteria2://") || strings.HasPrefix(lower, "hy2://") ||
+			strings.HasPrefix(lower, "ss://") {
 			out = append(out, line)
 		}
 	}
@@ -242,6 +243,8 @@ func clashProxyURI(item map[string]any) (string, error) {
 		return clashVMessURI(item, name, server, port)
 	case "hysteria2":
 		return clashHysteria2URI(item, name, server, port)
+	case "shadowsocks":
+		return clashShadowsocksURI(item, name, server, port)
 	default:
 		return "", fmt.Errorf("unsupported Clash proxy type %q", proxyType)
 	}
@@ -318,6 +321,86 @@ func clashHysteria2URI(item map[string]any, name, server string, port int) (stri
 	}
 	u.RawQuery = query.Encode()
 	return u.String(), nil
+}
+
+func clashShadowsocksURI(item map[string]any, name, server string, port int) (string, error) {
+	if err := validateClashShadowsocksFields(item); err != nil {
+		return "", err
+	}
+	cipher, cipherOK := clashScalarString(item, "cipher")
+	if !cipherOK || strings.TrimSpace(cipher) == "" {
+		return "", errors.New("cipher is required")
+	}
+	password, passwordOK := clashScalarString(item, "password")
+	if !passwordOK || password == "" {
+		return "", errors.New("password is required")
+	}
+	userinfo := base64.RawURLEncoding.EncodeToString([]byte(cipher + ":" + password))
+	u := &url.URL{
+		Scheme:   "ss",
+		User:     url.User(userinfo),
+		Host:     net.JoinHostPort(server, strconv.Itoa(port)),
+		Fragment: name,
+	}
+	return u.String(), nil
+}
+
+func validateClashShadowsocksFields(item map[string]any) error {
+	allowed := map[string]struct{}{
+		"name":             {},
+		"type":             {},
+		"server":           {},
+		"port":             {},
+		"cipher":           {},
+		"password":         {},
+		"udp":              {},
+		"tfo":              {},
+		"tcp-fast-open":    {},
+		"skip-cert-verify": {},
+	}
+	for key, value := range item {
+		if _, ok := allowed[key]; ok {
+			continue
+		}
+		if key == "plugin" || key == "plugin-opts" {
+			if clashFieldConfigured(value) {
+				return errors.New("shadowsocks plugins are not supported by this Xray integration")
+			}
+			continue
+		}
+		return fmt.Errorf("unsupported Shadowsocks Clash field %q", key)
+	}
+	return nil
+}
+
+func clashScalarString(item map[string]any, key string) (string, bool) {
+	value, ok := item[key]
+	if !ok || value == nil {
+		return "", false
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed), true
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed)), true
+	default:
+		return "", false
+	}
+}
+
+func clashFieldConfigured(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case map[string]any:
+		return len(typed) > 0
+	case []any:
+		return len(typed) > 0
+	default:
+		return true
+	}
 }
 
 func applyClashTransport(query url.Values, item map[string]any) {

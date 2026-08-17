@@ -44,7 +44,7 @@ const EMPTY_FORM = {
     uri: '',
 }
 
-const CORE_PROXY_TYPES = new Set(['vless', 'vmess', 'hysteria2'])
+const CORE_PROXY_TYPES = new Set(['vless', 'vmess', 'hysteria2', 'shadowsocks'])
 
 const DEFAULT_POLICY = {
     health_check_enabled: true,
@@ -462,6 +462,7 @@ function ProxyFormModal({
                                 <option value="vless">VLESS</option>
                                 <option value="vmess">VMess</option>
                                 <option value="hysteria2">Hysteria2 / HY2</option>
+                                <option value="shadowsocks">Shadowsocks / SS</option>
                             </select>
                         </div>
                     </div>
@@ -473,7 +474,7 @@ function ProxyFormModal({
                                 type="password"
                                 autoComplete="new-password"
                                 className="input-field bg-card font-mono text-xs"
-                                placeholder={t('proxyManager.nodeUriPlaceholder', { type: form.type })}
+                                placeholder={t('proxyManager.nodeUriPlaceholder', { type: form.type === 'shadowsocks' ? 'ss' : form.type })}
                                 value={form.uri}
                                 onChange={e => setForm({ ...form, uri: e.target.value })}
                             />

@@ -363,7 +363,7 @@ func Probe(ctx context.Context, settings Settings) Status {
 	status := Status{
 		RunningInstances: Default().Count(),
 		ActiveRoutes:     Default().RouteCount(),
-		SupportedTypes:   []string{"vless", "vmess", "hysteria2"},
+		SupportedTypes:   []string{"vless", "vmess", "hysteria2", "shadowsocks"},
 	}
 	binaryPath, err := ResolveOrDownload(ctx, settings)
 	if err != nil {

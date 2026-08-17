@@ -31,6 +31,11 @@ func TestOfficialXrayAcceptsGeneratedConfigs(t *testing.T) {
 			Type: "hysteria2",
 			URI:  "hysteria2://secret@example.com:443?sni=example.com",
 		},
+		{
+			ID:   "shadowsocks-test",
+			Type: "shadowsocks",
+			URI:  "ss://YWVzLTI1Ni1nY206c2hhZG93c29ja3MtcGFzc3dvcmQ@example.com:8388#SS",
+		},
 	}
 	for _, spec := range tests {
 		t.Run(spec.Type, func(t *testing.T) {

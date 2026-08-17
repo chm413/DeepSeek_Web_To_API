@@ -96,12 +96,12 @@ func ValidateProxyConfig(proxies []Proxy) error {
 			if err := ValidateIntRange("proxies.port", proxy.Port, 1, 65535, true); err != nil {
 				return err
 			}
-		case "vless", "vmess", "hysteria2":
+		case "vless", "vmess", "hysteria2", "shadowsocks":
 			if _, err := proxyuri.Parse(proxy.Type, proxy.URI); err != nil {
 				return fmt.Errorf("invalid %s proxy URI: %w", proxy.Type, err)
 			}
 		default:
-			return fmt.Errorf("proxies.type must be one of socks5, socks5h, vless, vmess, hysteria2")
+			return fmt.Errorf("proxies.type must be one of socks5, socks5h, vless, vmess, hysteria2, shadowsocks")
 		}
 		if _, ok := seen[proxy.ID]; ok {
 			return fmt.Errorf("duplicate proxy id: %s", proxy.ID)

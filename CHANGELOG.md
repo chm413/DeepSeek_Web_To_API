@@ -1,5 +1,22 @@
 # 更新日志
 
+## 2026-08-17 (1.2.0)
+
+- Added Shadowsocks support through the shared Xray process. Manual nodes,
+  `ss://` subscription links, base64 subscription lists, and Clash
+  `type: ss` / `type: shadowsocks` entries now use the same health-check,
+  routing, bulk-operation, and secure-admin-API path as the existing Xray
+  protocols.
+- Supports SIP002 and legacy whole-base64 links with Xray's AEAD and
+  Shadowsocks 2022 ciphers. Unsupported URI parameters and plugin transports
+  are rejected explicitly rather than being silently ignored.
+- Added management-console selection and bilingual guidance for Shadowsocks.
+  Node URIs remain sensitive: safe admin responses do not reveal their
+  credentials.
+- Verified generated configurations with the local official Xray binary,
+  subscription parsing tests, full Go tests, Web UI production build, and
+  `golangci-lint`.
+
 ## 2026-08-17 (1.1.11)
 
 - Fixed indeterminate same-session fragment commits. When an upstream SSE stream

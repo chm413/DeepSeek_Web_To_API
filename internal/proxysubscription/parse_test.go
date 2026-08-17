@@ -2,9 +2,11 @@ package proxysubscription
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/proxyuri"
 )
 
 const testVLESS = "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com#VLESS"
@@ -127,5 +129,121 @@ proxies:
 	}
 	if len(result.Proxies) != 1 || result.Invalid != 1 {
 		t.Fatalf("unexpected partial result: %#v", result)
+	}
+}
+
+func TestParseShadowsocksSubscriptionURI(t *testing.T) {
+	credential := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:subscription-password"))
+	result, err := Parse([]byte("ss://"+credential+"@ss.example.com:8388#Subscription%20SS"), "subscription-ss")
+	if err != nil {
+		t.Fatalf("parse Shadowsocks subscription: %v", err)
+	}
+	if len(result.Proxies) != 1 || result.Invalid != 0 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	proxy := result.Proxies[0]
+	if proxy.Type != "shadowsocks" || proxy.Name != "Subscription SS" || proxy.SubscriptionID != "subscription-ss" {
+		t.Fatalf("unexpected Shadowsocks proxy: %#v", proxy)
+	}
+}
+
+func TestParseClashShadowsocksAliases(t *testing.T) {
+	body := []byte(`
+proxies:
+  - name: Clash SS
+    type: ss
+    server: ss.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: 123456
+    udp: true
+    tfo: false
+    tcp-fast-open: true
+    skip-cert-verify: false
+  - name: Clash Shadowsocks
+    type: shadowsocks
+    server: ss2.example.com
+    port: 443
+    cipher: 2022-blake3-aes-256-gcm
+    password: secret-two
+`)
+	result, err := Parse(body, "subscription-clash-ss")
+	if err != nil {
+		t.Fatalf("parse Clash Shadowsocks subscription: %v", err)
+	}
+	if len(result.Proxies) != 2 || result.Invalid != 0 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	for _, proxy := range result.Proxies {
+		if proxy.Type != "shadowsocks" || !strings.HasPrefix(proxy.URI, "ss://") {
+			t.Fatalf("unexpected Clash Shadowsocks proxy: %#v", proxy)
+		}
+	}
+	first, err := proxyuri.Parse(result.Proxies[0].Type, result.Proxies[0].URI)
+	if err != nil {
+		t.Fatalf("parse generated Clash Shadowsocks URI: %v", err)
+	}
+	if first.Outbound["settings"].(map[string]any)["password"] != "123456" {
+		t.Fatalf("numeric Clash password was not preserved: %#v", first.Outbound)
+	}
+}
+
+func TestParseClashShadowsocksRejectsPluginsAndUnsupportedFields(t *testing.T) {
+	body := []byte(`
+proxies:
+  - name: Plugin
+    type: ss
+    server: plugin.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: secret-plugin
+    plugin: v2ray-plugin
+  - name: Insecure
+    type: shadowsocks
+    server: insecure.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: secret-insecure
+    skip-cert-verify: true
+  - name: Valid
+    type: ss
+    server: valid.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: secret-valid
+`)
+	result, err := Parse(body, "subscription-clash-invalid-ss")
+	if err != nil {
+		t.Fatalf("parse partial Clash Shadowsocks subscription: %v", err)
+	}
+	if len(result.Proxies) != 1 || result.Invalid != 2 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(strings.ToLower(strings.Join(result.Warnings, " ")), "plugin") {
+		t.Fatalf("expected plugin warning, got %#v", result.Warnings)
+	}
+}
+
+func TestShadowsocksSemanticKeyIgnoresDisplayNameAndHostCase(t *testing.T) {
+	credential := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:semantic-password"))
+	first, err := Parse([]byte("ss://"+credential+"@SS.EXAMPLE.COM:8388#First"), "sub-ss-a")
+	if err != nil {
+		t.Fatalf("parse first Shadowsocks node: %v", err)
+	}
+	second := config.Proxy{
+		ID:   "manual-ss",
+		Type: "shadowsocks",
+		URI:  "ss://" + credential + "@ss.example.com:8388#Second",
+	}
+	firstKey, err := SemanticKey(first.Proxies[0])
+	if err != nil {
+		t.Fatalf("key first Shadowsocks node: %v", err)
+	}
+	secondKey, err := SemanticKey(second)
+	if err != nil {
+		t.Fatalf("key second Shadowsocks node: %v", err)
+	}
+	if firstKey != secondKey {
+		t.Fatalf("equivalent Shadowsocks nodes got different semantic keys: %s != %s", firstKey, secondKey)
 	}
 }

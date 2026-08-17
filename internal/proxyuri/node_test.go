@@ -3,6 +3,7 @@ package proxyuri
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -69,5 +70,85 @@ func TestParseHysteria2RejectsUnsupportedObfs(t *testing.T) {
 	_, err := Parse("hysteria2", "hysteria2://secret@example.com:443?obfs=salamander&obfs-password=value")
 	if err == nil {
 		t.Fatal("expected unsupported obfs error")
+	}
+}
+
+func TestParseShadowsocksSIP002URLSafeUserinfo(t *testing.T) {
+	credential := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:opaque:password@value"))
+	node, err := Parse("ss", "ss://"+credential+"@edge.example.com:8388#SS%20Node")
+	if err != nil {
+		t.Fatalf("parse Shadowsocks URI: %v", err)
+	}
+	if node.Type != "shadowsocks" || node.Address != "edge.example.com" || node.Port != 8388 || node.DisplayName != "SS Node" {
+		t.Fatalf("unexpected node: %#v", node)
+	}
+	if node.Outbound["protocol"] != "shadowsocks" {
+		t.Fatalf("unexpected outbound: %#v", node.Outbound)
+	}
+	settings := node.Outbound["settings"].(map[string]any)
+	if settings["method"] != "aes-256-gcm" || settings["password"] != "opaque:password@value" {
+		t.Fatalf("unexpected Shadowsocks settings: %#v", settings)
+	}
+}
+
+func TestParseShadowsocksLegacyWholeBase64(t *testing.T) {
+	legacy := base64.StdEncoding.EncodeToString([]byte("chacha20-ietf-poly1305:legacy-password@legacy.example.com:443"))
+	node, err := Parse("shadowsocks", "ss://"+legacy+"#Legacy")
+	if err != nil {
+		t.Fatalf("parse legacy Shadowsocks URI: %v", err)
+	}
+	settings := node.Outbound["settings"].(map[string]any)
+	if node.Address != "legacy.example.com" || node.Port != 443 || settings["method"] != "chacha20-ietf-poly1305" || settings["password"] != "legacy-password" {
+		t.Fatalf("unexpected legacy Shadowsocks node: %#v", node)
+	}
+}
+
+func TestParseShadowsocksSupportsDocumentedAEADAndSS2022Methods(t *testing.T) {
+	methods := []string{
+		"aes-128-gcm",
+		"aes-256-gcm",
+		"chacha20-poly1305",
+		"chacha20-ietf-poly1305",
+		"xchacha20-poly1305",
+		"xchacha20-ietf-poly1305",
+		"2022-blake3-aes-128-gcm",
+		"2022-blake3-aes-256-gcm",
+		"2022-blake3-chacha20-poly1305",
+	}
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			credential := base64.RawURLEncoding.EncodeToString([]byte(method + ":test-password"))
+			node, err := Parse("shadowsocks", "ss://"+credential+"@example.com:8388")
+			if err != nil {
+				t.Fatalf("parse %s: %v", method, err)
+			}
+			settings := node.Outbound["settings"].(map[string]any)
+			if settings["method"] != method {
+				t.Fatalf("expected method %q, got %#v", method, settings)
+			}
+		})
+	}
+}
+
+func TestParseShadowsocksRejectsMalformedPluginsAndUnsupportedParameters(t *testing.T) {
+	credential := base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:password"))
+	tests := []string{
+		"ss://not-base64@example.com:8388",
+		"ss://" + credential + "@example.com:8388?plugin=v2ray-plugin",
+		"ss://" + credential + "@example.com:8388?udp=true",
+		"ss://" + base64.RawStdEncoding.EncodeToString([]byte("rc4-md5:password@example.com:8388")),
+	}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			_, err := Parse("shadowsocks", raw)
+			if err == nil {
+				t.Fatalf("expected URI to be rejected: %q", raw)
+			}
+		})
+	}
+
+	_, err := Parse("shadowsocks", "ss://"+credential+"@example.com:8388?plugin=v2ray-plugin")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "plugin") {
+		t.Fatalf("expected plugin-specific error, got %v", err)
 	}
 }

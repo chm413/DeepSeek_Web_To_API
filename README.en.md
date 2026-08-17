@@ -4,7 +4,7 @@ Language: [中文](README.MD) | [English](README.en.md)
 
 DeepSeek Web To API is a self-hosted Go gateway that exposes DeepSeek Web sessions through OpenAI, Anthropic Claude, and Gemini-compatible APIs. It includes an admin console for accounts, sessions, caches, logs, and proxy routing.
 
-Current version: **v1.1.11**
+Current version: **v1.2.0**
 
 ## Features
 
@@ -14,7 +14,7 @@ Current version: **v1.1.11**
 - Managed account pool with concurrency slots, token refresh, health checks, ban/login-failure detection, automatic disable, and manual enable/disable controls.
 - Context handling with dynamic input-limit detection, Compact workflows, incremental sessions, mandatory output-format instructions, conversation rotation, and history compression.
 - Request logs covering processed context size, token usage, cache hit rate, per-account cost, and conversation history.
-- SOCKS5/SOCKS5H, VLESS, VMess, and Hysteria2/HY2 routing with subscriptions, scheduled updates, batch tests, automatic disable, sticky automatic routing, and fallback routes.
+- SOCKS5/SOCKS5H, Shadowsocks (`ss://`), VLESS, VMess, and Hysteria2/HY2 routing with subscriptions, scheduled updates, batch tests, automatic disable, sticky automatic routing, and fallback routes.
 
 ## Shared Xray Architecture
 
@@ -72,12 +72,14 @@ go build -trimpath -ldflags "-s -w -X DeepSeek_Web_To_API/internal/version.Build
 The Proxy page in the admin console supports:
 
 - Airport subscription URLs entered through a password field and never returned by safe admin APIs.
-- Plain URI lists, base64 URI lists, and Clash YAML/JSON proxy lists.
+- Plain URI lists, base64 URI lists, and Clash YAML/JSON proxy lists, including Shadowsocks `ss://` links and Clash `type: ss`/`shadowsocks` nodes.
 - Manual or scheduled subscription refresh, with optional node testing after each update.
 - Single-node tests, batch tests, and batch enable, disable, and delete operations.
 - Configurable test interval, concurrency, consecutive-failure threshold, recovery enablement, and global fallback route.
 - Optional sticky automatic routing that balances by enabled-account assignments; temporarily muted accounts continue to count so egress IPs do not churn unnecessarily.
 - Persistent availability, latency, exit IP, country/colo, HTTP status, assigned-account counts, consecutive failures, last error, subscription ownership, and disable reason.
+
+Shadowsocks plugin transports are not supported by this Xray integration. Nodes with a URI `plugin` parameter or Clash `plugin`/`plugin-opts` are rejected.
 
 The management endpoints are under `/admin/proxies/*` and require administrator authentication.
 
@@ -98,7 +100,7 @@ npm run build --prefix webui
 bash ./scripts/lint.sh
 ```
 
-`VERSION` at the repository root is the release-version source. Push a matching version tag, for example `v1.1.11`, to run the release gates and publish Windows/Linux/macOS archives, checksums, and `linux/amd64` and `linux/arm64` GHCR images. The workflow creates or updates the matching GitHub Release. It can also be dispatched manually; a tag that disagrees with `VERSION` fails explicitly rather than entering the update channel with the wrong version.
+`VERSION` at the repository root is the release-version source. Push a matching version tag, for example `v1.2.0`, to run the release gates and publish Windows/Linux/macOS archives, checksums, and `linux/amd64` and `linux/arm64` GHCR images. The workflow creates or updates the matching GitHub Release. It can also be dispatched manually; a tag that disagrees with `VERSION` fails explicitly rather than entering the update channel with the wrong version.
 
 ## Documentation
 

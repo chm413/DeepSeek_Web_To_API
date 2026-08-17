@@ -4,7 +4,7 @@
 
 DeepSeek Web To API 是一个自托管 Go 网关，将 DeepSeek Web 会话转换为 OpenAI、Anthropic Claude 和 Gemini 兼容接口，并提供账号、会话、缓存、日志和代理路由管理台。
 
-当前版本：**v1.1.11**
+当前版本：**v1.2.0**
 
 ## 主要能力
 
@@ -14,7 +14,7 @@ DeepSeek Web To API 是一个自托管 Go 网关，将 DeepSeek Web 会话转换
 - 多账号池：并发槽位、Token 刷新、账号健康检测、封禁/登录失败识别、自动禁用和手动启停。
 - 上下文处理：输入限制识别、Compact 协议、增量会话、严格输出格式提示、会话轮换与历史压缩。
 - 可观测性：请求日志、内部处理后上下文大小、Token 使用量、缓存命中率、账号成本和会话历史。
-- 代理路由：SOCKS5/SOCKS5H、VLESS、VMess、Hysteria2/HY2，支持机场订阅、定时更新、批量测试、自动禁用、粘性自动路由和兜底节点。
+- 代理路由：SOCKS5/SOCKS5H、Shadowsocks（`ss://`）、VLESS、VMess、Hysteria2/HY2，支持机场订阅、定时更新、批量测试、自动禁用、粘性自动路由和兜底节点。
 
 ## Xray 路由架构
 
@@ -72,12 +72,14 @@ go build -trimpath -ldflags "-s -w -X DeepSeek_Web_To_API/internal/version.Build
 管理台的“代理 IP”页面支持：
 
 - 添加机场订阅，订阅 URL 使用密码输入框且安全管理接口不回显。
-- 解析普通 URI 列表、base64 URI 列表以及 Clash YAML/JSON 节点。
+- 解析普通 URI 列表、base64 URI 列表以及 Clash YAML/JSON 节点，包括 Shadowsocks `ss://` 链接和 Clash `type: ss`/`shadowsocks` 节点。
 - 手动或定时更新订阅，并选择更新后是否自动测试节点。
 - 单节点测试、批量测试、批量启用、禁用和删除。
 - 配置测试间隔、并发数、连续失败阈值、恢复后自动启用和全局兜底节点。
 - 可选粘性自动路由；健康节点按已启用账号分配数最少优先，临时封禁账号仍计入分配数，避免不必要地改变出口 IP。
 - 查看可用性、延迟、出口 IP、地区、HTTP 状态、已分配账号数、连续失败次数、最后错误、订阅归属和禁用原因。
+
+Shadowsocks 插件传输不受此 Xray 集成支持；含 URI `plugin` 参数或 Clash `plugin`/`plugin-opts` 的节点会被拒绝。
 
 相关管理接口位于 `/admin/proxies/*`，需要管理员认证。
 
@@ -98,7 +100,7 @@ npm run build --prefix webui
 bash ./scripts/lint.sh
 ```
 
-根目录的 `VERSION` 是发布版本源。推送与其一致的版本标签（如 `v1.1.11`）会自动运行发布门禁，构建 Windows/Linux/macOS 发布包、校验和及 `linux/amd64`、`linux/arm64` GHCR 镜像，并创建或更新对应的 GitHub Release。也可从 Actions 手动触发发布；标签和 `VERSION` 不一致时流水线会明确失败，避免错误版本进入更新通道。
+根目录的 `VERSION` 是发布版本源。推送与其一致的版本标签（如 `v1.2.0`）会自动运行发布门禁，构建 Windows/Linux/macOS 发布包、校验和及 `linux/amd64`、`linux/arm64` GHCR 镜像，并创建或更新对应的 GitHub Release。也可从 Actions 手动触发发布；标签和 `VERSION` 不一致时流水线会明确失败，避免错误版本进入更新通道。
 
 ## 文档
 
