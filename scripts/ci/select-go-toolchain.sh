@@ -64,5 +64,8 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf 'GOTOOLCHAIN=%s\n' "${GOTOOLCHAIN}" >> "${GITHUB_ENV}"
 fi
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  printf '%s\n' "$(dirname "$(command -v go)")" >> "${GITHUB_PATH}"
+fi
 
 echo "Selected ${version_output} with GOTOOLCHAIN=${GOTOOLCHAIN}"
