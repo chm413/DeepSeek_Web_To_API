@@ -33,10 +33,6 @@ func (s *responsesStreamRuntime) sendEvent(event string, payload map[string]any)
 	}
 }
 
-func (s *responsesStreamRuntime) sendCreated() {
-	s.start()
-}
-
 // start commits the Responses stream only after there is a deliverable output
 // event. An upstream stream that ends with no content can then be surfaced as
 // an ordinary HTTP error instead of a response.failed SSE terminal event.

@@ -306,7 +306,9 @@ func (m *Manager) checkAndMaybeStage(ctx context.Context, settings Settings) {
 			config.Logger.Warn("[self_update] automatic apply failed", "tag", release.Tag, "error", err)
 			return
 		}
-		m.ScheduleRestart(2 * time.Second)
+		if err := m.ScheduleRestart(2 * time.Second); err != nil {
+			config.Logger.Warn("[self_update] automatic restart scheduling failed", "tag", release.Tag, "error", err)
+		}
 	}
 }
 
@@ -425,7 +427,7 @@ func (m *Manager) fetchLatest(ctx context.Context) (*Release, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request latest release: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResource(resp.Body, "latest release response body")
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("latest release returned HTTP %d", resp.StatusCode)

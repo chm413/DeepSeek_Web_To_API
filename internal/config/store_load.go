@@ -114,11 +114,6 @@ func loadOrBootstrapEnvWritebackConfig(cfg Config, parseErr error) (Config, bool
 	return cfg, true, parseErr
 }
 
-func loadConfigFromPrimaryFile() (Config, bool, error) {
-	cfg, fromEnv, _, err := loadConfigFromPrimaryFileWithSource()
-	return cfg, fromEnv, err
-}
-
 func loadConfigFromPrimaryFileWithSource() (Config, bool, string, error) {
 	path := ConfigPath()
 	cfg, err := loadConfigFromFile(path)

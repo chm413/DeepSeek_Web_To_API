@@ -34,6 +34,10 @@ const (
 	markerFailed                  = "failed.version"
 	metadataFile                  = ".verified.json"
 	defaultArchiveEntries         = 10000
+	// legacyTarRegularType is the NUL wire value that old tar writers use for
+	// regular files. archive/tar's TypeRegA name is deprecated, but staged
+	// release archives must remain compatible with that representation.
+	legacyTarRegularType byte = 0
 )
 
 type verifiedMetadata struct {
@@ -83,7 +87,7 @@ func (m *Manager) Download(ctx context.Context, requestedTag string) (*Release, 
 		m.setLastError(err)
 		return nil, err
 	}
-	defer os.Remove(archivePath)
+	defer removeFileForCleanup(archivePath, "downloaded release archive")
 	if actual != checksum {
 		err := fmt.Errorf("release checksum mismatch for %s", release.AssetName)
 		m.setLastError(err)
@@ -141,30 +145,30 @@ func (m *Manager) Apply(requestedTag string) (Status, error) {
 	}
 	if previous != "" {
 		if err := m.writeMarker(markerPendingPrevious, previous); err != nil {
-			_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
+			removeFileForCleanup(filepath.Join(m.root, markerPendingRollbackPrevious), "pending rollback marker")
 			return Status{}, fmt.Errorf("preserve pending previous release: %w", err)
 		}
 	} else if err := os.Remove(filepath.Join(m.root, markerPendingPrevious)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
+		removeFileForCleanup(filepath.Join(m.root, markerPendingRollbackPrevious), "pending rollback marker")
 		return Status{}, fmt.Errorf("clear pending previous release: %w", err)
 	}
 	if err := os.Remove(filepath.Join(m.root, markerAttempt)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
-		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
+		removeFileForCleanup(filepath.Join(m.root, markerPendingPrevious), "pending previous marker")
+		removeFileForCleanup(filepath.Join(m.root, markerPendingRollbackPrevious), "pending rollback marker")
 		return Status{}, fmt.Errorf("clear previous pending attempt: %w", err)
 	}
 	if err := m.writeMarker(markerPending, tag); err != nil {
-		_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
-		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
+		removeFileForCleanup(filepath.Join(m.root, markerPendingPrevious), "pending previous marker")
+		removeFileForCleanup(filepath.Join(m.root, markerPendingRollbackPrevious), "pending rollback marker")
 		return Status{}, fmt.Errorf("mark pending release: %w", err)
 	}
 	// A successful pending transaction is the only point at which a manual
 	// retry may clear a failed-version quarantine. If this fails, remove the
 	// pending transaction and leave the quarantine intact for automatic checks.
 	if err := os.Remove(filepath.Join(m.root, markerFailed)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = os.Remove(filepath.Join(m.root, markerPending))
-		_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
-		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
+		removeFileForCleanup(filepath.Join(m.root, markerPending), "pending marker")
+		removeFileForCleanup(filepath.Join(m.root, markerPendingPrevious), "pending previous marker")
+		removeFileForCleanup(filepath.Join(m.root, markerPendingRollbackPrevious), "pending rollback marker")
 		return Status{}, fmt.Errorf("clear failed release marker: %w", err)
 	}
 	config.Logger.Info("[self_update] release pending restart", "tag", tag, "previous", previous)
@@ -208,11 +212,11 @@ func (m *Manager) Rollback() (Status, error) {
 			return Status{}, err
 		}
 	}
-	_ = os.Remove(filepath.Join(m.root, markerPending))
-	_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
-	_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
-	_ = os.Remove(filepath.Join(m.root, markerAttempt))
-	_ = os.Remove(filepath.Join(m.root, markerFailed))
+	removeFileForCleanup(filepath.Join(m.root, markerPending), "pending marker")
+	removeFileForCleanup(filepath.Join(m.root, markerPendingPrevious), "pending previous marker")
+	removeFileForCleanup(filepath.Join(m.root, markerPendingRollbackPrevious), "pending rollback marker")
+	removeFileForCleanup(filepath.Join(m.root, markerAttempt), "pending attempt marker")
+	removeFileForCleanup(filepath.Join(m.root, markerFailed), "failed release marker")
 	config.Logger.Warn("[self_update] rollback scheduled", "target", previous, "previous", current, "immutable_fallback", useImmutableFallback)
 	return m.Status(), nil
 }
@@ -369,7 +373,7 @@ func (m *Manager) fetchChecksum(ctx context.Context, rawURL, expectedName string
 	if err != nil {
 		return "", fmt.Errorf("download checksum manifest: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResource(resp.Body, "checksum response body")
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("checksum manifest returned HTTP %d", resp.StatusCode)
 	}
@@ -412,7 +416,7 @@ func (m *Manager) downloadArchive(ctx context.Context, rawURL string) (string, s
 	if err != nil {
 		return "", "", fmt.Errorf("download release archive: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeResource(resp.Body, "release archive response body")
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("release archive returned HTTP %d", resp.StatusCode)
 	}
@@ -422,15 +426,20 @@ func (m *Manager) downloadArchive(ctx context.Context, rawURL string) (string, s
 	}
 	filePath := file.Name()
 	keepFile := false
+	fileOpen := true
 	defer func() {
 		if !keepFile {
-			_ = file.Close()
-			_ = os.Remove(filePath)
+			if fileOpen {
+				closeResource(file, "downloaded release archive")
+			}
+			removeFileForCleanup(filePath, "downloaded release archive")
 		}
 	}()
 	hash := sha256.New()
 	written, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(resp.Body, defaultArchiveLimit+1))
-	if closeErr := file.Close(); err == nil {
+	closeErr := file.Close()
+	fileOpen = false
+	if err == nil {
 		err = closeErr
 	}
 	if err != nil {
@@ -454,19 +463,19 @@ func (m *Manager) extractVerifiedArchive(archivePath string, release *Release, c
 	keepStage := false
 	defer func() {
 		if !keepStage {
-			_ = os.RemoveAll(stage)
+			removeAllForCleanup(stage, "temporary staging directory")
 		}
 	}()
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("open release archive: %w", err)
 	}
-	defer file.Close()
+	defer closeResource(file, "release archive")
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
 		return fmt.Errorf("open compressed archive: %w", err)
 	}
-	defer gzipReader.Close()
+	defer closeResource(gzipReader, "compressed release archive")
 
 	archiveTag := strings.TrimSpace(release.ArchiveTag)
 	if archiveTag == "" {
@@ -510,7 +519,7 @@ func (m *Manager) extractVerifiedArchive(archivePath string, release *Release, c
 		switch header.Typeflag {
 		case tar.TypeDir:
 			continue
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, legacyTarRegularType:
 		default:
 			return errors.New("release archive contains an unsupported link or special file")
 		}
@@ -696,13 +705,13 @@ func (m *Manager) writeMarker(name, tag string) error {
 		return err
 	}
 	tempPath := temp.Name()
-	defer os.Remove(tempPath)
+	defer removeFileForCleanup(tempPath, "temporary marker file")
 	if _, err := temp.WriteString(tag + "\n"); err != nil {
-		_ = temp.Close()
+		closeResource(temp, "temporary marker file")
 		return err
 	}
 	if err := temp.Chmod(0o640); err != nil {
-		_ = temp.Close()
+		closeResource(temp, "temporary marker file")
 		return err
 	}
 	if err := temp.Close(); err != nil {
@@ -731,13 +740,13 @@ func (m *Manager) writePendingRollbackPrevious() error {
 		return err
 	}
 	tempPath := temp.Name()
-	defer os.Remove(tempPath)
+	defer removeFileForCleanup(tempPath, "temporary rollback marker file")
 	if _, err := temp.WriteString(value + "\n"); err != nil {
-		_ = temp.Close()
+		closeResource(temp, "temporary rollback marker file")
 		return err
 	}
 	if err := temp.Chmod(0o640); err != nil {
-		_ = temp.Close()
+		closeResource(temp, "temporary rollback marker file")
 		return err
 	}
 	if err := temp.Close(); err != nil {
@@ -770,4 +779,22 @@ func sameStableTag(a, b string) bool {
 	left, leftErr := canonicalStableTag(a)
 	right, rightErr := canonicalStableTag(b)
 	return leftErr == nil && rightErr == nil && left == right
+}
+
+func closeResource(closer io.Closer, resource string) {
+	if err := closer.Close(); err != nil {
+		config.Logger.Warn("[self_update] close resource failed", "resource", resource, "error", err)
+	}
+}
+
+func removeFileForCleanup(filePath, resource string) {
+	if err := os.Remove(filePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		config.Logger.Warn("[self_update] remove cleanup file failed", "resource", resource, "path", filePath, "error", err)
+	}
+}
+
+func removeAllForCleanup(filePath, resource string) {
+	if err := os.RemoveAll(filePath); err != nil {
+		config.Logger.Warn("[self_update] remove cleanup directory failed", "resource", resource, "path", filePath, "error", err)
+	}
 }
