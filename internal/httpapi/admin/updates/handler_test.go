@@ -66,6 +66,53 @@ func TestWriteUpdateResponseExposesDownloadableAsset(t *testing.T) {
 	}
 }
 
+func TestCheckUpdatesReturnsDownloadableAssetFromRelease(t *testing.T) {
+	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/chm413/DeepSeek_Web_To_API/releases/latest" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name":     "v1.2.0",
+			"html_url":     "https://example.test/releases/v1.2.0",
+			"published_at": "2026-08-17T12:00:00Z",
+			"assets": []map[string]string{
+				{"name": "deepseek-web-to-api_v1.2.0_linux_amd64.tar.gz", "browser_download_url": "https://example.test/release.tar.gz"},
+				{"name": "sha256sums.txt", "browser_download_url": "https://example.test/sha256sums.txt"},
+			},
+		})
+	}))
+	defer releaseServer.Close()
+
+	container := true
+	handler := &Handler{Updater: selfupdate.New(nil, selfupdate.Options{
+		Root:           t.TempDir(),
+		Container:      &container,
+		GitHubAPI:      releaseServer.URL,
+		HTTPClient:     releaseServer.Client(),
+		GOOS:           "linux",
+		GOARCH:         "amd64",
+		CurrentVersion: func() string { return "1.1.9" },
+	})}
+	recorder := httptest.NewRecorder()
+	handler.checkUpdates(recorder, httptest.NewRequest(http.MethodPost, "/admin/updates/check", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Status struct {
+			LatestTag    string `json:"latest_tag"`
+			Downloadable bool   `json:"downloadable"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Status.LatestTag != "v1.2.0" || !body.Status.Downloadable {
+		t.Fatalf("unexpected checked update status: %#v", body.Status)
+	}
+}
+
 func TestUpdateSettingsAcceptsDirectBody(t *testing.T) {
 	container := true
 	store := &configStore{}

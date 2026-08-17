@@ -67,14 +67,48 @@ func newAccountSQLiteStore(path string, seed []Account) (*accountSQLiteStore, []
 		_ = db.Close()
 		return nil, nil, err
 	}
-	if len(accounts) == 0 && len(seed) > 0 {
-		accounts, err = store.replace(seed)
+	if len(seed) > 0 {
+		merged, added := mergeAccountSeeds(accounts, seed)
+		if added > 0 || len(accounts) == 0 {
+			accounts, err = store.replace(merged)
+			if err == nil && added > 0 {
+				Logger.Info("[accounts] migrated accounts from legacy config", "added", added, "total", len(accounts), "sqlite", path)
+			}
+		}
 		if err != nil {
 			_ = db.Close()
 			return nil, nil, err
 		}
 	}
 	return store, accounts, nil
+}
+
+// mergeAccountSeeds imports accounts that are still present in an older JSON
+// config without replacing the SQLite runtime state. Existing rows contain
+// refreshed tokens, disabled state and proxy health, so SQLite remains the
+// source of truth for identities already migrated.
+func mergeAccountSeeds(existing, seed []Account) ([]Account, int) {
+	merged := normalizeAndDedupeAccountConfig(existing)
+	seen := make(map[string]struct{}, len(merged))
+	for _, account := range merged {
+		if key := accountConfigDedupeKey(account); key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	added := 0
+	for _, account := range normalizeAndDedupeAccountConfig(seed) {
+		key := accountConfigDedupeKey(account)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, account)
+		added++
+	}
+	return merged, added
 }
 
 func (s *accountSQLiteStore) init() error {

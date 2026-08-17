@@ -40,6 +40,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	for k, v := range c.AdditionalFields {
 		m[k] = v
 	}
+	if c.ConfigSchemaVersion > 0 {
+		m["config_schema_version"] = c.ConfigSchemaVersion
+	}
 	if len(c.Keys) > 0 {
 		m["keys"] = c.Keys
 	}
@@ -122,6 +125,10 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 	c.AdditionalFields = map[string]any{}
 	for k, v := range raw {
 		switch k {
+		case "config_schema_version":
+			if err := json.Unmarshal(v, &c.ConfigSchemaVersion); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
 		case "keys":
 			if err := json.Unmarshal(v, &c.Keys); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
@@ -232,12 +239,13 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 
 func (c Config) Clone() Config {
 	clone := Config{
-		Keys:               slices.Clone(c.Keys),
-		APIKeys:            slices.Clone(c.APIKeys),
-		Accounts:           slices.Clone(c.Accounts),
-		Proxies:            slices.Clone(c.Proxies),
-		ProxySubscriptions: slices.Clone(c.ProxySubscriptions),
-		ProxyCore:          c.ProxyCore,
+		ConfigSchemaVersion: c.ConfigSchemaVersion,
+		Keys:                slices.Clone(c.Keys),
+		APIKeys:             slices.Clone(c.APIKeys),
+		Accounts:            slices.Clone(c.Accounts),
+		Proxies:             slices.Clone(c.Proxies),
+		ProxySubscriptions:  slices.Clone(c.ProxySubscriptions),
+		ProxyCore:           c.ProxyCore,
 		ProxyPolicy: ProxyPolicyConfig{
 			HealthCheckEnabled:                cloneBoolPtr(c.ProxyPolicy.HealthCheckEnabled),
 			AutomaticRoutingEnabled:           cloneBoolPtr(c.ProxyPolicy.AutomaticRoutingEnabled),

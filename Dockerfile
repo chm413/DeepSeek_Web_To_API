@@ -33,6 +33,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=busybox-tools /bin/busybox /usr/local/bin/busybox
 COPY docker/entrypoint.sh /usr/local/bin/deepseek-web-to-api-entrypoint
+COPY docker/migrate-legacy-config.sh /usr/local/bin/deepseek-web-to-api-migrate-legacy-config
 COPY VERSION /tmp/deepseek-web-to-api-version
 RUN set -eux; \
     version="$(tr -d '[:space:]' < /tmp/deepseek-web-to-api-version)"; \
@@ -40,7 +41,7 @@ RUN set -eux; \
     mkdir -p /usr/local/share/deepseek-web-to-api; \
     printf 'v%s\n' "${version}" > /usr/local/share/deepseek-web-to-api/VERSION; \
     rm -f /tmp/deepseek-web-to-api-version; \
-    chmod 0555 /usr/local/bin/deepseek-web-to-api-entrypoint
+    chmod 0555 /usr/local/bin/deepseek-web-to-api-entrypoint /usr/local/bin/deepseek-web-to-api-migrate-legacy-config
 EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/usr/local/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5001/healthz"]

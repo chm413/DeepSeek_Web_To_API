@@ -109,10 +109,59 @@ mark_failed_candidate() {
   mv -f "${temp_path}" "${failed_path}"
 }
 
+write_version_marker() {
+  marker_path="$1"
+  marker_value="$2"
+  temp_path="${marker_path}.$$"
+  (umask 077 && printf '%s\n' "${marker_value}" > "${temp_path}") || return 1
+  mv -f "${temp_path}" "${marker_path}"
+}
+
+# Recover a candidate confirmation which died between marker writes. Newer
+# candidates persist both the previously-running version and the old rollback
+# pointer; older transactions simply fall back to their untouched current
+# marker. This is intentionally best-effort: an unwritable persistent volume
+# cannot be repaired by the entrypoint, but it must never start the candidate
+# again in this invocation.
+restore_pending_release_state() {
+  pending_previous="$(read_marker "${self_update_root}/pending.previous.version" 2>/dev/null || true)"
+  if [ -n "${pending_previous}" ]; then
+    write_version_marker "${self_update_root}/current.version" "${pending_previous}" || return 1
+  fi
+
+  rollback_path="${self_update_root}/pending.rollback.previous.version"
+  if [ ! -r "${rollback_path}" ]; then
+    return 0
+  fi
+  IFS= read -r rollback_value < "${rollback_path}" || true
+  case "${rollback_value}" in
+    none)
+      rm -f "${self_update_root}/previous.version"
+      ;;
+    *)
+      rollback_previous="$(read_marker "${rollback_path}" 2>/dev/null || true)"
+      if [ -z "${rollback_previous}" ]; then
+        return 1
+      fi
+      write_version_marker "${self_update_root}/previous.version" "${rollback_previous}"
+      ;;
+  esac
+}
+
+recover_failed_candidate() {
+  candidate_tag="$1"
+  mark_failed_candidate "${candidate_tag}" || true
+  if ! restore_pending_release_state; then
+    printf '%s\n' "[self-update] failed to fully restore pending release state" >&2
+  fi
+  clear_pending_candidate
+}
+
 clear_pending_candidate() {
   rm -f \
     "${self_update_root}/pending.version" \
     "${self_update_root}/pending.previous.version" \
+    "${self_update_root}/pending.rollback.previous.version" \
     "${self_update_root}/pending.attempted"
 }
 
@@ -139,8 +188,7 @@ while :; do
   if [ -n "${pending_tag}" ] && release_is_runnable "${pending_tag}"; then
     attempt_path="${self_update_root}/pending.attempted"
     if [ -f "${attempt_path}" ]; then
-      mark_failed_candidate "${pending_tag}" || true
-      clear_pending_candidate
+      recover_failed_candidate "${pending_tag}"
       printf '%s\n' "[self-update] pending candidate failed before readiness; retaining previous release" >&2
     elif mark_pending_attempt "${pending_tag}"; then
       release_dir="${self_update_root}/versions/${pending_tag}"
@@ -151,15 +199,18 @@ while :; do
       printf '%s\n' "[self-update] starting pending release: ${pending_tag}" >&2
     fi
   elif [ -n "${pending_tag}" ]; then
-    mark_failed_candidate "${pending_tag}" || true
-    clear_pending_candidate
+    recover_failed_candidate "${pending_tag}"
     printf '%s\n' "[self-update] pending candidate is not runnable; retaining previous release" >&2
   fi
 
   if [ "${selected_binary}" = "${immutable_binary}" ]; then
     current_tag="$(read_marker "${self_update_root}/current.version" 2>/dev/null || true)"
+    failed_tag="$(read_marker "${self_update_root}/failed.version" 2>/dev/null || true)"
     immutable_tag="$(read_marker "${immutable_version_file}" 2>/dev/null || true)"
-    if [ -n "${current_tag}" ] && release_is_runnable "${current_tag}" && { [ -z "${immutable_tag}" ] || tag_is_newer "${current_tag}" "${immutable_tag}"; }; then
+    if [ -n "${current_tag}" ] && [ "${current_tag}" = "${failed_tag}" ]; then
+      printf '%s\n' "[self-update] quarantined persistent release will not be started: ${current_tag}" >&2
+      printf '%s\n' "[self-update] starting immutable image release: ${immutable_tag:-unknown}" >&2
+    elif [ -n "${current_tag}" ] && release_is_runnable "${current_tag}" && { [ -z "${immutable_tag}" ] || tag_is_newer "${current_tag}" "${immutable_tag}"; }; then
       release_dir="${self_update_root}/versions/${current_tag}"
       selected_binary="${release_dir}/deepseek-web-to-api"
       export DEEPSEEK_WEB_TO_API_STATIC_ADMIN_DIR="${release_dir}/static/admin"
@@ -186,8 +237,7 @@ while :; do
   # recovery does not depend on Docker's restart policy being configured.
   pending_after_exit="$(read_marker "${self_update_root}/pending.version" 2>/dev/null || true)"
   if [ "${started_pending}" = "true" ] && [ "${pending_after_exit}" = "${pending_tag}" ] && [ -f "${self_update_root}/pending.attempted" ]; then
-    mark_failed_candidate "${pending_tag}" || true
-    clear_pending_candidate
+    recover_failed_candidate "${pending_tag}"
     printf '%s\n' "[self-update] pending candidate exited before readiness; falling back to the previous release" >&2
     continue
   fi

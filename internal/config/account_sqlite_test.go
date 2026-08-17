@@ -105,3 +105,37 @@ func TestAccountSQLiteEnabledForEnvConfigWhenPathExplicit(t *testing.T) {
 		t.Fatal("expected env-backed account update to persist into sqlite")
 	}
 }
+
+func TestAccountSQLiteMergesAccountsStillPresentInLegacyConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "accounts.sqlite")
+	first, seed, err := newAccountSQLiteStore(path, []Account{{Email: "existing@example.com", Password: "p", Token: "runtime-token"}})
+	if err != nil {
+		t.Fatalf("seed existing account: %v", err)
+	}
+	if seed == nil || len(seed) != 1 {
+		t.Fatalf("seed existing account: %#v", seed)
+	}
+	if first == nil {
+		t.Fatal("expected sqlite store")
+	}
+	_ = first.close()
+
+	second, accounts, err := newAccountSQLiteStore(path, []Account{
+		{Email: "existing@example.com", Password: "legacy-password"},
+		{Email: "new@example.com", Password: "new-password"},
+	})
+	if err != nil {
+		t.Fatalf("merge legacy accounts: %v", err)
+	}
+	defer func() { _ = second.close() }()
+	if len(accounts) != 2 {
+		t.Fatalf("expected existing and new accounts, got %#v", accounts)
+	}
+	if accounts[0].Token != "runtime-token" {
+		t.Fatalf("legacy seed overwrote runtime token: %#v", accounts[0])
+	}
+	if accounts[1].Email != "new@example.com" {
+		t.Fatalf("missing legacy account import: %#v", accounts)
+	}
+}

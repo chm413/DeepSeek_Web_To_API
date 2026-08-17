@@ -26,10 +26,14 @@ const (
 	markerPrevious        = "previous.version"
 	markerPending         = "pending.version"
 	markerPendingPrevious = "pending.previous.version"
-	markerAttempt         = "pending.attempted"
-	markerFailed          = "failed.version"
-	metadataFile          = ".verified.json"
-	defaultArchiveEntries = 10000
+	// markerPendingRollbackPrevious preserves the old rollback pointer while a
+	// candidate is being confirmed. It is deliberately not a normal version
+	// marker because the literal "none" represents an absent previous marker.
+	markerPendingRollbackPrevious = "pending.rollback.previous.version"
+	markerAttempt                 = "pending.attempted"
+	markerFailed                  = "failed.version"
+	metadataFile                  = ".verified.json"
+	defaultArchiveEntries         = 10000
 )
 
 type verifiedMetadata struct {
@@ -132,22 +136,36 @@ func (m *Manager) Apply(requestedTag string) (Status, error) {
 	if active, activeErr := canonicalStableTag(version.Tag(m.currentVersion())); activeErr == nil {
 		previous = active
 	}
+	if err := m.writePendingRollbackPrevious(); err != nil {
+		return Status{}, fmt.Errorf("preserve prior rollback release: %w", err)
+	}
 	if previous != "" {
 		if err := m.writeMarker(markerPendingPrevious, previous); err != nil {
+			_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
 			return Status{}, fmt.Errorf("preserve pending previous release: %w", err)
 		}
 	} else if err := os.Remove(filepath.Join(m.root, markerPendingPrevious)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
 		return Status{}, fmt.Errorf("clear pending previous release: %w", err)
 	}
 	if err := os.Remove(filepath.Join(m.root, markerAttempt)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
+		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
 		return Status{}, fmt.Errorf("clear previous pending attempt: %w", err)
-	}
-	if err := os.Remove(filepath.Join(m.root, markerFailed)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Status{}, fmt.Errorf("clear failed release marker: %w", err)
 	}
 	if err := m.writeMarker(markerPending, tag); err != nil {
 		_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
+		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
 		return Status{}, fmt.Errorf("mark pending release: %w", err)
+	}
+	// A successful pending transaction is the only point at which a manual
+	// retry may clear a failed-version quarantine. If this fails, remove the
+	// pending transaction and leave the quarantine intact for automatic checks.
+	if err := os.Remove(filepath.Join(m.root, markerFailed)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(filepath.Join(m.root, markerPending))
+		_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
+		_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
+		return Status{}, fmt.Errorf("clear failed release marker: %w", err)
 	}
 	config.Logger.Info("[self_update] release pending restart", "tag", tag, "previous", previous)
 	return m.Status(), nil
@@ -192,6 +210,7 @@ func (m *Manager) Rollback() (Status, error) {
 	}
 	_ = os.Remove(filepath.Join(m.root, markerPending))
 	_ = os.Remove(filepath.Join(m.root, markerPendingPrevious))
+	_ = os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious))
 	_ = os.Remove(filepath.Join(m.root, markerAttempt))
 	_ = os.Remove(filepath.Join(m.root, markerFailed))
 	config.Logger.Warn("[self_update] rollback scheduled", "target", previous, "previous", current, "immutable_fallback", useImmutableFallback)
@@ -239,25 +258,34 @@ func (m *Manager) ConfirmStartup() error {
 	if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
 		return previousErr
 	}
+	if err := m.writeMarker(markerCurrent, tag); err != nil {
+		return err
+	}
 	if previous != "" && previous != tag {
 		if err := m.writeMarker(markerPrevious, previous); err != nil {
 			return err
 		}
 	}
-	if err := m.writeMarker(markerCurrent, tag); err != nil {
+	if err := os.Remove(filepath.Join(m.root, markerFailed)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// Removing pending.version commits the promotion. Until this succeeds the
+	// entrypoint can restore both current.version and previous.version from the
+	// pending transaction if this process dies partway through confirmation.
 	if err := os.Remove(filepath.Join(m.root, markerPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// These are post-commit housekeeping files. A stale sidecar is inert unless
+	// pending.version exists, so do not turn a healthy started candidate into a
+	// failed process solely because cleanup encountered an I/O error.
 	if err := os.Remove(filepath.Join(m.root, markerPendingPrevious)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		config.Logger.Warn("[self_update] clear pending previous marker after promotion failed", "error", err)
+	}
+	if err := os.Remove(filepath.Join(m.root, markerPendingRollbackPrevious)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		config.Logger.Warn("[self_update] clear pending rollback marker after promotion failed", "error", err)
 	}
 	if err := os.Remove(filepath.Join(m.root, markerAttempt)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Remove(filepath.Join(m.root, markerFailed)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		config.Logger.Warn("[self_update] clear pending attempt marker after promotion failed", "error", err)
 	}
 	config.Logger.Info("[self_update] candidate promoted after startup", "tag", tag, "previous", previous)
 	return nil
@@ -681,6 +709,41 @@ func (m *Manager) writeMarker(name, tag string) error {
 		return err
 	}
 	return os.Rename(tempPath, filepath.Join(m.root, name))
+}
+
+// writePendingRollbackPrevious snapshots the existing previous.version before
+// a candidate starts. The entrypoint uses it only when the candidate dies
+// before pending.version has been committed away. "none" records the absence
+// of a previous marker so recovery can restore that state exactly.
+func (m *Manager) writePendingRollbackPrevious() error {
+	value := "none"
+	previous, err := m.readMarker(markerPrevious)
+	if err == nil && previous != "" {
+		value = previous
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := m.ensureRoot(); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(m.root, "."+markerPendingRollbackPrevious+"-")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if _, err := temp.WriteString(value + "\n"); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Chmod(0o640); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, filepath.Join(m.root, markerPendingRollbackPrevious))
 }
 
 func canonicalStableTag(value string) (string, error) {

@@ -12,30 +12,33 @@ import (
 )
 
 type Config struct {
-	Keys               []string                `json:"keys,omitempty"`
-	APIKeys            []APIKey                `json:"api_keys,omitempty"`
-	Accounts           []Account               `json:"accounts,omitempty"`
-	Proxies            []Proxy                 `json:"proxies,omitempty"`
-	ProxySubscriptions []ProxySubscription     `json:"proxy_subscriptions,omitempty"`
-	ProxyCore          ProxyCoreConfig         `json:"proxy_core,omitempty"`
-	ProxyPolicy        ProxyPolicyConfig       `json:"proxy_policy,omitempty"`
-	ModelAliases       map[string]string       `json:"model_aliases,omitempty"`
-	Admin              AdminConfig             `json:"admin,omitempty"`
-	Server             ServerConfig            `json:"server,omitempty"`
-	Storage            StorageConfig           `json:"storage,omitempty"`
-	Cache              CacheConfig             `json:"cache,omitempty"`
-	Safety             SafetyConfig            `json:"safety,omitempty"`
-	Runtime            RuntimeConfig           `json:"runtime,omitempty"`
-	Compat             CompatConfig            `json:"compat,omitempty"`
-	Responses          ResponsesConfig         `json:"responses,omitempty"`
-	Embeddings         EmbeddingsConfig        `json:"embeddings,omitempty"`
-	AutoDelete         AutoDeleteConfig        `json:"auto_delete"`
-	HistorySplit       HistorySplitConfig      `json:"history_split"`
-	CurrentInputFile   CurrentInputFileConfig  `json:"current_input_file,omitempty"`
-	ThinkingInjection  ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
-	PromptLimit        PromptLimitConfig       `json:"prompt_limit,omitempty"`
-	AppUpdate          AppUpdateConfig         `json:"app_update,omitempty"`
-	AdditionalFields   map[string]any          `json:"-"`
+	// ConfigSchemaVersion is persisted by the startup migration layer. A zero
+	// value means the file predates schema versioning and is migrated in place.
+	ConfigSchemaVersion int                     `json:"config_schema_version,omitempty"`
+	Keys                []string                `json:"keys,omitempty"`
+	APIKeys             []APIKey                `json:"api_keys,omitempty"`
+	Accounts            []Account               `json:"accounts,omitempty"`
+	Proxies             []Proxy                 `json:"proxies,omitempty"`
+	ProxySubscriptions  []ProxySubscription     `json:"proxy_subscriptions,omitempty"`
+	ProxyCore           ProxyCoreConfig         `json:"proxy_core,omitempty"`
+	ProxyPolicy         ProxyPolicyConfig       `json:"proxy_policy,omitempty"`
+	ModelAliases        map[string]string       `json:"model_aliases,omitempty"`
+	Admin               AdminConfig             `json:"admin,omitempty"`
+	Server              ServerConfig            `json:"server,omitempty"`
+	Storage             StorageConfig           `json:"storage,omitempty"`
+	Cache               CacheConfig             `json:"cache,omitempty"`
+	Safety              SafetyConfig            `json:"safety,omitempty"`
+	Runtime             RuntimeConfig           `json:"runtime,omitempty"`
+	Compat              CompatConfig            `json:"compat,omitempty"`
+	Responses           ResponsesConfig         `json:"responses,omitempty"`
+	Embeddings          EmbeddingsConfig        `json:"embeddings,omitempty"`
+	AutoDelete          AutoDeleteConfig        `json:"auto_delete"`
+	HistorySplit        HistorySplitConfig      `json:"history_split"`
+	CurrentInputFile    CurrentInputFileConfig  `json:"current_input_file,omitempty"`
+	ThinkingInjection   ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
+	PromptLimit         PromptLimitConfig       `json:"prompt_limit,omitempty"`
+	AppUpdate           AppUpdateConfig         `json:"app_update,omitempty"`
+	AdditionalFields    map[string]any          `json:"-"`
 }
 
 type Account struct {

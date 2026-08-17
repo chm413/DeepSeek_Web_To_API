@@ -29,6 +29,8 @@ type sqliteColumnInfo struct {
 	ddl  string
 }
 
+const legacyJSONImportHashMeta = "legacy_json_import_sha256"
+
 func newSQLiteStore(path, legacyPath, tokenStatsPath string) (*sqliteStore, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {

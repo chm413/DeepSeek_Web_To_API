@@ -1,7 +1,9 @@
 package chathistory
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,19 +16,21 @@ import (
 )
 
 func (s *sqliteStore) importLegacyIfEmptyLocked(tx *sql.Tx) error {
-	var count int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM chat_history`).Scan(&count); err != nil {
-		return fmt.Errorf("count chat history sqlite rows before import: %w", err)
-	}
-	if count > 0 || strings.TrimSpace(s.legacyPath) == "" {
+	legacyPath := strings.TrimSpace(s.legacyPath)
+	if legacyPath == "" {
 		return nil
 	}
-	raw, err := os.ReadFile(s.legacyPath)
+	raw, err := os.ReadFile(legacyPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read legacy chat history index: %w", err)
+	}
+	hash := sha256.Sum256(raw)
+	hashText := hex.EncodeToString(hash[:])
+	if previous, metaErr := s.metaLocked(tx, legacyJSONImportHashMeta); metaErr == nil && strings.TrimSpace(previous) == hashText {
+		return nil
 	}
 	entries, legacyLimit, err := s.legacyEntries(raw)
 	if err != nil {
@@ -43,6 +47,7 @@ func (s *sqliteStore) importLegacyIfEmptyLocked(tx *sql.Tx) error {
 		entries = entries[:legacyLimit]
 	}
 	maxRevision := int64(0)
+	imported := 0
 	for _, entry := range entries {
 		if strings.TrimSpace(entry.ID) == "" {
 			continue
@@ -53,15 +58,27 @@ func (s *sqliteStore) importLegacyIfEmptyLocked(tx *sql.Tx) error {
 		if entry.Revision > maxRevision {
 			maxRevision = entry.Revision
 		}
+		var exists int
+		if err := tx.QueryRow(`SELECT 1 FROM chat_history WHERE id = ? LIMIT 1`, entry.ID).Scan(&exists); err == nil {
+			// The SQLite copy is authoritative once it contains an entry. This
+			// keeps a stale legacy JSON file from overwriting newer responses.
+			continue
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("check legacy chat history entry %q: %w", entry.ID, err)
+		}
 		if err := s.upsertEntryLocked(tx, entry); err != nil {
 			return err
 		}
+		imported++
 	}
 	if err := s.bumpRevisionAtLeastLocked(tx, maxRevision); err != nil {
 		return err
 	}
-	if len(entries) > 0 {
-		config.Logger.Info("[chat_history] imported legacy JSON into SQLite", "sqlite", s.path, "legacy", s.legacyPath, "count", len(entries), "limit", legacyLimit)
+	if err := s.setMetaLocked(tx, legacyJSONImportHashMeta, hashText); err != nil {
+		return err
+	}
+	if imported > 0 {
+		config.Logger.Info("[chat_history] imported legacy JSON into SQLite", "sqlite", s.path, "legacy", legacyPath, "count", imported, "scanned", len(entries), "limit", legacyLimit)
 	}
 	return nil
 }

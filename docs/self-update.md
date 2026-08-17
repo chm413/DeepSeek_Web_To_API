@@ -10,7 +10,7 @@ updates only write the persistent Compose `./data` volume.
 ## Version Source And Release Build
 
 `VERSION` is the single release-version source. Push a matching stable tag,
-for example `v1.1.9`, to start `release-artifacts.yml`. The workflow checks
+for example `v1.1.10`, to start `release-artifacts.yml`. The workflow checks
 that the tag and `VERSION` agree, runs the release gates, then publishes:
 
 - Linux archive assets for `linux/amd64` and `linux/arm64`.
@@ -35,8 +35,11 @@ creates a GitHub Release by itself.
    the HTTP response is sent. The image entrypoint starts that candidate.
 7. The candidate promotes itself only after it has bound the HTTP listener.
    If it fails before readiness, the entrypoint keeps the old current version,
-   records the failed tag, and falls back in the same launcher process.
+   restores the old rollback pointer, records the failed tag, and falls back
+   in the same launcher process.
    Automatic apply skips that tag until an administrator explicitly retries it.
+   The launcher also refuses to select a quarantined tag from the persistent
+   release slot, even if an interrupted confirmation left it in `current.version`.
 
 The launcher never overwrites `/usr/local/bin/deepseek-web-to-api`, does not
 touch configuration or SQLite files, and does not require a Docker socket.
@@ -88,9 +91,10 @@ overwrite their own executable.
   previous.version
   pending.version
   pending.previous.version
+  pending.rollback.previous.version
   failed.version
   versions/
-    v1.1.9/
+    v1.1.10/
       deepseek-web-to-api
       static/admin/
       .verified.json

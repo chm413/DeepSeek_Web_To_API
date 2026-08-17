@@ -7,3 +7,4 @@ cd "$ROOT_DIR"
 ./tests/scripts/run-unit-go.sh
 ./tests/scripts/run-unit-node.sh
 bash ./tests/scripts/test-self-update-entrypoint.sh
+bash ./tests/scripts/test-legacy-config-migration.sh

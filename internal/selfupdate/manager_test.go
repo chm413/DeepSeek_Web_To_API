@@ -208,6 +208,56 @@ func TestAutomaticApplySkipsFailedCandidateUntilManualRetry(t *testing.T) {
 	}
 }
 
+func TestCandidatePromotionSnapshotsRollbackMarkerUntilCommit(t *testing.T) {
+	const tag = "v1.2.0"
+	archive := releaseArchive(t, tag, "amd64", nil)
+	checksum := sha256.Sum256(archive)
+	server := releaseServer(t, tag, "amd64", archive, hex.EncodeToString(checksum[:]))
+	defer server.Close()
+
+	container := true
+	currentVersion := "1.1.9"
+	root := t.TempDir()
+	manager := New(nil, Options{
+		Root:           root,
+		GitHubAPI:      server.URL,
+		HTTPClient:     server.Client(),
+		GOOS:           "linux",
+		GOARCH:         "amd64",
+		CurrentVersion: func() string { return currentVersion },
+		Container:      &container,
+	})
+	if _, err := manager.Download(context.Background(), tag); err != nil {
+		t.Fatalf("download release: %v", err)
+	}
+	if err := manager.writeMarker(markerPrevious, "v1.0.0"); err != nil {
+		t.Fatalf("seed rollback marker: %v", err)
+	}
+	if _, err := manager.Apply(tag); err != nil {
+		t.Fatalf("apply release: %v", err)
+	}
+
+	if previous, err := manager.readMarker(markerPrevious); err != nil || previous != "v1.0.0" {
+		t.Fatalf("rollback marker changed before candidate confirmation: previous=%q err=%v", previous, err)
+	}
+	backup, err := os.ReadFile(filepath.Join(root, markerPendingRollbackPrevious))
+	if err != nil || strings.TrimSpace(string(backup)) != "v1.0.0" {
+		t.Fatalf("pending rollback snapshot = %q err=%v, want v1.0.0", backup, err)
+	}
+
+	t.Setenv("DEEPSEEK_WEB_TO_API_SELF_UPDATE_ACTIVE_VERSION", tag)
+	currentVersion = "1.2.0"
+	if err := manager.ConfirmStartup(); err != nil {
+		t.Fatalf("confirm candidate startup: %v", err)
+	}
+	if previous, err := manager.readMarker(markerPrevious); err != nil || previous != "v1.1.9" {
+		t.Fatalf("rollback marker after promotion = %q err=%v, want v1.1.9", previous, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, markerPendingRollbackPrevious)); !os.IsNotExist(err) {
+		t.Fatalf("pending rollback snapshot was not cleared after promotion: %v", err)
+	}
+}
+
 type memoryStore struct {
 	mu  sync.Mutex
 	cfg config.Config

@@ -151,6 +151,333 @@ func TestLoadStorePreservesFileBackedTokensForRuntime(t *testing.T) {
 	}
 }
 
+func TestLoadStoreMigratesLegacyConfigAndCreatesBackup(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	accountsPath := filepath.Join(dir, "accounts.sqlite")
+	if err := os.WriteFile(configPath, []byte(`{"keys":["legacy-key"],"accounts":[{"email":"legacy@example.com","password":"p"}]}`), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", accountsPath)
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load migrated config: %v", err)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.ConfigSchemaVersion != CurrentConfigSchemaVersion {
+		t.Fatalf("config schema version = %d, want %d", snapshot.ConfigSchemaVersion, CurrentConfigSchemaVersion)
+	}
+	if snapshot.AppUpdate.Enabled == nil || !*snapshot.AppUpdate.Enabled {
+		t.Fatal("expected update checker to be enabled for migrated config")
+	}
+	if snapshot.AppUpdate.AutoDownload == nil || *snapshot.AppUpdate.AutoDownload {
+		t.Fatal("expected automatic downloads to remain disabled")
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	if !strings.Contains(string(content), `"config_schema_version": 2`) || !strings.Contains(string(content), `"app_update"`) {
+		t.Fatalf("migrated config did not contain schema/update settings: %s", content)
+	}
+	if strings.Contains(string(content), `"accounts"`) {
+		t.Fatalf("migrated config duplicated SQLite accounts: %s", content)
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, "migrations", "backups", "config-v0-*.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("expected one v0 config backup, got %v (%v)", backups, err)
+	}
+	backupContent, err := os.ReadFile(backups[0])
+	if err != nil || !strings.Contains(string(backupContent), `"legacy@example.com"`) {
+		t.Fatalf("migration backup did not preserve the original account: %s (%v)", backupContent, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close migrated store: %v", err)
+	}
+
+	reloaded, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("reload migrated config: %v", err)
+	}
+	defer func() { _ = reloaded.Close() }()
+	backups, err = filepath.Glob(filepath.Join(dir, "migrations", "backups", "config-v0-*.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("idempotent reload created another backup: %v (%v)", backups, err)
+	}
+	if accounts := reloaded.Accounts(); len(accounts) != 1 || accounts[0].Identifier() != "legacy@example.com" {
+		t.Fatalf("SQLite import did not survive JSON account removal: %#v", accounts)
+	}
+}
+
+func TestLoadStoreExternalizesInlineAccountsAtCurrentSchema(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	accountsPath := filepath.Join(dir, "accounts.sqlite")
+	current := `{
+  "config_schema_version": 2,
+  "app_update": {
+    "enabled": true,
+    "auto_download": false,
+    "auto_apply": false,
+    "check_interval_minutes": 360
+  },
+  "accounts": [{"email":"current@example.com","password":"legacy-password"}]
+}`
+	if err := os.WriteFile(configPath, []byte(current), 0o600); err != nil {
+		t.Fatalf("write current config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", accountsPath)
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load current config with inline account: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if _, ok := store.FindAccount("current@example.com"); !ok {
+		t.Fatal("expected inline account to be available from SQLite")
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read externalized config: %v", err)
+	}
+	if strings.Contains(string(content), `"accounts"`) || strings.Contains(string(content), "legacy-password") {
+		t.Fatalf("current-schema inline account remained in config: %s", content)
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, "migrations", "backups", "config-v2-*.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("expected one current-schema account backup, got %v (%v)", backups, err)
+	}
+}
+
+func TestLegacyConfigMigrationPreservesUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	accountsPath := filepath.Join(dir, "accounts.sqlite")
+	legacy := `{
+  "server": {"port":"5001", "future_server_flag":{"keep":true}},
+  "app_update": {"enabled":false, "future_update_flag":"keep"},
+  "future_top_level": {"nested":{"keep":true}}
+}`
+	if err := os.WriteFile(configPath, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", accountsPath)
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load migrated config: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(content, &document); err != nil {
+		t.Fatalf("decode migrated document: %v", err)
+	}
+	for _, path := range []struct {
+		section string
+		key     string
+	}{
+		{section: "server", key: "future_server_flag"},
+		{section: "app_update", key: "future_update_flag"},
+		{section: "future_top_level", key: "nested"},
+	} {
+		var section map[string]json.RawMessage
+		if err := json.Unmarshal(document[path.section], &section); err != nil {
+			t.Fatalf("decode %s: %v", path.section, err)
+		}
+		if _, ok := section[path.key]; !ok {
+			t.Fatalf("migration dropped %s.%s: %s", path.section, path.key, content)
+		}
+	}
+	if snapshot := store.Snapshot(); snapshot.AppUpdate.Enabled == nil || *snapshot.AppUpdate.Enabled {
+		t.Fatalf("migration overwrote explicit app_update.enabled=false: %#v", snapshot.AppUpdate)
+	}
+}
+
+func TestLoadStoreMigratesFileConfigWithoutAccountsSQLite(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"keys":["legacy-key"],"future_top_level":true}`), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", "")
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load file-backed config without accounts sqlite: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	if !strings.Contains(string(content), `"config_schema_version": 2`) || !strings.Contains(string(content), `"future_top_level": true`) {
+		t.Fatalf("expected schema migration and preserved top-level field, got: %s", content)
+	}
+}
+
+func TestConfigMigrationNeedsRelocationForCurrentSchema(t *testing.T) {
+	cfg := Config{
+		ConfigSchemaVersion: CurrentConfigSchemaVersion,
+		AppUpdate: AppUpdateConfig{
+			Enabled:              boolPtr(true),
+			AutoDownload:         boolPtr(false),
+			AutoApply:            boolPtr(false),
+			CheckIntervalMinutes: 360,
+		},
+	}
+	report, err := ApplyConfigMigrations(&cfg)
+	if err != nil {
+		t.Fatalf("migrate current config: %v", err)
+	}
+	if report.Changed {
+		t.Fatalf("current schema unexpectedly needs a content migration: %#v", report)
+	}
+	if !configMigrationNeedsRelocation("/app/config.json", "/app/data/config.json") {
+		t.Fatal("legacy container config must be copied into the persistent path")
+	}
+	markConfigMigrationRelocation(&report, "/app/config.json", "/app/data/config.json")
+	if !report.Changed {
+		t.Fatal("path relocation must turn an otherwise current config into a writeback migration")
+	}
+}
+
+func TestPersistConfigMigrationRelocatesCurrentSchemaSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "legacy", "config.json")
+	destination := filepath.Join(dir, "data", "config.json")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatalf("create legacy config directory: %v", err)
+	}
+	original := []byte(`{
+	  "config_schema_version": 2,
+	  "app_update": {
+	    "enabled": true,
+	    "auto_download": false,
+	    "auto_apply": false,
+	    "check_interval_minutes": 360,
+	    "future_update_option": "preserve"
+	  },
+	  "future_top_level": {"keep": true}
+	}`)
+	if err := os.WriteFile(source, original, 0o600); err != nil {
+		t.Fatalf("write current legacy config: %v", err)
+	}
+	cfg, err := loadConfigFromFile(source)
+	if err != nil {
+		t.Fatalf("load current legacy config: %v", err)
+	}
+	report, err := ApplyConfigMigrations(&cfg)
+	if err != nil {
+		t.Fatalf("migrate current legacy config: %v", err)
+	}
+	if report.Changed {
+		t.Fatalf("current config unexpectedly needs a content migration: %#v", report)
+	}
+	markConfigMigrationRelocation(&report, source, destination)
+	if !report.Changed {
+		t.Fatal("legacy source path did not schedule a writeback")
+	}
+	if err := persistConfigMigration(destination, source, cfg, false, report); err != nil {
+		t.Fatalf("persist relocated config: %v", err)
+	}
+	if got, err := os.ReadFile(source); err != nil || string(got) != string(original) {
+		t.Fatalf("source config changed during relocation: got %q, err=%v", got, err)
+	}
+	content, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read relocated config: %v", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(content, &document); err != nil {
+		t.Fatalf("decode relocated config: %v", err)
+	}
+	if _, ok := document["future_top_level"]; !ok {
+		t.Fatalf("relocation dropped an unknown top-level field: %s", content)
+	}
+	var update map[string]json.RawMessage
+	if err := json.Unmarshal(document["app_update"], &update); err != nil {
+		t.Fatalf("decode relocated app_update: %v", err)
+	}
+	if _, ok := update["future_update_option"]; !ok {
+		t.Fatalf("relocation dropped an unknown nested field: %s", content)
+	}
+	backups, err := filepath.Glob(filepath.Join(filepath.Dir(destination), "migrations", "backups", "config-v2-*.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("expected one current-schema source backup, got %v (%v)", backups, err)
+	}
+}
+
+func TestLoadStorePersistsNullAndNonpositiveAppUpdateDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+	  "config_schema_version": 2,
+	  "app_update": {
+	    "enabled": null,
+	    "auto_download": null,
+	    "auto_apply": null,
+	    "check_interval_minutes": 0
+	  }
+	}`), 0o600); err != nil {
+		t.Fatalf("write partial current config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", "")
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load partial current config: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close migrated store: %v", err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched current config: %v", err)
+	}
+	var document struct {
+		AppUpdate struct {
+			Enabled              *bool `json:"enabled"`
+			AutoDownload         *bool `json:"auto_download"`
+			AutoApply            *bool `json:"auto_apply"`
+			CheckIntervalMinutes int   `json:"check_interval_minutes"`
+		} `json:"app_update"`
+	}
+	if err := json.Unmarshal(content, &document); err != nil {
+		t.Fatalf("decode patched current config: %v", err)
+	}
+	if document.AppUpdate.Enabled == nil || !*document.AppUpdate.Enabled ||
+		document.AppUpdate.AutoDownload == nil || *document.AppUpdate.AutoDownload ||
+		document.AppUpdate.AutoApply == nil || *document.AppUpdate.AutoApply ||
+		document.AppUpdate.CheckIntervalMinutes != 360 {
+		t.Fatalf("partial current config was not fully persisted: %s", content)
+	}
+
+	reloaded, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("reload patched current config: %v", err)
+	}
+	defer func() { _ = reloaded.Close() }()
+	backups, err := filepath.Glob(filepath.Join(dir, "migrations", "backups", "config-v2-*.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("reloading patched config created another backup: %v (%v)", backups, err)
+	}
+}
+
 func TestLoadStoreIgnoresLegacyConfigJSONEnv(t *testing.T) {
 	tmp, err := os.CreateTemp(t.TempDir(), "config-*.json")
 	if err != nil {

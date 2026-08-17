@@ -211,6 +211,12 @@ docker compose up -d
 - 宿主机端口通过 `.env` 的 `DEEPSEEK_WEB_TO_API_HOST_PORT` 控制。
 - 初始结构化配置写在 `.env` 的 `DEEPSEEK_WEB_TO_API_CONFIG_JSON`。
 - 持久化目录挂载为 `./data:/app/data`，保存 `config.json` 回写文件、`accounts.sqlite`、历史记录和缓存。
+- 从旧 Compose 根目录 `config.json` 升级时，`legacy-config-migration` 会在主服务启动前
+  一次性复制到 `./data/config.json`。目标已存在时绝不覆盖；该短生命周期服务单独只读
+  挂载项目根目录，主服务始终只挂载 `./data`。失败时先查看
+  `docker compose logs legacy-config-migration`，修复权限后重试。
+- 首次升级到含该服务的镜像时，先执行 `docker compose pull` 再执行
+  `docker compose up -d`，保证初始化容器获得新的迁移工具。
 
 ### 二进制手动部署
 

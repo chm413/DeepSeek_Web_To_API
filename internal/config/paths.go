@@ -46,7 +46,25 @@ func legacyContainerConfigPath() string {
 }
 
 func shouldTryLegacyContainerConfigPath() bool {
-	return strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH")) == "" && BaseDir() == "/app"
+	if BaseDir() != "/app" {
+		return false
+	}
+	configured := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH"))
+	if configured == "" {
+		return true
+	}
+	return filepath.Clean(configured) == filepath.Join("/app", "data", "config.json")
+}
+
+// legacyContainerConfigFallbackPath returns the immutable-image config path
+// when a newer Compose layout explicitly points at /app/data/config.json.
+// This prevents an image upgrade from treating an existing /app/config.json
+// as a fresh installation before it can be migrated into the mounted volume.
+func legacyContainerConfigFallbackPath(destination string) string {
+	if filepath.Clean(strings.TrimSpace(destination)) != filepath.Join("/app", "data", "config.json") {
+		return ""
+	}
+	return legacyContainerConfigPath()
 }
 
 func RawStreamSampleRoot() string {

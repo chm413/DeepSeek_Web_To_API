@@ -1,8 +1,27 @@
 services:
+  legacy-config-migration:
+    image: ghcr.io/chm413/deepseek-web-to-api:latest
+    restart: "no"
+    # The main service runs as this image user as well. Do not add env_file:
+    # this one-shot bridge only needs the two paths below, not application secrets.
+    user: "deepseek-web-to-api"
+    entrypoint: ["/usr/local/bin/deepseek-web-to-api-migrate-legacy-config"]
+    environment:
+      - DEEPSEEK_WEB_TO_API_LEGACY_CONFIG_SOURCE=/legacy/config.json
+      - DEEPSEEK_WEB_TO_API_CONFIG_PATH=/app/data/config.json
+    volumes:
+      # Kept isolated to this short-lived migration container. The application
+      # service below never receives a mount of the project root.
+      - ./:/legacy:ro
+      - ./data:/app/data
+
   deepseek-web-to-api:
     image: ghcr.io/chm413/deepseek-web-to-api:latest
     container_name: deepseek-web-to-api
     restart: always
+    depends_on:
+      legacy-config-migration:
+        condition: service_completed_successfully
     env_file:
       - .env
     ports:

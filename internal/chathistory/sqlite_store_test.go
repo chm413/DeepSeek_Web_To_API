@@ -54,6 +54,39 @@ func TestSQLiteStoreImportsLegacyJSONAndUsesRetentionLimit(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreMergesNewEntriesFromChangedLegacyJSON(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "chat_history.json")
+	first := legacyFile{Version: FileVersion, Limit: MaxLimit, Items: []Entry{{ID: "first", Revision: 1, CreatedAt: 1, UpdatedAt: 1, Status: "success", Content: "first"}}}
+	writeJSONFile(t, legacyPath, first)
+	store := NewSQLite(filepath.Join(dir, "chat_history.sqlite"), legacyPath)
+	if err := store.Err(); err != nil {
+		t.Fatalf("initial legacy import: %v", err)
+	}
+	_ = store.Close()
+
+	second := legacyFile{Version: FileVersion, Limit: MaxLimit, Items: []Entry{
+		{ID: "first", Revision: 1, CreatedAt: 1, UpdatedAt: 1, Status: "success", Content: "stale first"},
+		{ID: "second", Revision: 2, CreatedAt: 2, UpdatedAt: 2, Status: "success", Content: "second"},
+	}}
+	writeJSONFile(t, legacyPath, second)
+	reloaded := NewSQLite(filepath.Join(dir, "chat_history.sqlite"), legacyPath)
+	defer func() { _ = reloaded.Close() }()
+	if err := reloaded.Err(); err != nil {
+		t.Fatalf("changed legacy import: %v", err)
+	}
+	if _, err := reloaded.Get("second"); err != nil {
+		t.Fatalf("expected new legacy entry to be imported: %v", err)
+	}
+	got, err := reloaded.Get("first")
+	if err != nil {
+		t.Fatalf("get existing entry: %v", err)
+	}
+	if got.Content != "first" {
+		t.Fatalf("legacy re-import overwrote authoritative sqlite row: %q", got.Content)
+	}
+}
+
 func TestSQLiteStoreCRUDAndTokenStats(t *testing.T) {
 	dir := t.TempDir()
 	store := NewSQLite(filepath.Join(dir, "chat_history.sqlite"), filepath.Join(dir, "missing.json"))
