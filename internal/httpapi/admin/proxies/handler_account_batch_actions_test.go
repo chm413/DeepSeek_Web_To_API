@@ -117,6 +117,76 @@ func TestBatchAccountActionsEnableAndDisable(t *testing.T) {
 	}
 }
 
+func TestBatchAccountActionsDeletePersistsSelectedAccountsAndResetsPool(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"accounts":[
+			{"email":"one@example.com","password":"one-password","token":"one-token"},
+			{"email":"two@example.com","password":"two-password","token":"two-token"},
+			{"email":"keep@example.com","password":"keep-password","token":"keep-token"}
+		]
+	}`)
+	r := chi.NewRouter()
+	r.Post("/admin/accounts/batch/actions", h.batchAccountActions)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/accounts/batch/actions", bytes.NewBufferString(`{
+		"identifiers":["one@example.com","two@example.com","one@example.com"],
+		"action":"delete"
+	}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, found := h.Store.FindAccount("one@example.com"); found {
+		t.Fatal("first selected account still exists")
+	}
+	if _, found := h.Store.FindAccount("two@example.com"); found {
+		t.Fatal("second selected account still exists")
+	}
+	if _, found := h.Store.FindAccount("keep@example.com"); !found {
+		t.Fatal("unselected account was removed")
+	}
+	if total, _ := h.Pool.Status()["total"].(int); total != 1 {
+		t.Fatalf("pool was not reset after deletion: %#v", h.Pool.Status())
+	}
+	if strings.Contains(rec.Body.String(), "one-password") || strings.Contains(rec.Body.String(), "one-token") {
+		t.Fatalf("batch delete response leaked credentials: %s", rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["action"] != "delete" || response["affected"] != float64(2) || response["total_accounts"] != float64(1) {
+		t.Fatalf("unexpected delete summary: %#v", response)
+	}
+}
+
+func TestBatchAccountActionsDeleteRejectsMissingAccountAtomically(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"accounts":[
+			{"email":"one@example.com","password":"one-password"},
+			{"email":"two@example.com","password":"two-password"}
+		]
+	}`)
+	r := chi.NewRouter()
+	r.Post("/admin/accounts/batch/actions", h.batchAccountActions)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/accounts/batch/actions", bytes.NewBufferString(`{
+		"identifiers":["one@example.com","missing@example.com"],
+		"action":"delete"
+	}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := len(h.Store.Snapshot().Accounts); got != 2 {
+		t.Fatalf("failed batch delete changed persisted accounts: %#v", h.Store.Snapshot().Accounts)
+	}
+}
+
 func TestBatchAccountActionsEnableAutomaticRouteAndRelogin(t *testing.T) {
 	h := newAdminProxyTestHandler(t, `{
 		"proxy_policy":{"auto_route_enabled":true},

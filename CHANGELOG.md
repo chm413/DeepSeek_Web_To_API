@@ -1,5 +1,23 @@
 # 更新日志
 
+## 2026-08-17 (1.1.11)
+
+- Fixed indeterminate same-session fragment commits. When an upstream SSE stream
+  ends before a fragment is confirmed, the gateway discards that new root branch
+  and replays the complete canonical prompt once in a fresh root session. It
+  never resends the fragment into the uncertain branch. Incremental branches
+  fall back to a full canonical replay instead of corrupting a retained session.
+- Added structured logs for unconfirmed fragment commits, including turn kind,
+  session and parent identifiers, observed response state, elapsed time, and
+  stream error without logging prompt content.
+- Added atomic bulk account deletion and guarded bulk proxy deletion. Proxy
+  deletion returns HTTP 409 with non-secret reference details when an account or
+  fallback route still uses a selected node.
+- Raised the Admin API contract to 4 so a newer Web UI refuses to operate
+  against a backend that lacks the batch-delete behavior.
+- Kept `.env.example` in sync with the documented same-session chunking and
+  summary-compaction defaults.
+
 ## 2026-08-17 (1.1.8)
 
 修复 Codex Responses 流式请求在上游尚未产生任何可交付帧时被误显示为

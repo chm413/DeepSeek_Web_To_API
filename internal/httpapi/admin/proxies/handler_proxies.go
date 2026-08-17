@@ -74,6 +74,7 @@ func (h *Handler) listProxies(w http.ResponseWriter, _ *http.Request) {
 		item["route_available"] = !normalized.Disabled && normalized.LastTestAtUnix > 0 && normalized.LastTestSuccess
 		item["assigned_account_count"] = assigned[normalized.ID]
 		item["auto_routed_account_count"] = automatic[normalized.ID]
+		item["is_fallback"] = normalized.ID != "" && normalized.ID == strings.TrimSpace(snapshot.ProxyPolicy.FallbackProxyID)
 		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -176,18 +177,16 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		if idx < 0 {
 			return newRequestError("代理不存在")
 		}
+		if err := ensureProxyDeletionAllowed(*c, map[string]struct{}{strings.TrimSpace(proxyID): {}}); err != nil {
+			return err
+		}
 		c.Proxies = append(c.Proxies[:idx], c.Proxies[idx+1:]...)
-		if strings.TrimSpace(c.ProxyPolicy.FallbackProxyID) == strings.TrimSpace(proxyID) {
-			c.ProxyPolicy.FallbackProxyID = ""
-		}
-		for i := range c.Accounts {
-			if strings.TrimSpace(c.Accounts[i].ProxyID) == strings.TrimSpace(proxyID) {
-				c.Accounts[i].ProxyID = ""
-			}
-		}
 		return validateProxyMutation(c)
 	})
 	if err != nil {
+		if writeProxyDeletionConflict(w, err) {
+			return
+		}
 		if detail, ok := requestErrorDetail(err); ok {
 			writeJSON(w, http.StatusNotFound, map[string]any{"detail": detail})
 			return

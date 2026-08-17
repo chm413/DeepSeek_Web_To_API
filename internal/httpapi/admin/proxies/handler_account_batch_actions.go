@@ -39,8 +39,8 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	action := strings.ToLower(strings.TrimSpace(req.Action))
-	if action != "set_proxy" && action != "enable" && action != "disable" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "action must be set_proxy, enable, or disable"})
+	if action != "set_proxy" && action != "enable" && action != "disable" && action != "delete" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "action must be set_proxy, enable, disable, or delete"})
 		return
 	}
 	if action == "set_proxy" && req.ProxyID == nil {
@@ -92,7 +92,21 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if action == "set_proxy" {
+		if action == "delete" {
+			toDelete := make(map[int]struct{}, len(selected))
+			for _, identifier := range identifiers {
+				toDelete[selected[identifier]] = struct{}{}
+			}
+			kept := make([]config.Account, 0, len(c.Accounts)-len(toDelete))
+			for index, account := range c.Accounts {
+				if _, selected := toDelete[index]; selected {
+					continue
+				}
+				kept = append(kept, account)
+			}
+			c.Accounts = kept
+			affected = len(toDelete)
+		} else if action == "set_proxy" {
 			for _, identifier := range identifiers {
 				account := &c.Accounts[selected[identifier]]
 				fromProxyID := strings.TrimSpace(account.ProxyID)
@@ -169,13 +183,14 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 		"relogin_failed", relogin["failed"],
 	)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":       true,
-		"action":        action,
-		"affected":      affected,
-		"route_changed": routeChanged,
-		"auto_route":    action == "set_proxy" && req.AutoRoute,
-		"proxy_id":      targetProxyID,
-		"relogin":       relogin,
+		"success":        true,
+		"action":         action,
+		"affected":       affected,
+		"total_accounts": len(h.Store.Snapshot().Accounts),
+		"route_changed":  routeChanged,
+		"auto_route":     action == "set_proxy" && req.AutoRoute,
+		"proxy_id":       targetProxyID,
+		"relogin":        relogin,
 	})
 }
 

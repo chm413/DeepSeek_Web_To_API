@@ -106,6 +106,55 @@ func TestAccountSQLiteEnabledForEnvConfigWhenPathExplicit(t *testing.T) {
 	}
 }
 
+func TestAccountSQLitePersistsAccountRemovalAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	accountsPath := filepath.Join(dir, "accounts.sqlite")
+	body := `{
+		"accounts":[
+			{"email":"remove@example.com","password":"p1"},
+			{"email":"keep@example.com","password":"p2"}
+		],
+		"storage":{"accounts_sqlite_path":` + quoteJSON(accountsPath) + `}
+	}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", configPath)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", "")
+
+	store, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	if err := store.Update(func(cfg *Config) error {
+		cfg.Accounts = cfg.Accounts[1:]
+		return nil
+	}); err != nil {
+		t.Fatalf("remove account: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reloaded, err := LoadStoreWithError()
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer func() {
+		if err := reloaded.Close(); err != nil {
+			t.Errorf("close reloaded store: %v", err)
+		}
+	}()
+	if _, found := reloaded.FindAccount("remove@example.com"); found {
+		t.Fatal("removed account reappeared after reload")
+	}
+	if _, found := reloaded.FindAccount("keep@example.com"); !found {
+		t.Fatal("remaining account did not persist after reload")
+	}
+}
+
 func TestAccountSQLiteMergesAccountsStillPresentInLegacyConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "accounts.sqlite")

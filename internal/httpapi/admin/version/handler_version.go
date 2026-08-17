@@ -9,7 +9,7 @@ import (
 
 // APIContractVersion is incremented when the WebUI requires new admin routes
 // or response fields that older server binaries do not provide.
-const APIContractVersion = 3
+const APIContractVersion = 4
 
 func (h *Handler) getVersion(w http.ResponseWriter, _ *http.Request) {
 	current, source := version.Current()

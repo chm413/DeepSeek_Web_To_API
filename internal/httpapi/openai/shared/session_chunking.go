@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,38 @@ const (
 
 var sessionChunkTransitionDelay = 1500 * time.Millisecond
 var sessionChunkControlRetryDelay = 750 * time.Millisecond
+
+// sessionChunkUncommittedError means the upstream did not provide enough
+// evidence to advance the parent pointer for a fragment. A root branch can be
+// safely rebuilt after this error; a same-session retry is only safe before
+// any response message or visible generation was observed.
+type sessionChunkUncommittedError struct {
+	reason            string
+	responseMessageID int
+	started           bool
+	cause             error
+}
+
+func (e *sessionChunkUncommittedError) Error() string {
+	if e == nil {
+		return "upstream stream ended before fragment commit"
+	}
+	message := strings.TrimSpace(e.reason)
+	if message == "" {
+		message = "upstream stream ended before fragment commit"
+	}
+	if e.cause != nil {
+		return fmt.Sprintf("%s: %v", message, e.cause)
+	}
+	return message
+}
+
+func (e *sessionChunkUncommittedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
 
 const sessionChunkPlannerInstruction = `Choose a semantically safe split point for an oversized request fragment.
 Prefer a paragraph, section, complete sentence, JSON item, code block boundary, or other boundary that does not change meaning.
@@ -310,16 +343,13 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 			if !ok {
 				lines = nil
 				if done == nil {
-					if streamErr != nil {
-						return 0, streamErr
-					}
 					if responseID > 0 && responseID != parentID && !interruptAfterStart {
 						config.Logger.Info("[prompt_limit] completed same-session control turn",
 							"turn", turnKind, "session_id", *sessionID,
 							"response_message_id", responseID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 						return responseID, nil
 					}
-					return 0, fmt.Errorf("upstream stream ended before fragment commit")
+					return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream stream ended before fragment commit", responseID, started, streamErr, time.Since(startedAt))
 				}
 				continue
 			}
@@ -351,27 +381,70 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 						"response_message_id", responseID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 					return responseID, nil
 				}
-				return 0, fmt.Errorf("upstream finished before required reasoning/content started")
+				return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream finished before required reasoning/content started", responseID, started, nil, time.Since(startedAt))
 			}
 		case err := <-done:
 			streamErr = err
 			done = nil
 			if lines == nil {
-				if streamErr != nil {
-					return 0, streamErr
-				}
 				if responseID > 0 && responseID != parentID && !interruptAfterStart {
 					config.Logger.Info("[prompt_limit] completed same-session control turn",
 						"turn", turnKind, "session_id", *sessionID,
 						"response_message_id", responseID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 					return responseID, nil
 				}
-				return 0, fmt.Errorf("upstream stream ended before fragment commit")
+				return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream stream ended before fragment commit", responseID, started, streamErr, time.Since(startedAt))
 			}
 		case <-turnCtx.Done():
-			return 0, fmt.Errorf("wait for fragment commit: %w", turnCtx.Err())
+			// A caller cancellation is definitive and must not manufacture a
+			// replacement branch. A local fragment-commit deadline, however,
+			// leaves the upstream write indeterminate just like an EOF before a
+			// confirmation event; let the root-level recovery rebuild once.
+			if ctx.Err() != nil {
+				return 0, fmt.Errorf("wait for fragment commit: %w", ctx.Err())
+			}
+			return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "timed out waiting for fragment commit", responseID, started, turnCtx.Err(), time.Since(startedAt))
 		}
 	}
+}
+
+func newSessionChunkUncommittedError(sessionID string, parentMessageID int, turnKind, reason string, responseMessageID int, started bool, cause error, elapsed time.Duration) error {
+	config.Logger.Warn("[prompt_limit] same-session turn ended without a confirmed fragment commit",
+		"turn", turnKind,
+		"session_id", strings.TrimSpace(sessionID),
+		"parent_message_id", parentMessageID,
+		"response_message_id", responseMessageID,
+		"observed_reasoning_or_content", started,
+		"elapsed_ms", elapsed.Milliseconds(),
+		"reason", reason,
+		"stream_error", cause)
+	return &sessionChunkUncommittedError{
+		reason:            reason,
+		responseMessageID: responseMessageID,
+		started:           started,
+		cause:             cause,
+	}
+}
+
+// IsRetryableSessionChunkingFailure reports a branch-local failure that can
+// be recovered by rebuilding a fresh root from the canonical prompt. It is
+// intentionally narrower than generic errors so client cancellation, a
+// content filter, and a real upstream status stay visible to the caller.
+func IsRetryableSessionChunkingFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var uncommitted *sessionChunkUncommittedError
+	if errors.As(err, &uncommitted) {
+		if uncommitted.cause != nil {
+			detail := CompletionErrorDetail(uncommitted.cause)
+			if detail.Stopped {
+				return false
+			}
+		}
+		return true
+	}
+	return CompletionErrorDetail(err).Code == "upstream_network_error"
 }
 
 func commitSessionChunkControlTurn(ctx context.Context, caller sessionChunkingCaller, a *auth.RequestAuth, sessionID *string, parentID int, prompt, turnKind string, timeout time.Duration) (int, error) {

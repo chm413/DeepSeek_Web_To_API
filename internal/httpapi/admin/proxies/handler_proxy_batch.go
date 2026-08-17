@@ -77,6 +77,19 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 	err := h.Store.Update(func(cfg *config.Config) error {
 		now := time.Now().Unix()
 		if action == "delete" {
+			found := make(map[string]struct{}, len(wanted))
+			for _, proxy := range cfg.Proxies {
+				proxy = config.NormalizeProxy(proxy)
+				if _, selected := wanted[proxy.ID]; selected {
+					found[proxy.ID] = struct{}{}
+				}
+			}
+			if len(found) != len(wanted) {
+				return newRequestError("one or more selected proxies do not exist")
+			}
+			if err := ensureProxyDeletionAllowed(*cfg, wanted); err != nil {
+				return err
+			}
 			kept := make([]config.Proxy, 0, len(cfg.Proxies))
 			for _, proxy := range cfg.Proxies {
 				proxy = config.NormalizeProxy(proxy)
@@ -85,14 +98,6 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				affected++
-				if cfg.ProxyPolicy.FallbackProxyID == proxy.ID {
-					cfg.ProxyPolicy.FallbackProxyID = ""
-				}
-				for i := range cfg.Accounts {
-					if strings.TrimSpace(cfg.Accounts[i].ProxyID) == proxy.ID {
-						cfg.Accounts[i].ProxyID = ""
-					}
-				}
 			}
 			cfg.Proxies = kept
 		} else {
@@ -118,6 +123,9 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 		return config.ValidateConfig(*cfg)
 	})
 	if err != nil {
+		if writeProxyDeletionConflict(w, err) {
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}

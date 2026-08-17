@@ -63,6 +63,7 @@ func SwitchManagedAccountForPinnedBranch(ctx context.Context, resolver any, a *a
 // parent can belong to a different account and cannot be moved safely.
 func TryPrepareRootSessionChunkingWithFailover(ctx context.Context, ds any, resolver any, a *auth.RequestAuth, req promptcompat.StandardRequest, cfg config.PromptLimitSettings) (*SessionChunkingPreparation, error) {
 	sessionCapacityReplays := 0
+	transientBranchReplays := 0
 	for {
 		attemptCfg := cfg
 		beforeID, beforeToken := rootSessionAuthIdentity(a)
@@ -105,11 +106,27 @@ func TryPrepareRootSessionChunkingWithFailover(ctx context.Context, ds any, reso
 				"reason", CompletionErrorDetail(err).Code)
 			continue
 		}
+		if IsRetryableSessionChunkingFailure(err) {
+			if transientBranchReplays >= 1 {
+				return nil, err
+			}
+			transientBranchReplays++
+			config.Logger.Warn("[prompt_limit] transient same-session fragment failure; rebuilding complete root branch",
+				"surface", req.Surface,
+				"model", req.ResolvedModel,
+				"account", a.AccountID,
+				"original_prompt_units", promptcompat.PromptUnits(req.FinalPrompt),
+				"replay", transientBranchReplays,
+				"max_replays", 1,
+				"error", err)
+			continue
+		}
 		if !SwitchManagedAccountForPinnedBranch(ctx, resolver, a, err) {
 			return nil, err
 		}
 		cfg = refreshRootSessionPromptLimits(ctx, ds, a, req, cfg)
 		sessionCapacityReplays = 0
+		transientBranchReplays = 0
 		config.Logger.Warn("[prompt_limit] restarting same-session prompt chunks on another account",
 			"surface", req.Surface,
 			"model", req.ResolvedModel,

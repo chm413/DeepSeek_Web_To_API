@@ -436,10 +436,14 @@ func (h *Handler) tryIncrementalChat(w http.ResponseWriter, r *http.Request, a *
 	if shared.EnforcePromptLimit(promptLimit, *stdReq) != "" && promptLimit.SessionChunkingEnable {
 		chunkedPrompt, err = shared.TryPrepareSessionChunking(r.Context(), h.DS, a, *stdReq, promptLimit, lease.SessionID, lease.ParentMessageID)
 		if err != nil {
-			if shared.IsSessionCapacityRateLimit(err) {
-				config.Logger.Warn("[incremental] existing upstream session reached capacity during chunk preparation; rebuilding full context on the same account",
+			if shared.IsSessionCapacityRateLimit(err) || shared.IsRetryableSessionChunkingFailure(err) {
+				reason := "existing upstream session reached capacity during chunk preparation"
+				if shared.IsRetryableSessionChunkingFailure(err) && !shared.IsSessionCapacityRateLimit(err) {
+					reason = "incremental chunk branch lost before an upstream fragment commit"
+				}
+				config.Logger.Warn("[incremental] chunk preparation cannot safely advance the retained branch; rebuilding full context",
 					"surface", "chat.completions", "session_key", a.SessionKey,
-					"turn_count", lease.TurnCount, "error", err)
+					"turn_count", lease.TurnCount, "reason", reason, "error", err)
 				if activeSessionID != nil {
 					*activeSessionID = ""
 				}

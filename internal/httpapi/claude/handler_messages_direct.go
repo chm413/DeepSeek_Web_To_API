@@ -429,10 +429,14 @@ func (h *Handler) tryIncrementalClaude(w http.ResponseWriter, r *http.Request, a
 	if openaishared.EnforcePromptLimit(promptLimit, norm.Standard) != "" && promptLimit.SessionChunkingEnable {
 		chunkedPrompt, err = openaishared.TryPrepareSessionChunking(r.Context(), h.DS, a, norm.Standard, promptLimit, lease.SessionID, lease.ParentMessageID)
 		if err != nil {
-			if openaishared.IsSessionCapacityRateLimit(err) {
-				config.Logger.Warn("[incremental] existing upstream session reached capacity during chunk preparation; rebuilding full context on the same account",
+			if openaishared.IsSessionCapacityRateLimit(err) || openaishared.IsRetryableSessionChunkingFailure(err) {
+				reason := "existing upstream session reached capacity during chunk preparation"
+				if openaishared.IsRetryableSessionChunkingFailure(err) && !openaishared.IsSessionCapacityRateLimit(err) {
+					reason = "incremental chunk branch lost before an upstream fragment commit"
+				}
+				config.Logger.Warn("[incremental] chunk preparation cannot safely advance the retained branch; rebuilding full context",
 					"surface", "anthropic.messages", "session_key", a.SessionKey,
-					"turn_count", lease.TurnCount, "error", err)
+					"turn_count", lease.TurnCount, "reason", reason, "error", err)
 				if activeSessionID != nil {
 					*activeSessionID = ""
 				}

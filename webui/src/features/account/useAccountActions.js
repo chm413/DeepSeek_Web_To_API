@@ -540,6 +540,8 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 onMessage('success', t('accountManager.batchProxyUpdated', { count: affected }))
             } else if (action === 'enable') {
                 onMessage('success', t('accountManager.batchAccountsEnabled', { count: affected }))
+            } else if (action === 'delete') {
+                onMessage('success', t('accountManager.batchAccountsDeleted', { count: affected }))
             } else {
                 onMessage('success', t('accountManager.batchAccountsDisabled', { count: affected }))
             }

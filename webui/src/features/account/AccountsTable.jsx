@@ -136,6 +136,11 @@ function BatchAccountActions({ accountIDs, proxies, autoRouteEnabled, loading, o
         const result = await onAction(accountIDs, 'set_proxy', { proxyID, autoRoute })
         if (result) setRouteTarget('__select__')
     }
+    const deleteSelected = async () => {
+        if (!confirm(t('accountManager.batchDeleteConfirm', { count: selectedCount }))) return
+        const result = await onAction(accountIDs, 'delete')
+        if (result) onClear()
+    }
 
     return (
         <div className="border-b border-blue-200 bg-blue-50/70 px-4 py-3" data-testid="account-batch-actions">
@@ -201,6 +206,15 @@ function BatchAccountActions({ accountIDs, proxies, autoRouteEnabled, loading, o
                     >
                         <Power className="h-4 w-4" />
                         {t('accountManager.disableSelected')}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={deleteSelected}
+                        disabled={loading}
+                        className="btn btn-secondary whitespace-nowrap text-red-700 hover:border-red-300 hover:bg-red-50"
+                    >
+                        <Trash2 className="h-4 w-4" />
+                        {t('accountManager.deleteSelected', { count: selectedCount })}
                     </button>
                 </div>
             </div>

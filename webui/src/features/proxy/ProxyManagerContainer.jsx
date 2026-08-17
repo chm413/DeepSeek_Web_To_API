@@ -65,6 +65,32 @@ function createEmptyProxyForm() {
     return { ...EMPTY_FORM }
 }
 
+function proxyDeletionSummary(items) {
+    return (items || []).reduce((summary, proxy) => ({
+        accountCount: summary.accountCount + Math.max(0, Number(proxy?.assigned_account_count) || 0),
+        fallbackCount: summary.fallbackCount + (proxy?.is_fallback ? 1 : 0),
+    }), { accountCount: 0, fallbackCount: 0 })
+}
+
+function proxyDeletionConflictSummary(data) {
+    const references = Array.isArray(data?.references) ? data.references : []
+    return references.reduce((summary, reference) => ({
+        accountCount: summary.accountCount + Math.max(0, Number(reference?.account_count) || 0),
+        fallbackCount: summary.fallbackCount + (reference?.fallback_route ? 1 : 0),
+    }), { accountCount: 0, fallbackCount: 0 })
+}
+
+function proxyDeletionBlockedMessage(t, summary) {
+    const parts = []
+    if (summary.accountCount > 0) {
+        parts.push(t('proxyManager.deleteBlockedAccounts', { count: summary.accountCount }))
+    }
+    if (summary.fallbackCount > 0) {
+        parts.push(t('proxyManager.deleteBlockedFallback', { count: summary.fallbackCount }))
+    }
+    return parts.join(' ')
+}
+
 function ProxyStatusBadge({ t, proxy, result, testing = false }) {
     if (testing) {
         return (
@@ -183,6 +209,11 @@ function ProxiesTable({
                                         {proxy.route_available && (
                                             <span className="inline-flex items-center rounded-full border border-emerald-300/60 bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">
                                                 {t('proxyManager.routePoolAvailable')}
+                                            </span>
+                                        )}
+                                        {proxy.is_fallback && (
+                                            <span className="inline-flex items-center rounded-full border border-amber-300/60 bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-800">
+                                                {t('proxyManager.fallbackProxy')}
                                             </span>
                                         )}
                                     </div>
@@ -660,11 +691,20 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
     }
 
     const deleteProxy = async (proxy) => {
-        if (!confirm(t('proxyManager.deleteConfirm', { name: proxy.name || `${proxy.host}:${proxy.port}` }))) return
+        const references = proxyDeletionSummary([proxy])
+        if (references.accountCount > 0 || references.fallbackCount > 0) {
+            onMessage('error', proxyDeletionBlockedMessage(t, references))
+            return
+        }
+        if (!confirm(t('proxyManager.deleteConfirmSafe', { name: proxy.name || `${proxy.host}:${proxy.port}` }))) return
         try {
             const res = await apiFetch(`/admin/proxies/${encodeURIComponent(proxy.id)}`, { method: 'DELETE' })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
-            if (!res.ok) { onMessage('error', data.detail || t('messages.deleteFailed')); return }
+            if (!res.ok) {
+                const conflict = proxyDeletionConflictSummary(data)
+                onMessage('error', proxyDeletionBlockedMessage(t, conflict) || data.detail || t('messages.deleteFailed'))
+                return
+            }
             await refreshAllState(); onMessage('success', t('messages.deleted'))
             setTestResults(previous => { const next = { ...previous }; delete next[proxy.id]; return next })
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) }
@@ -701,12 +741,25 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
 
     const batchAction = async (action) => {
         const proxyIDs = [...selected]
-        if (!proxyIDs.length || (action === 'delete' && !confirm(t('proxyManager.deleteSelectedConfirm', { count: proxyIDs.length })))) return
+        if (!proxyIDs.length) return
+        if (action === 'delete') {
+            const selectedProxies = proxies.filter(proxy => selected.has(proxy.id))
+            const references = proxyDeletionSummary(selectedProxies)
+            if (references.accountCount > 0 || references.fallbackCount > 0) {
+                onMessage('error', proxyDeletionBlockedMessage(t, references))
+                return
+            }
+            if (!confirm(t('proxyManager.deleteSelectedConfirm', { count: proxyIDs.length }))) return
+        }
         setBatchLoading(true)
         try {
             const res = await apiFetch('/admin/proxies/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxy_ids: proxyIDs, action }) })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
-            if (!res.ok) { onMessage('error', data.detail || t('messages.requestFailed')); return }
+            if (!res.ok) {
+                const conflict = proxyDeletionConflictSummary(data)
+                onMessage('error', proxyDeletionBlockedMessage(t, conflict) || data.detail || t('messages.requestFailed'))
+                return
+            }
             setSelected(new Set()); await refreshAllState(); onMessage('success', t('proxyManager.batchActionComplete', { count: data.affected || 0 }))
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) } finally { setBatchLoading(false) }
     }
@@ -756,6 +809,10 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
         } catch (err) { onMessage('error', err?.message || t('messages.networkError')) } finally { setSubscriptionBusy('') }
     }
 
+    const selectedProxies = proxies.filter(proxy => selected.has(proxy.id))
+    const selectedDeletionReferences = proxyDeletionSummary(selectedProxies)
+    const selectedDeletionBlocked = selectedDeletionReferences.accountCount > 0 || selectedDeletionReferences.fallbackCount > 0
+
     return (
         <div className="space-y-6">
             <CoreStatusPanel t={t} status={coreStatus} form={coreForm} setForm={setCoreForm} loading={savingCore} downloading={downloadingCore} onRefresh={loadCoreStatus} onSave={saveCoreSettings} onDownload={downloadCore} />
@@ -770,7 +827,24 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
             </div>
 
             <ProxiesTable t={t} proxies={proxies} testing={testing} testResults={testResults} onCreate={openCreate} onTest={testProxy} onEdit={openEdit} onDelete={deleteProxy} selected={selected} onToggle={toggleProxy} onToggleAll={toggleAll} onBatchTest={testSelected} onBatchAction={batchAction} batchLoading={batchLoading} />
-            {selected.size > 0 && <div className="flex justify-end"><button type="button" className="btn btn-secondary btn-sm text-destructive" disabled={batchLoading} onClick={() => batchAction('delete')}><Trash2 className="h-3.5 w-3.5" />{t('proxyManager.deleteSelected', { count: selected.size })}</button></div>}
+            {selected.size > 0 && (
+                <div className="flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
+                    {selectedDeletionBlocked && (
+                        <p className="text-xs font-medium text-amber-800" role="status">
+                            {proxyDeletionBlockedMessage(t, selectedDeletionReferences)}
+                        </p>
+                    )}
+                    <button
+                        type="button"
+                        className="btn btn-secondary btn-sm self-end text-destructive sm:self-auto"
+                        disabled={batchLoading || selectedDeletionBlocked}
+                        onClick={() => batchAction('delete')}
+                    >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        {t('proxyManager.deleteSelected', { count: selected.size })}
+                    </button>
+                </div>
+            )}
             <ProxyFormModal show={showModal} t={t} form={form} setForm={setForm} editingProxy={editingProxy} loading={saving} onClose={closeModal} onSubmit={saveProxy} />
         </div>
     )

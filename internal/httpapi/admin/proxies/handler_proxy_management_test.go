@@ -115,3 +115,97 @@ func TestProxyBatchActionDisablesSelectedNodes(t *testing.T) {
 		t.Fatalf("unexpected batch state: %#v", payload.Items)
 	}
 }
+
+func TestProxyBatchDeleteRejectsAccountAndFallbackReferencesAtomically(t *testing.T) {
+	router := newHTTPAdminHarness(t, `{
+		"accounts":[{"email":"user@example.com","password":"pwd","proxy_id":"proxy-1"}],
+		"proxies":[
+			{"id":"proxy-1","type":"socks5","host":"127.0.0.1","port":1080},
+			{"id":"proxy-2","type":"socks5","host":"127.0.0.1","port":1081},
+			{"id":"proxy-3","type":"socks5","host":"127.0.0.1","port":1082}
+		],
+		"proxy_policy":{"fallback_proxy_id":"proxy-2"}
+	}`, &testingDSMock{})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/proxies/actions", []byte(`{
+		"proxy_ids":["proxy-1","proxy-2","proxy-3"],
+		"action":"delete"
+	}`)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		References []struct {
+			ProxyID       string `json:"proxy_id"`
+			AccountCount  int    `json:"account_count"`
+			FallbackRoute bool   `json:"fallback_route"`
+		} `json:"references"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if len(payload.References) != 2 {
+		t.Fatalf("expected account and fallback references, got %#v", payload.References)
+	}
+	if payload.References[0].ProxyID != "proxy-1" || payload.References[0].AccountCount != 1 || payload.References[0].FallbackRoute {
+		t.Fatalf("unexpected account reference: %#v", payload.References[0])
+	}
+	if payload.References[1].ProxyID != "proxy-2" || payload.References[1].AccountCount != 0 || !payload.References[1].FallbackRoute {
+		t.Fatalf("unexpected fallback reference: %#v", payload.References[1])
+	}
+
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, adminReq(http.MethodGet, "/proxies", nil))
+	var listing struct {
+		Items []struct {
+			ID         string `json:"id"`
+			IsFallback bool   `json:"is_fallback"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listing); err != nil {
+		t.Fatalf("decode proxy listing: %v", err)
+	}
+	if len(listing.Items) != 3 || !listing.Items[1].IsFallback {
+		t.Fatalf("blocked batch deletion changed proxy state: %#v", listing.Items)
+	}
+}
+
+func TestProxyBatchDeleteRemovesOnlyUnreferencedNodes(t *testing.T) {
+	router := newHTTPAdminHarness(t, `{
+		"accounts":[],
+		"proxies":[
+			{"id":"proxy-1","type":"socks5","host":"127.0.0.1","port":1080},
+			{"id":"proxy-2","type":"socks5","host":"127.0.0.1","port":1081}
+		]
+	}`, &testingDSMock{})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, adminReq(http.MethodPost, "/proxies/actions", []byte(`{
+		"proxy_ids":["proxy-2"],
+		"action":"delete"
+	}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode deletion response: %v", err)
+	}
+	if payload["affected"] != float64(1) {
+		t.Fatalf("unexpected deletion summary: %#v", payload)
+	}
+
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, adminReq(http.MethodGet, "/proxies", nil))
+	var listing struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listing); err != nil {
+		t.Fatalf("decode proxy listing: %v", err)
+	}
+	if len(listing.Items) != 1 || listing.Items[0].ID != "proxy-1" {
+		t.Fatalf("unexpected remaining proxies: %#v", listing.Items)
+	}
+}

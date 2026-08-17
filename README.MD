@@ -4,7 +4,7 @@
 
 DeepSeek Web To API 是一个自托管 Go 网关，将 DeepSeek Web 会话转换为 OpenAI、Anthropic Claude 和 Gemini 兼容接口，并提供账号、会话、缓存、日志和代理路由管理台。
 
-当前版本：**v1.1.10**
+当前版本：**v1.1.11**
 
 ## 主要能力
 
@@ -98,7 +98,7 @@ npm run build --prefix webui
 bash ./scripts/lint.sh
 ```
 
-根目录的 `VERSION` 是发布版本源。推送与其一致的版本标签（如 `v1.1.10`）会自动运行发布门禁，构建 Windows/Linux/macOS 发布包、校验和及 `linux/amd64`、`linux/arm64` GHCR 镜像，并创建或更新对应的 GitHub Release。也可从 Actions 手动触发发布；标签和 `VERSION` 不一致时流水线会明确失败，避免错误版本进入更新通道。
+根目录的 `VERSION` 是发布版本源。推送与其一致的版本标签（如 `v1.1.11`）会自动运行发布门禁，构建 Windows/Linux/macOS 发布包、校验和及 `linux/amd64`、`linux/arm64` GHCR 镜像，并创建或更新对应的 GitHub Release。也可从 Actions 手动触发发布；标签和 `VERSION` 不一致时流水线会明确失败，避免错误版本进入更新通道。
 
 ## 文档
 
@@ -108,6 +108,7 @@ bash ./scripts/lint.sh
 - [配置](docs/configuration.md)
 - [Xray 与代理订阅](docs/xray-proxy.md)
 - [账号批量导入 API](docs/account-batch-api.md)
+- [批量删除](docs/batch-deletion.md)
 - [账号健康检测](docs/account-health.md)
 - [客户端兼容](docs/client-compat/README.md)
 - [测试与交付](docs/Testing%20and%20Delivery/Testing%20and%20Delivery.md)

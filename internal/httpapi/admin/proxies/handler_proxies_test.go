@@ -167,7 +167,7 @@ func TestAddProxyDoesNotFailOnUnrelatedInvalidRuntimeConfig(t *testing.T) {
 	}
 }
 
-func TestDeleteProxyClearsAssignedAccountProxyID(t *testing.T) {
+func TestDeleteProxyRejectsAssignedAccountReferenceWithoutMutatingRoutes(t *testing.T) {
 	h := newAdminProxyTestHandler(t, `{
 		"proxies":[{"id":"proxy-1","name":"Node 1","type":"socks5","host":"127.0.0.1","port":1080}],
 		"accounts":[{"email":"u@example.com","password":"pwd","proxy_id":"proxy-1"}]
@@ -180,18 +180,31 @@ func TestDeleteProxyClearsAssignedAccountProxyID(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	snap := h.Store.Snapshot()
-	if len(snap.Proxies) != 0 {
-		t.Fatalf("expected proxy removed, got %#v", snap.Proxies)
+	if len(snap.Proxies) != 1 {
+		t.Fatalf("proxy deletion should be atomic, got %#v", snap.Proxies)
 	}
 	if len(snap.Accounts) != 1 {
 		t.Fatalf("expected account kept, got %#v", snap.Accounts)
 	}
-	if snap.Accounts[0].ProxyID != "" {
-		t.Fatalf("expected proxy assignment cleared, got %#v", snap.Accounts[0])
+	if snap.Accounts[0].ProxyID != "proxy-1" {
+		t.Fatalf("assigned route was silently cleared: %#v", snap.Accounts[0])
+	}
+	var payload struct {
+		References []struct {
+			ProxyID            string   `json:"proxy_id"`
+			AccountCount       int      `json:"account_count"`
+			AccountIdentifiers []string `json:"account_identifiers"`
+		} `json:"references"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if len(payload.References) != 1 || payload.References[0].ProxyID != "proxy-1" || payload.References[0].AccountCount != 1 || len(payload.References[0].AccountIdentifiers) != 1 || payload.References[0].AccountIdentifiers[0] != "u@example.com" {
+		t.Fatalf("unexpected deletion references: %#v", payload.References)
 	}
 }
 

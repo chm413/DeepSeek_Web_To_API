@@ -36,7 +36,7 @@ const ProxyManagerContainer = lazy(() => import('../features/proxy/ProxyManagerC
 
 const UPDATE_STATUS_REFRESH_INTERVAL_MS = 60_000
 const VERSION_NOTIFY_STORAGE_KEY = 'deepseek-web-to-api_notified_update_tag'
-const WEBUI_API_CONTRACT_VERSION = 3
+const WEBUI_API_CONTRACT_VERSION = 4
 
 function TabLoadingFallback({ label }) {
     return (
