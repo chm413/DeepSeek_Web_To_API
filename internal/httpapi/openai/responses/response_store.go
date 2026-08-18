@@ -36,9 +36,13 @@ type responseStore struct {
 }
 
 type storedInput struct {
-	Owner     string
-	Messages  []any
-	ExpiresAt time.Time
+	Owner         string
+	Messages      []any
+	Tools         any
+	HasTools      bool
+	ToolChoice    any
+	HasToolChoice bool
+	ExpiresAt     time.Time
 }
 
 type storedSession struct {
@@ -52,9 +56,13 @@ type storedSession struct {
 // It is deliberately process-local: this proxy cannot mint provider-owned
 // encrypted state that another Responses implementation could validate.
 type storedCompaction struct {
-	Owner     string
-	Messages  []any
-	ExpiresAt time.Time
+	Owner         string
+	Messages      []any
+	Tools         any
+	HasTools      bool
+	ToolChoice    any
+	HasToolChoice bool
+	ExpiresAt     time.Time
 }
 
 func newResponseStore(ttl time.Duration) *responseStore {
@@ -73,6 +81,10 @@ func newResponseStore(ttl time.Duration) *responseStore {
 }
 
 func (s *responseStore) putCompaction(owner string, messages []any) string {
+	return s.putCompactionState(owner, messages, nil, false, nil, false)
+}
+
+func (s *responseStore) putCompactionState(owner string, messages []any, tools any, hasTools bool, toolChoice any, hasToolChoice bool) string {
 	if s == nil || owner == "" || len(messages) == 0 {
 		return ""
 	}
@@ -85,9 +97,13 @@ func (s *responseStore) putCompaction(owner string, messages []any) string {
 		s.compactions = make(map[string]storedCompaction)
 	}
 	s.compactions[responseStoreKey(owner, handle)] = storedCompaction{
-		Owner:     owner,
-		Messages:  cloneAnySlice(messages),
-		ExpiresAt: now.Add(s.compactionTTL),
+		Owner:         owner,
+		Messages:      cloneAnySlice(messages),
+		Tools:         cloneAnyValue(tools),
+		HasTools:      hasTools,
+		ToolChoice:    cloneAnyValue(toolChoice),
+		HasToolChoice: hasToolChoice,
+		ExpiresAt:     now.Add(s.compactionTTL),
 	}
 	config.Logger.Info("[responses_compaction_store] stored",
 		"owner_fingerprint", responseStateFingerprint(owner),
@@ -100,8 +116,16 @@ func (s *responseStore) putCompaction(owner string, messages []any) string {
 }
 
 func (s *responseStore) getCompaction(owner, handle string) ([]any, bool) {
-	if s == nil || owner == "" || !strings.HasPrefix(handle, localCompactionHandlePrefix) {
+	item, ok := s.getCompactionState(owner, handle)
+	if !ok {
 		return nil, false
+	}
+	return item.Messages, true
+}
+
+func (s *responseStore) getCompactionState(owner, handle string) (storedCompaction, bool) {
+	if s == nil || owner == "" || !strings.HasPrefix(handle, localCompactionHandlePrefix) {
+		return storedCompaction{}, false
 	}
 	now := s.currentTime()
 	s.mu.Lock()
@@ -114,7 +138,7 @@ func (s *responseStore) getCompaction(owner, handle string) ([]any, bool) {
 			"owner_fingerprint", responseStateFingerprint(owner),
 			"handle_fingerprint", responseStateFingerprint(handle),
 		)
-		return nil, false
+		return storedCompaction{}, false
 	}
 	item.ExpiresAt = now.Add(s.compactionTTL)
 	s.compactions[key] = item
@@ -125,7 +149,10 @@ func (s *responseStore) getCompaction(owner, handle string) ([]any, bool) {
 		"context_bytes", responseStateSize(item.Messages),
 		"idle_ttl_seconds", int64(s.compactionTTL/time.Second),
 	)
-	return cloneAnySlice(item.Messages), true
+	item.Messages = cloneAnySlice(item.Messages)
+	item.Tools = cloneAnyValue(item.Tools)
+	item.ToolChoice = cloneAnyValue(item.ToolChoice)
+	return item, true
 }
 
 // putInput stores the canonical input messages used for a response. Keeping
@@ -133,6 +160,10 @@ func (s *responseStore) getCompaction(owner, handle string) ([]any, bool) {
 // reconstruct a new request without pretending DeepSeek can persist opaque
 // provider-owned encrypted reasoning state.
 func (s *responseStore) putInput(owner, id string, messages []any) {
+	s.putInputState(owner, id, messages, nil, false, nil, false)
+}
+
+func (s *responseStore) putInputState(owner, id string, messages []any, tools any, hasTools bool, toolChoice any, hasToolChoice bool) {
 	if s == nil || owner == "" || id == "" || len(messages) == 0 {
 		return
 	}
@@ -141,15 +172,27 @@ func (s *responseStore) putInput(owner, id string, messages []any) {
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
 	s.inputs[responseStoreKey(owner, id)] = storedInput{
-		Owner:     owner,
-		Messages:  cloneAnySlice(messages),
-		ExpiresAt: now.Add(s.ttl),
+		Owner:         owner,
+		Messages:      cloneAnySlice(messages),
+		Tools:         cloneAnyValue(tools),
+		HasTools:      hasTools,
+		ToolChoice:    cloneAnyValue(toolChoice),
+		HasToolChoice: hasToolChoice,
+		ExpiresAt:     now.Add(s.ttl),
 	}
 }
 
 func (s *responseStore) getInput(owner, id string) ([]any, bool) {
-	if s == nil || owner == "" || id == "" {
+	item, ok := s.getInputState(owner, id)
+	if !ok {
 		return nil, false
+	}
+	return item.Messages, true
+}
+
+func (s *responseStore) getInputState(owner, id string) (storedInput, bool) {
+	if s == nil || owner == "" || id == "" {
+		return storedInput{}, false
 	}
 	now := s.currentTime()
 	s.mu.Lock()
@@ -157,9 +200,12 @@ func (s *responseStore) getInput(owner, id string) ([]any, bool) {
 	s.sweepLocked(now)
 	item, ok := s.inputs[responseStoreKey(owner, id)]
 	if !ok || item.Owner != owner {
-		return nil, false
+		return storedInput{}, false
 	}
-	return cloneAnySlice(item.Messages), true
+	item.Messages = cloneAnySlice(item.Messages)
+	item.Tools = cloneAnyValue(item.Tools)
+	item.ToolChoice = cloneAnyValue(item.ToolChoice)
+	return item, true
 }
 
 func (s *responseStore) putSessionKey(owner, id, sessionKey string) {
@@ -306,6 +352,23 @@ func cloneAnySlice(in []any) []any {
 	}
 	out := make([]any, len(in))
 	copy(out, in)
+	return out
+}
+
+// cloneAnyValue round-trips JSON-compatible request fragments so tool schemas
+// cannot be mutated through a caller-owned map after they enter the store.
+func cloneAnyValue(in any) any {
+	if in == nil {
+		return nil
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return in
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return in
+	}
 	return out
 }
 

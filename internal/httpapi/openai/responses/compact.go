@@ -120,7 +120,8 @@ func (h *Handler) serveLocalCompaction(w http.ResponseWriter, r *http.Request, r
 		output,
 		"",
 	)
-	h.getResponseStore().putInput(owner, responseID, stdReq.Messages)
+	h.getResponseStore().putInputState(owner, responseID, stdReq.Messages,
+		stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
 	h.getResponseStore().put(owner, responseID, responseObj)
 	if stdReq.Stream {
 		writeLocalCompactionStream(w, responseObj, output)
@@ -247,7 +248,8 @@ func (h *Handler) buildLocalCompaction(r *http.Request, a *auth.RequestAuth, own
 	if !splitOK {
 		return nil, promptcompat.StandardRequest{}, summaryStats, localCompactionError{status: http.StatusInternalServerError, msg: "failed to split compacted context window"}
 	}
-	handle := h.getResponseStore().putCompaction(owner, stdReq.Messages)
+	handle := h.getResponseStore().putCompactionState(owner, stdReq.Messages,
+		stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
 	if handle == "" {
 		return nil, promptcompat.StandardRequest{}, summaryStats, localCompactionError{status: http.StatusInternalServerError, msg: "failed to store local compaction state"}
 	}
@@ -417,6 +419,10 @@ func (h *Handler) expandLocalCompactionStateWithRecovery(owner string, req map[s
 	if req == nil {
 		return recoveredLocalCompaction{}, nil
 	}
+	// A compaction item is often the only reference to the root request. Read
+	// its local snapshot before replacing it with canonical messages so a
+	// follow-up that omits tools still gets the original tool contract.
+	h.inheritCompactionToolContract(owner, req)
 	var recovered recoveredLocalCompaction
 	for _, key := range []string{"input", "messages"} {
 		raw, ok := req[key]
@@ -435,6 +441,57 @@ func (h *Handler) expandLocalCompactionStateWithRecovery(owner string, req map[s
 		}
 	}
 	return recovered, nil
+}
+
+func (h *Handler) inheritCompactionToolContract(owner string, req map[string]any) {
+	if h == nil || req == nil {
+		return
+	}
+	store := h.getResponseStore()
+	for _, key := range []string{"input", "messages"} {
+		handle := findLocalCompactionHandle(req[key])
+		if handle == "" {
+			continue
+		}
+		state, ok := store.getCompactionState(owner, handle)
+		if !ok {
+			return
+		}
+		if inheritStoredToolContract(req, state.HasTools, state.Tools, state.HasToolChoice, state.ToolChoice) {
+			config.Logger.Info("[responses_state] inherited tool contract from compaction handle",
+				"owner_fingerprint", responseStateFingerprint(owner),
+				"handle_fingerprint", responseStateFingerprint(handle),
+				"tools_present", state.HasTools,
+				"tool_choice_present", state.HasToolChoice,
+			)
+		}
+		return
+	}
+}
+
+func findLocalCompactionHandle(value any) string {
+	switch v := value.(type) {
+	case map[string]any:
+		typ := strings.ToLower(strings.TrimSpace(responseString(v["type"])))
+		if typ == "compaction" || typ == "compaction_summary" || typ == "context_compaction" {
+			handle := strings.TrimSpace(responseString(v["encrypted_content"]))
+			if strings.HasPrefix(handle, localCompactionHandlePrefix) {
+				return handle
+			}
+		}
+		for _, child := range v {
+			if handle := findLocalCompactionHandle(child); handle != "" {
+				return handle
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if handle := findLocalCompactionHandle(child); handle != "" {
+				return handle
+			}
+		}
+	}
+	return ""
 }
 
 func (h *Handler) expandLocalCompactionValue(owner string, raw any) (any, bool, string, error) {

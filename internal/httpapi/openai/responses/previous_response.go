@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/promptcompat"
 )
 
@@ -17,7 +18,7 @@ func (h *Handler) mergePreviousResponseInput(owner string, req map[string]any) e
 		return nil
 	}
 	store := h.getResponseStore()
-	previousMessages, ok := store.getInput(owner, previousID)
+	previousState, ok := store.getInputState(owner, previousID)
 	if !ok {
 		return fmt.Errorf("previous_response_id %q was not found or has expired", previousID)
 	}
@@ -26,7 +27,13 @@ func (h *Handler) mergePreviousResponseInput(owner string, req map[string]any) e
 		return fmt.Errorf("previous_response_id %q was not found or has expired", previousID)
 	}
 
-	combined := cloneAnySlice(previousMessages)
+	// Responses clients commonly send tools only on the root request. Restore
+	// the exact prior contract when a follow-up omits either field, while
+	// respecting an explicit tools/tool_choice field in the new request.
+	inheritedTools := inheritStoredToolContract(req,
+		previousState.HasTools, previousState.Tools,
+		previousState.HasToolChoice, previousState.ToolChoice)
+	combined := cloneAnySlice(previousState.Messages)
 	if output, ok := previousResponse["output"].([]any); ok {
 		if visible := promptcompat.NormalizeResponsesInputAsMessages(output); len(visible) > 0 {
 			combined = append(combined, visible...)
@@ -41,7 +48,35 @@ func (h *Handler) mergePreviousResponseInput(owner string, req map[string]any) e
 	}
 	req["input"] = combined
 	delete(req, "messages")
+	if inheritedTools {
+		config.Logger.Info("[responses_state] inherited tool contract from previous response",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(previousID),
+			"tools_present", previousState.HasTools,
+			"tool_choice_present", previousState.HasToolChoice,
+		)
+	}
 	return nil
+}
+
+func inheritStoredToolContract(req map[string]any, hasTools bool, tools any, hasToolChoice bool, toolChoice any) bool {
+	if req == nil {
+		return false
+	}
+	inherited := false
+	if hasTools {
+		if _, present := req["tools"]; !present {
+			req["tools"] = cloneAnyValue(tools)
+			inherited = true
+		}
+	}
+	if hasToolChoice {
+		if _, present := req["tool_choice"]; !present {
+			req["tool_choice"] = cloneAnyValue(toolChoice)
+			inherited = true
+		}
+	}
+	return inherited
 }
 
 func responseString(value any) string {

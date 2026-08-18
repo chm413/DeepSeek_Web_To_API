@@ -55,6 +55,9 @@ func NormalizeOpenAIChatRequest(store ConfigReader, req map[string]any, traceID 
 		Messages:                messagesRaw,
 		LatestUserText:          ExtractLatestUserText(messagesRaw),
 		ToolsRaw:                req["tools"],
+		HasTools:                hasRequestField(req, "tools"),
+		HasToolChoice:           hasRequestField(req, "tool_choice"),
+		ToolChoiceRaw:           req["tool_choice"],
 		FinalPrompt:             finalPrompt,
 		IncrementalFormatPrompt: BuildOpenAIIncrementalFormatPrompt(req["tools"], toolPolicy),
 		ToolNames:               toolNames,
@@ -121,6 +124,9 @@ func NormalizeOpenAIResponsesRequest(store ConfigReader, req map[string]any, tra
 		Messages:                messagesRaw,
 		LatestUserText:          ExtractLatestUserText(messagesRaw),
 		ToolsRaw:                req["tools"],
+		HasTools:                hasRequestField(req, "tools"),
+		HasToolChoice:           hasRequestField(req, "tool_choice"),
+		ToolChoiceRaw:           req["tool_choice"],
 		FinalPrompt:             finalPrompt,
 		IncrementalFormatPrompt: BuildOpenAIIncrementalFormatPrompt(req["tools"], toolPolicy),
 		ToolNames:               toolNames,
@@ -132,6 +138,14 @@ func NormalizeOpenAIResponsesRequest(store ConfigReader, req map[string]any, tra
 		RefFileIDs:              refFileIDs,
 		PassThrough:             passThrough,
 	}, nil
+}
+
+func hasRequestField(req map[string]any, key string) bool {
+	if req == nil {
+		return false
+	}
+	_, ok := req[key]
+	return ok
 }
 
 // ExtractLatestUserText scans a normalized OpenAI/Claude messages array

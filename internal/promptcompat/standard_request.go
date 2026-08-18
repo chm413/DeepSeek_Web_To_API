@@ -33,18 +33,24 @@ type StandardRequest struct {
 	CurrentInputTailEntries       int    // number of role-blocks in the tail (parsed via `\n=== ` markers)
 	CurrentInputCheckpointRefresh bool   // first turn or prefix-string mismatch — a fresh prefix was uploaded
 	ToolsRaw                      any
-	FinalPrompt                   string
-	IncrementalFormatPrompt       string
-	IncrementalSessionRotated     bool
-	ToolNames                     []string
-	ToolChoice                    ToolChoicePolicy
-	Stream                        bool
-	Thinking                      bool
-	ExposeReasoning               bool
-	Search                        bool
-	RefFileIDs                    []string
-	RefFileTokens                 int
-	PassThrough                   map[string]any
+	// Preserve JSON field presence when a local response/compaction snapshot
+	// is replayed. A nil value can be explicit, so value nil alone is not
+	// enough to distinguish it from an omitted field.
+	HasTools                  bool
+	HasToolChoice             bool
+	ToolChoiceRaw             any
+	FinalPrompt               string
+	IncrementalFormatPrompt   string
+	IncrementalSessionRotated bool
+	ToolNames                 []string
+	ToolChoice                ToolChoicePolicy
+	Stream                    bool
+	Thinking                  bool
+	ExposeReasoning           bool
+	Search                    bool
+	RefFileIDs                []string
+	RefFileTokens             int
+	PassThrough               map[string]any
 }
 
 func (r StandardRequest) IncrementalVariant() string {

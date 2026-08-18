@@ -381,6 +381,51 @@ func TestResponsesPreviousResponseReusesIncrementalSessionWithCurrentInputFile(t
 	}
 }
 
+func TestResponsesPreviousResponseInheritsToolsIntoIncrementalPrompt(t *testing.T) {
+	ds := &responsesIncrementalDSStub{}
+	h := &Handler{
+		Store:       responsesHistoryConfigStub{},
+		Auth:        responsesIncrementalAuthStub{},
+		DS:          ds,
+		Incremental: upstreamsession.NewStore(0, 0),
+	}
+	first := serveResponsesIncremental(t, h, map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": "inspect the current issue",
+		"tools": []any{map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "lookup_issue",
+				"description": "Look up an issue by identifier.",
+				"parameters":  map[string]any{"type": "object"},
+			},
+		}},
+		"tool_choice": "auto",
+	})
+	responseID, _ := first["id"].(string)
+	if responseID == "" {
+		t.Fatalf("first response had no id: %#v", first)
+	}
+
+	// Codex-style follow-ups can send only the prior response ID and new input.
+	// The gateway must restore the tool contract before it builds the delta.
+	serveResponsesIncremental(t, h, map[string]any{
+		"model":                "deepseek-v4-flash",
+		"previous_response_id": responseID,
+		"input":                "continue with the same tool",
+	})
+
+	if ds.createCalls != 1 || len(ds.normal) != 1 || len(ds.pinned) != 1 {
+		t.Fatalf("tool-contract response chain must reuse the original session: create=%d normal=%d pinned=%d", ds.createCalls, len(ds.normal), len(ds.pinned))
+	}
+	prompt, _ := ds.pinned[0]["prompt"].(string)
+	for _, expected := range []string{"Tool: lookup_issue", "Look up an issue", "continue with the same tool"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("incremental prompt missing inherited %q: %q", expected, prompt)
+		}
+	}
+}
+
 func TestResponsesPreviousResponseRotatesAfter25TurnsWithCurrentInputFile(t *testing.T) {
 	ds := &responsesIncrementalDSStub{}
 	h := &Handler{

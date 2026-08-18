@@ -199,6 +199,17 @@ Every incremental completion sends both parts, in this order:
 2. Only the new role blocks after the cached prefix. Prior transcript text is
    never copied into the incremental prompt.
 
+For Responses chains, the gateway stores the root request's `tools` and
+`tool_choice` beside the canonical message snapshot and beside a local
+compaction handle. A follow-up using `previous_response_id` or a local
+compaction item may omit those fields; the saved contract is restored before
+normalization so session reuse, rotation, chunking, and a full replay all keep
+the same schemas and tool-call rules. Sending either field explicitly always
+wins, including `tools: []`, `tools: null`, or `tool_choice: "none"` to turn
+tools off. Chat Completions and Claude Messages have no server-side
+`previous_response_id` snapshot, so their clients must continue to include
+their active tool contract on each request.
+
 The request uses the cached DeepSeek session and parent message ID through a
 pinned completion call. The call itself never silently changes accounts,
 because doing so would invalidate the parent. If it fails with an account-wide

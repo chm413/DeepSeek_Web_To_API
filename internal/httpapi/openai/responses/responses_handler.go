@@ -564,7 +564,9 @@ rootDispatch:
 	// stdReq may now be a current-input-file transport envelope. Persist the
 	// canonical pre-CIF input instead; otherwise a follow-up previous_response_id
 	// reconstructs a different first message and cannot reuse the pinned session.
-	h.getResponseStore().putInput(owner, responseID, incrementalBaseReq.Messages)
+	h.getResponseStore().putInputState(owner, responseID, incrementalBaseReq.Messages,
+		incrementalBaseReq.ToolsRaw, incrementalBaseReq.HasTools,
+		incrementalBaseReq.ToolChoiceRaw, incrementalBaseReq.HasToolChoice)
 	h.getResponseStore().putSessionKey(owner, responseID, a.SessionKey)
 	refFileTokens := stdReq.RefFileTokens
 	var outcome responsesCompletionOutcome
@@ -734,7 +736,8 @@ func (h *Handler) tryIncrementalResponses(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	h.getResponseStore().putInput(owner, responseID, stdReq.Messages)
+	h.getResponseStore().putInputState(owner, responseID, stdReq.Messages,
+		stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
 	h.getResponseStore().putSessionKey(owner, responseID, a.SessionKey)
 	var outcome responsesCompletionOutcome
 	responsePrefix := localCompactionOutputPrefix(compactionItem)

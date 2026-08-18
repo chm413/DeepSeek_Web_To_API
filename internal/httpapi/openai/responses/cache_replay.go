@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
+	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
+	"DeepSeek_Web_To_API/internal/promptcompat"
 	"DeepSeek_Web_To_API/internal/responsecache"
 )
 
@@ -31,6 +34,38 @@ func (h *Handler) OnProtocolResponseCacheHit(r *http.Request, entry responsecach
 		return
 	}
 	h.getResponseStore().put(owner, id, obj)
+	h.recordCachedResponseInput(owner, id, r)
+}
+
+// recordCachedResponseInput keeps a cache hit usable as a previous_response_id
+// parent. The response cache has the current request body, while the response
+// object alone cannot recover its canonical input or tool contract.
+func (h *Handler) recordCachedResponseInput(owner, responseID string, r *http.Request) {
+	if h == nil || r == nil || r.Body == nil || strings.TrimSpace(owner) == "" || strings.TrimSpace(responseID) == "" {
+		return
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	var req map[string]any
+	if json.Unmarshal(raw, &req) != nil {
+		return
+	}
+	if _, err := h.expandLocalCompactionStateWithRecovery(owner, req); err != nil {
+		return
+	}
+	if err := h.mergePreviousResponseInput(owner, req); err != nil {
+		return
+	}
+	stdReq, err := promptcompat.NormalizeOpenAIResponsesRequest(h.Store, req, shared.RequestTraceID(r))
+	if err != nil {
+		return
+	}
+	stdReq = shared.ApplyThinkingInjection(h.Store, stdReq)
+	h.getResponseStore().putInputState(owner, responseID, stdReq.Messages,
+		stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
 }
 
 func cachedResponseObject(body []byte) map[string]any {

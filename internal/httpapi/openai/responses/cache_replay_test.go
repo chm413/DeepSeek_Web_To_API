@@ -3,8 +3,10 @@ package responses
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"DeepSeek_Web_To_API/internal/promptcompat"
 	"DeepSeek_Web_To_API/internal/responsecache"
 )
 
@@ -46,6 +48,44 @@ func TestOnProtocolResponseCacheHitStoresStreamCompletedResponse(t *testing.T) {
 	owner := responseStoreOwner(authForToken(t, resolver, "token-a"))
 	if _, ok := h.getResponseStore().get(owner, "resp_stream_cached"); !ok {
 		t.Fatal("expected cached stream response to be stored")
+	}
+}
+
+func TestOnProtocolResponseCacheHitStoresToolContractSnapshot(t *testing.T) {
+	store, resolver := newDirectTokenResolver(t)
+	h := &Handler{Store: store, Auth: resolver}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+  "model":"deepseek-v4-flash",
+  "input":"inspect the issue",
+  "tools":[{"type":"function","function":{"name":"lookup_issue","description":"Find an issue","parameters":{"type":"object"}}}],
+  "tool_choice":"auto"
+}`))
+	req.Header.Set("Authorization", "Bearer token-a")
+
+	h.OnProtocolResponseCacheHit(req, responsecache.Entry{
+		Status: http.StatusOK,
+		Body:   []byte(`{"id":"resp_cached_tools","object":"response","status":"completed","output":[]}`),
+	}, "memory")
+
+	owner := responseStoreOwner(authForToken(t, resolver, "token-a"))
+	state, ok := h.getResponseStore().getInputState(owner, "resp_cached_tools")
+	if !ok || !state.HasTools || !state.HasToolChoice {
+		t.Fatalf("expected cached request tool contract, got %#v", state)
+	}
+	followUp := map[string]any{
+		"model":                "deepseek-v4-flash",
+		"previous_response_id": "resp_cached_tools",
+		"input":                "continue",
+	}
+	if err := h.mergePreviousResponseInput(owner, followUp); err != nil {
+		t.Fatalf("merge cached previous response: %v", err)
+	}
+	stdReq, err := promptcompat.NormalizeOpenAIResponsesRequest(store, followUp, "")
+	if err != nil {
+		t.Fatalf("normalize cached follow-up: %v", err)
+	}
+	if !strings.Contains(stdReq.IncrementalFormatPrompt, "Tool: lookup_issue") {
+		t.Fatalf("cached tool contract was not restored: %q", stdReq.IncrementalFormatPrompt)
 	}
 }
 

@@ -10,7 +10,7 @@ updates only write the persistent Compose `./data` volume.
 ## Version Source And Release Build
 
 `VERSION` is the single release-version source. Push a matching stable tag,
-for example `v1.2.1`, to start `release-artifacts.yml`. The workflow checks
+for example `v1.2.2`, to start `release-artifacts.yml`. The workflow checks
 that the tag and `VERSION` agree, runs the release gates, then publishes:
 
 - Linux archive assets for `linux/amd64` and `linux/arm64`.
@@ -94,7 +94,7 @@ overwrite their own executable.
   pending.rollback.previous.version
   failed.version
   versions/
-    v1.2.1/
+    v1.2.2/
       deepseek-web-to-api
       static/admin/
       .verified.json

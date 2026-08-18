@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-08-18 (1.2.2)
+
+- Fixed Responses session transfer losing its tool contract. The proxy now
+  stores the original `tools` and `tool_choice` with every canonical response
+  snapshot and local compaction handle, then restores them when a
+  `previous_response_id` or compaction follow-up omits those fields.
+- Explicit follow-up settings still win, including `tools: []`, `tools: null`,
+  and `tool_choice: "none"`; this makes disabling tools deterministic rather
+  than inheriting a stale schema.
+- Response-cache hits now also rebuild their canonical input/tool snapshot, so
+  a cached root response remains a valid parent for later Responses turns.
+
 ## 2026-08-17 (1.2.0)
 
 - Added Shadowsocks support through the shared Xray process. Manual nodes,

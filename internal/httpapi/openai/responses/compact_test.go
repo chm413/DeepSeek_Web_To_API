@@ -47,6 +47,47 @@ func TestCompactionStateUsesSlidingIdleTTL(t *testing.T) {
 	}
 }
 
+func TestCompactionHandleInheritsToolContractWhenOmitted(t *testing.T) {
+	h := &Handler{responses: newResponseStore(time.Minute)}
+	owner := "caller:compact-tools"
+	tools := []any{map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "read_workspace",
+			"description": "Read a workspace file.",
+			"parameters":  map[string]any{"type": "object"},
+		},
+	}}
+	handle := h.getResponseStore().putCompactionState(owner, []any{
+		map[string]any{"role": "user", "content": "inspect the repository"},
+	}, tools, true, "required", true)
+	if handle == "" {
+		t.Fatal("expected compaction handle")
+	}
+	req := map[string]any{
+		"model": "deepseek-v4-flash",
+		"input": []any{
+			map[string]any{"type": "compaction", "encrypted_content": handle},
+			map[string]any{"role": "user", "content": "continue"},
+		},
+	}
+	if err := h.expandLocalCompactionState(owner, req); err != nil {
+		t.Fatalf("expand compact state: %v", err)
+	}
+	stdReq, err := promptcompat.NormalizeOpenAIResponsesRequest(responsesHistoryConfigStub{}, req, "")
+	if err != nil {
+		t.Fatalf("normalize expanded request: %v", err)
+	}
+	if !stdReq.ToolChoice.IsRequired() {
+		t.Fatalf("expected inherited required tool policy, got %#v", stdReq.ToolChoice)
+	}
+	for _, expected := range []string{"Tool: read_workspace", "Read a workspace file", "MUST call at least one tool"} {
+		if !strings.Contains(stdReq.IncrementalFormatPrompt, expected) {
+			t.Fatalf("missing %q from expanded tool contract: %q", expected, stdReq.IncrementalFormatPrompt)
+		}
+	}
+}
+
 func TestMissingCompactionStateKeepsFreshTail(t *testing.T) {
 	h := &Handler{responses: newResponseStore(time.Minute)}
 	req := map[string]any{
