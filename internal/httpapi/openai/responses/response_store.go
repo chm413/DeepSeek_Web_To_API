@@ -182,14 +182,6 @@ func (s *responseStore) putInputState(owner, id string, messages []any, tools an
 	}
 }
 
-func (s *responseStore) getInput(owner, id string) ([]any, bool) {
-	item, ok := s.getInputState(owner, id)
-	if !ok {
-		return nil, false
-	}
-	return item.Messages, true
-}
-
 func (s *responseStore) getInputState(owner, id string) (storedInput, bool) {
 	if s == nil || owner == "" || id == "" {
 		return storedInput{}, false
