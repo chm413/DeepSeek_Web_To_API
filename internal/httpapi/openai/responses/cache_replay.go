@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/promptcompat"
 	"DeepSeek_Web_To_API/internal/responsecache"
@@ -34,6 +35,12 @@ func (h *Handler) OnProtocolResponseCacheHit(r *http.Request, entry responsecach
 		return
 	}
 	h.getResponseStore().put(owner, id, obj)
+	config.Logger.Info("[responses_cache] replay hit",
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"response_id_fingerprint", responseStateFingerprint(id),
+		"cached_body_bytes", len(entry.Body),
+		"stream_object", bytes.Contains(entry.Body, []byte("data:")),
+	)
 	h.recordCachedResponseInput(owner, id, r)
 }
 
@@ -46,26 +53,59 @@ func (h *Handler) recordCachedResponseInput(owner, responseID string, r *http.Re
 	}
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		config.Logger.Warn("[responses_cache] unable to restore cached input",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(responseID),
+			"stage", "read_request_body", "error", err)
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req map[string]any
 	if json.Unmarshal(raw, &req) != nil {
+		config.Logger.Warn("[responses_cache] unable to restore cached input",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(responseID),
+			"stage", "decode_request_body", "wire_request_bytes", len(raw))
 		return
 	}
 	if _, err := h.expandLocalCompactionStateWithRecovery(owner, req); err != nil {
+		config.Logger.Warn("[responses_cache] unable to restore cached input",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(responseID),
+			"stage", "expand_compaction", "wire_request_bytes", len(raw), "error", err)
 		return
 	}
 	if err := h.mergePreviousResponseInput(owner, req); err != nil {
+		config.Logger.Warn("[responses_cache] unable to restore cached input",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(responseID),
+			"stage", "merge_previous_response", "wire_request_bytes", len(raw), "error", err)
 		return
 	}
 	stdReq, err := promptcompat.NormalizeOpenAIResponsesRequest(h.Store, req, shared.RequestTraceID(r))
 	if err != nil {
+		config.Logger.Warn("[responses_cache] unable to restore cached input",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(responseID),
+			"stage", "normalize_request", "wire_request_bytes", len(raw), "error", err)
 		return
 	}
 	stdReq = shared.ApplyThinkingInjection(h.Store, stdReq)
 	h.getResponseStore().putInputState(owner, responseID, stdReq.Messages,
 		stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
+	config.Logger.Info("[responses_cache] restored canonical input",
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"response_id_fingerprint", responseStateFingerprint(responseID),
+		"wire_request_bytes", len(raw),
+		"messages", len(stdReq.Messages),
+		"context_bytes", responseStateSize(stdReq.Messages),
+		"prompt_units", promptcompat.PromptUnits(stdReq.FinalPrompt),
+		"tools_present", stdReq.HasTools,
+		"tool_count", responseToolCount(stdReq.ToolsRaw),
+		"tool_choice_present", stdReq.HasToolChoice,
+		"tool_contract_fingerprint", responseToolContractFingerprint(
+			stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice),
+	)
 }
 
 func cachedResponseObject(body []byte) map[string]any {

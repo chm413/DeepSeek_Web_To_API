@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-08-18 (1.2.3)
+
+- Added structured Responses state-transfer logs with context sizes, prompt units, tool counts, contract fingerprints, inheritance/override decisions, cache replay stages, and missing-state diagnostics. Sensitive tool schemas and request contents are never written to logs.
+
 ## 2026-08-18 (1.2.2)
 
 - Fixed Responses session transfer losing its tool contract. The proxy now

@@ -257,6 +257,12 @@ Windows 等以脱离终端方式启动二进制的环境可设置
 trace ID、请求大小、动态输入上限和状态分类，不记录 API Key、账号密码、Token、
 提示词正文或上游响应正文。
 
+Responses 状态转移还会记录 `[responses_request]`、`[responses_state]`、
+`[responses_compaction_store]` 和 `[responses_cache]` 事件，包含请求/上下文字节数、
+消息数量、提示词单位、工具数量、工具契约指纹、previous response/压缩句柄的命中与
+继承/显式覆盖决定，以及失败阶段。契约指纹是不可逆的短哈希，不包含工具 schema 或
+参数。需要更细的本地诊断时可设置 `LOG_LEVEL=DEBUG`；生产环境建议保留默认 `INFO`。
+
 **章节来源**
 - [config.example.json](file://config.example.json)
 - [internal/config/store_runtime_accessors.go](file://internal/config/store_runtime_accessors.go)

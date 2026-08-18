@@ -74,12 +74,33 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := responseStoreOwner(callerAuth)
+	traceID := requestTraceID(r)
 	previousResponseID := strings.TrimSpace(responseString(req["previous_response_id"]))
 	inheritedSessionKey := ""
 	if previousResponseID != "" {
 		inheritedSessionKey, _ = h.getResponseStore().getSessionKey(owner, previousResponseID)
 	}
 	compactTriggered := removeCompactionTriggers(req)
+	config.Logger.Info("[responses_request] received",
+		"trace_id", traceID,
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"wire_request_bytes", len(rawBody),
+		"model", strings.TrimSpace(responseString(req["model"])),
+		"stream", util.ToBool(req["stream"]),
+		"previous_response_id_fingerprint", responseStateFingerprint(previousResponseID),
+		"previous_response_id_present", previousResponseID != "",
+		"compaction_triggered", compactTriggered,
+		"input_items", responseStateItemCount(req["input"]),
+		"input_bytes", responseStateSize(req["input"]),
+		"message_items", responseStateItemCount(req["messages"]),
+		"message_bytes", responseStateSize(req["messages"]),
+		"tools_explicit", requestFieldPresent(req, "tools"),
+		"tool_count", responseToolCount(req["tools"]),
+		"tool_choice_explicit", requestFieldPresent(req, "tool_choice"),
+		"tool_contract_fingerprint", responseToolContractFingerprint(
+			req["tools"], requestFieldPresent(req, "tools"),
+			req["tool_choice"], requestFieldPresent(req, "tool_choice")),
+	)
 	recoveredCompaction, err := h.expandLocalCompactionStateWithRecovery(owner, req)
 	if err != nil {
 		writeOpenAIError(w, http.StatusNotFound, err.Error())
@@ -98,7 +119,6 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, compactThresholdErr.Error())
 		return
 	}
-	traceID := requestTraceID(r)
 	historyStdReq, err := promptcompat.NormalizeOpenAIResponsesRequest(h.Store, req, traceID)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error())

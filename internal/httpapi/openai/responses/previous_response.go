@@ -20,17 +20,29 @@ func (h *Handler) mergePreviousResponseInput(owner string, req map[string]any) e
 	store := h.getResponseStore()
 	previousState, ok := store.getInputState(owner, previousID)
 	if !ok {
+		config.Logger.Warn("[responses_state] previous response input unavailable",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(previousID),
+			"stage", "input_snapshot",
+		)
 		return fmt.Errorf("previous_response_id %q was not found or has expired", previousID)
 	}
 	previousResponse, ok := store.get(owner, previousID)
 	if !ok {
+		config.Logger.Warn("[responses_state] previous response object unavailable",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(previousID),
+			"stage", "response_object",
+		)
 		return fmt.Errorf("previous_response_id %q was not found or has expired", previousID)
 	}
 
 	// Responses clients commonly send tools only on the root request. Restore
 	// the exact prior contract when a follow-up omits either field, while
 	// respecting an explicit tools/tool_choice field in the new request.
-	inheritedTools := inheritStoredToolContract(req,
+	_, explicitTools := req["tools"]
+	_, explicitToolChoice := req["tool_choice"]
+	inheritance := inheritStoredToolContract(req,
 		previousState.HasTools, previousState.Tools,
 		previousState.HasToolChoice, previousState.ToolChoice)
 	combined := cloneAnySlice(previousState.Messages)
@@ -48,35 +60,71 @@ func (h *Handler) mergePreviousResponseInput(owner string, req map[string]any) e
 	}
 	req["input"] = combined
 	delete(req, "messages")
-	if inheritedTools {
-		config.Logger.Info("[responses_state] inherited tool contract from previous response",
-			"owner_fingerprint", responseStateFingerprint(owner),
-			"response_id_fingerprint", responseStateFingerprint(previousID),
-			"tools_present", previousState.HasTools,
-			"tool_choice_present", previousState.HasToolChoice,
-		)
-	}
+	config.Logger.Info("[responses_state] merged previous response",
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"response_id_fingerprint", responseStateFingerprint(previousID),
+		"stored_messages", len(previousState.Messages),
+		"stored_context_bytes", responseStateSize(previousState.Messages),
+		"output_items", responseOutputItemCount(previousResponse["output"]),
+		"current_input_items", len(current),
+		"merged_messages", len(combined),
+		"merged_context_bytes", responseStateSize(combined),
+		"tools_explicit", explicitTools,
+		"tools_inherited", inheritance.Tools,
+		"stored_tools_present", previousState.HasTools,
+		"stored_tool_count", responseToolCount(previousState.Tools),
+		"tool_choice_explicit", explicitToolChoice,
+		"tool_choice_inherited", inheritance.ToolChoice,
+		"stored_tool_choice_present", previousState.HasToolChoice,
+		"tool_contract_fingerprint", responseToolContractFingerprint(
+			requestValue(req, "tools"), requestFieldPresent(req, "tools"),
+			requestValue(req, "tool_choice"), requestFieldPresent(req, "tool_choice")),
+	)
 	return nil
 }
 
-func inheritStoredToolContract(req map[string]any, hasTools bool, tools any, hasToolChoice bool, toolChoice any) bool {
+type toolContractInheritance struct {
+	Tools      bool
+	ToolChoice bool
+}
+
+func inheritStoredToolContract(req map[string]any, hasTools bool, tools any, hasToolChoice bool, toolChoice any) toolContractInheritance {
 	if req == nil {
-		return false
+		return toolContractInheritance{}
 	}
-	inherited := false
+	inherited := toolContractInheritance{}
 	if hasTools {
 		if _, present := req["tools"]; !present {
 			req["tools"] = cloneAnyValue(tools)
-			inherited = true
+			inherited.Tools = true
 		}
 	}
 	if hasToolChoice {
 		if _, present := req["tool_choice"]; !present {
 			req["tool_choice"] = cloneAnyValue(toolChoice)
-			inherited = true
+			inherited.ToolChoice = true
 		}
 	}
 	return inherited
+}
+
+func requestFieldPresent(req map[string]any, key string) bool {
+	if req == nil {
+		return false
+	}
+	_, ok := req[key]
+	return ok
+}
+
+func requestValue(req map[string]any, key string) any {
+	if req == nil {
+		return nil
+	}
+	return req[key]
+}
+
+func responseOutputItemCount(value any) int {
+	return responseStateItemCount(value)
 }
 
 func responseString(value any) string {

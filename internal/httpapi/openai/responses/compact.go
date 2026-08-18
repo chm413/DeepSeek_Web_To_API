@@ -15,6 +15,7 @@ import (
 	openaifmt "DeepSeek_Web_To_API/internal/format/openai"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/util"
 )
 
 // Compact implements the legacy Responses compact endpoint. The returned
@@ -44,6 +45,24 @@ func (h *Handler) Compact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := responseStoreOwner(callerAuth)
+	config.Logger.Info("[responses_compact_request] received",
+		"trace_id", requestTraceID(r),
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"wire_request_bytes", len(rawBody),
+		"model", strings.TrimSpace(responseString(req["model"])),
+		"stream", util.ToBool(req["stream"]),
+		"previous_response_id_present", strings.TrimSpace(responseString(req["previous_response_id"])) != "",
+		"input_items", responseStateItemCount(req["input"]),
+		"input_bytes", responseStateSize(req["input"]),
+		"message_items", responseStateItemCount(req["messages"]),
+		"message_bytes", responseStateSize(req["messages"]),
+		"tools_explicit", requestFieldPresent(req, "tools"),
+		"tool_count", responseToolCount(req["tools"]),
+		"tool_choice_explicit", requestFieldPresent(req, "tool_choice"),
+		"tool_contract_fingerprint", responseToolContractFingerprint(
+			req["tools"], requestFieldPresent(req, "tools"),
+			req["tool_choice"], requestFieldPresent(req, "tool_choice")),
+	)
 	if err := h.expandLocalCompactionState(owner, req); err != nil {
 		writeOpenAIError(w, http.StatusNotFound, err.Error())
 		return
@@ -457,14 +476,23 @@ func (h *Handler) inheritCompactionToolContract(owner string, req map[string]any
 		if !ok {
 			return
 		}
-		if inheritStoredToolContract(req, state.HasTools, state.Tools, state.HasToolChoice, state.ToolChoice) {
-			config.Logger.Info("[responses_state] inherited tool contract from compaction handle",
-				"owner_fingerprint", responseStateFingerprint(owner),
-				"handle_fingerprint", responseStateFingerprint(handle),
-				"tools_present", state.HasTools,
-				"tool_choice_present", state.HasToolChoice,
-			)
-		}
+		_, explicitTools := req["tools"]
+		_, explicitToolChoice := req["tool_choice"]
+		inheritance := inheritStoredToolContract(req, state.HasTools, state.Tools, state.HasToolChoice, state.ToolChoice)
+		config.Logger.Info("[responses_state] resolved compaction tool contract",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"handle_fingerprint", responseStateFingerprint(handle),
+			"tools_explicit", explicitTools,
+			"tools_inherited", inheritance.Tools,
+			"stored_tools_present", state.HasTools,
+			"stored_tool_count", responseToolCount(state.Tools),
+			"tool_choice_explicit", explicitToolChoice,
+			"tool_choice_inherited", inheritance.ToolChoice,
+			"stored_tool_choice_present", state.HasToolChoice,
+			"tool_contract_fingerprint", responseToolContractFingerprint(
+				requestValue(req, "tools"), requestFieldPresent(req, "tools"),
+				requestValue(req, "tool_choice"), requestFieldPresent(req, "tool_choice")),
+		)
 		return
 	}
 }

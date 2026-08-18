@@ -110,6 +110,10 @@ func (s *responseStore) putCompactionState(owner string, messages []any, tools a
 		"handle_fingerprint", responseStateFingerprint(handle),
 		"messages", len(messages),
 		"context_bytes", responseStateSize(messages),
+		"tools_present", hasTools,
+		"tool_count", responseToolCount(tools),
+		"tool_choice_present", hasToolChoice,
+		"tool_contract_fingerprint", responseToolContractFingerprint(tools, hasTools, toolChoice, hasToolChoice),
 		"idle_ttl_seconds", int64(s.compactionTTL/time.Second),
 	)
 	return handle
@@ -147,6 +151,10 @@ func (s *responseStore) getCompactionState(owner, handle string) (storedCompacti
 		"handle_fingerprint", responseStateFingerprint(handle),
 		"messages", len(item.Messages),
 		"context_bytes", responseStateSize(item.Messages),
+		"tools_present", item.HasTools,
+		"tool_count", responseToolCount(item.Tools),
+		"tool_choice_present", item.HasToolChoice,
+		"tool_contract_fingerprint", responseToolContractFingerprint(item.Tools, item.HasTools, item.ToolChoice, item.HasToolChoice),
 		"idle_ttl_seconds", int64(s.compactionTTL/time.Second),
 	)
 	item.Messages = cloneAnySlice(item.Messages)
@@ -180,6 +188,17 @@ func (s *responseStore) putInputState(owner, id string, messages []any, tools an
 		HasToolChoice: hasToolChoice,
 		ExpiresAt:     now.Add(s.ttl),
 	}
+	config.Logger.Info("[responses_state] stored input snapshot",
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"response_id_fingerprint", responseStateFingerprint(id),
+		"messages", len(messages),
+		"context_bytes", responseStateSize(messages),
+		"tools_present", hasTools,
+		"tool_count", responseToolCount(tools),
+		"tool_choice_present", hasToolChoice,
+		"tool_contract_fingerprint", responseToolContractFingerprint(tools, hasTools, toolChoice, hasToolChoice),
+		"ttl_seconds", int64(s.ttl/time.Second),
+	)
 }
 
 func (s *responseStore) getInputState(owner, id string) (storedInput, bool) {
@@ -192,8 +211,23 @@ func (s *responseStore) getInputState(owner, id string) (storedInput, bool) {
 	s.sweepLocked(now)
 	item, ok := s.inputs[responseStoreKey(owner, id)]
 	if !ok || item.Owner != owner {
+		config.Logger.Warn("[responses_state] input snapshot miss",
+			"owner_fingerprint", responseStateFingerprint(owner),
+			"response_id_fingerprint", responseStateFingerprint(id),
+		)
 		return storedInput{}, false
 	}
+	config.Logger.Info("[responses_state] input snapshot hit",
+		"owner_fingerprint", responseStateFingerprint(owner),
+		"response_id_fingerprint", responseStateFingerprint(id),
+		"messages", len(item.Messages),
+		"context_bytes", responseStateSize(item.Messages),
+		"tools_present", item.HasTools,
+		"tool_count", responseToolCount(item.Tools),
+		"tool_choice_present", item.HasToolChoice,
+		"tool_contract_fingerprint", responseToolContractFingerprint(item.Tools, item.HasTools, item.ToolChoice, item.HasToolChoice),
+		"ttl_remaining_seconds", int64(item.ExpiresAt.Sub(now).Seconds()),
+	)
 	item.Messages = cloneAnySlice(item.Messages)
 	item.Tools = cloneAnyValue(item.Tools)
 	item.ToolChoice = cloneAnyValue(item.ToolChoice)
@@ -325,6 +359,51 @@ func responseStateSize(value any) int {
 		return 0
 	}
 	return len(raw)
+}
+
+func responseToolCount(value any) int {
+	switch tools := value.(type) {
+	case []any:
+		return len(tools)
+	case []map[string]any:
+		return len(tools)
+	default:
+		return 0
+	}
+}
+
+func responseStateItemCount(value any) int {
+	switch items := value.(type) {
+	case []any:
+		return len(items)
+	case []map[string]any:
+		return len(items)
+	default:
+		return 0
+	}
+}
+
+// responseToolContractFingerprint lets logs correlate a tool schema across
+// state transfers without writing the schema, descriptions, or arguments to
+// the log file.
+func responseToolContractFingerprint(tools any, hasTools bool, toolChoice any, hasToolChoice bool) string {
+	payload := struct {
+		Tools         any  `json:"tools"`
+		HasTools      bool `json:"has_tools"`
+		ToolChoice    any  `json:"tool_choice"`
+		HasToolChoice bool `json:"has_tool_choice"`
+	}{
+		Tools:         tools,
+		HasTools:      hasTools,
+		ToolChoice:    toolChoice,
+		HasToolChoice: hasToolChoice,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "unavailable"
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func cloneAnyMap(in map[string]any) map[string]any {
