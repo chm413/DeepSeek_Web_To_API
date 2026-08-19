@@ -29,15 +29,18 @@ func (s *chunkingFailoverAuthStub) SwitchAccount(_ context.Context, a *auth.Requ
 }
 
 type chunkingFailoverDSStub struct {
-	createCount   map[string]int
-	messageID     int
-	failed        bool
-	failure       error
-	mainPrompts   []string
-	mainAccount   []string
-	rawAccounts   []string
-	limitAccounts []string
-	deleted       []string
+	createCount               map[string]int
+	messageID                 int
+	failed                    bool
+	failure                   error
+	mainPrompts               []string
+	mainAccount               []string
+	rawAccounts               []string
+	unpinnedCalls             int
+	failFirstPinnedFragment   bool
+	firstPinnedFragmentFailed bool
+	limitAccounts             []string
+	deleted                   []string
 }
 
 func (s *chunkingFailoverDSStub) CreateSession(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
@@ -84,6 +87,7 @@ func (s *chunkingFailoverDSStub) CallCompletion(ctx context.Context, a *auth.Req
 }
 
 func (s *chunkingFailoverDSStub) CallCompletionRaw(ctx context.Context, a *auth.RequestAuth, payload map[string]any, pow string, _ int) (*http.Response, error) {
+	s.unpinnedCalls++
 	s.rawAccounts = append(s.rawAccounts, a.AccountID)
 	return s.CallCompletionPinned(ctx, a, payload, pow)
 }
@@ -91,6 +95,15 @@ func (s *chunkingFailoverDSStub) CallCompletionRaw(ctx context.Context, a *auth.
 func (s *chunkingFailoverDSStub) CallCompletionPinnedRaw(ctx context.Context, a *auth.RequestAuth, payload map[string]any, pow string) (*http.Response, error) {
 	s.rawAccounts = append(s.rawAccounts, a.AccountID)
 	prompt, _ := payload["prompt"].(string)
+	if s.failFirstPinnedFragment && !s.firstPinnedFragmentFailed && a.AccountID == "account-initial" && strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
+		s.firstPinnedFragmentFailed = true
+		return nil, &dsclient.RequestFailure{
+			Op:         "completion",
+			Kind:       dsclient.FailureUpstreamStatus,
+			StatusCode: http.StatusTooManyRequests,
+			Message:    "account rate limited",
+		}
+	}
 	if !s.failed && a.AccountID == "account-initial" && strings.Contains(prompt, "[OVERSIZED_REQUEST_CONTROL") {
 		s.failed = true
 		if s.failure != nil {
@@ -99,6 +112,42 @@ func (s *chunkingFailoverDSStub) CallCompletionPinnedRaw(ctx context.Context, a 
 		return nil, &dsclient.RequestFailure{Op: "completion", Kind: dsclient.FailureUpstreamStatus, StatusCode: http.StatusTooManyRequests, Message: "rate limited"}
 	}
 	return s.CallCompletionPinned(ctx, a, payload, pow)
+}
+
+func TestRootChunkingSwitchesOnlyAfterDiscardingPinnedAccount429(t *testing.T) {
+	oldDelay := sessionChunkTransitionDelay
+	sessionChunkTransitionDelay = 0
+	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
+
+	ds := &chunkingFailoverDSStub{failFirstPinnedFragment: true}
+	switcher := &chunkingFailoverAuthStub{}
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.MaxCharsExpert = 8000
+	cfg.SessionChunkingEnable = true
+	cfg.SessionChunkingTargetRatio = 0.85
+	cfg.SessionChunkingMaxChunks = 16
+	cfg.SessionChunkingCommitTimeoutSeconds = 5
+	a := &auth.RequestAuth{UseConfigToken: true, AccountID: "account-initial", DeepSeekToken: "token-initial", TriedAccounts: map[string]bool{}}
+	req := promptcompat.StandardRequest{
+		Surface:                 "test",
+		ResolvedModel:           "deepseek-v4-pro",
+		FinalPrompt:             strings.Repeat("A fragment that must never cross accounts.\n\n", 320),
+		IncrementalFormatPrompt: "Return exactly one JSON object.",
+	}
+
+	prepared, err := TryPrepareRootSessionChunkingWithFailover(context.Background(), ds, switcher, a, req, cfg)
+	if err != nil || prepared == nil {
+		t.Fatalf("expected account-scoped fragment replay, prepared=%#v err=%v", prepared, err)
+	}
+	if ds.unpinnedCalls != 0 {
+		t.Fatalf("account-scoped fragment failure must not use an unpinned call: %d", ds.unpinnedCalls)
+	}
+	if switcher.switches != 1 || a.AccountID != "account-replay" {
+		t.Fatalf("expected one switch after discarding the old root: switches=%d account=%q", switcher.switches, a.AccountID)
+	}
+	if !containsString(ds.deleted, "token-initial:main-account-initial") {
+		t.Fatalf("old account-bound root was not discarded before switching: %#v", ds.deleted)
+	}
 }
 
 func TestTryPrepareRootSessionChunkingSessionCapacityStaysOnAccount(t *testing.T) {
@@ -198,6 +247,9 @@ func TestTryPrepareRootSessionChunkingWithFailoverReplaysCompletePrompt(t *testi
 	}
 	if reconstructed := strings.Join(fragments, ""); reconstructed != original {
 		t.Fatalf("replayed fragments did not reconstruct full prompt: got=%d want=%d", promptcompat.PromptUnits(reconstructed), promptcompat.PromptUnits(original))
+	}
+	if ds.unpinnedCalls != 0 {
+		t.Fatalf("a session-bound fragment must never use an account-switching completion call: unpinned_calls=%d", ds.unpinnedCalls)
 	}
 }
 

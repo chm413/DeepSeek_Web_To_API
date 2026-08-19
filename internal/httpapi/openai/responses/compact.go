@@ -45,6 +45,11 @@ func (h *Handler) Compact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := responseStoreOwner(callerAuth)
+	previousResponseID := strings.TrimSpace(responseString(req["previous_response_id"]))
+	inheritedSessionKey := ""
+	if previousResponseID != "" {
+		inheritedSessionKey, _ = h.getResponseStore().getSessionKey(owner, previousResponseID)
+	}
 	config.Logger.Info("[responses_compact_request] received",
 		"trace_id", requestTraceID(r),
 		"owner_fingerprint", responseStateFingerprint(owner),
@@ -52,6 +57,7 @@ func (h *Handler) Compact(w http.ResponseWriter, r *http.Request) {
 		"model", strings.TrimSpace(responseString(req["model"])),
 		"stream", util.ToBool(req["stream"]),
 		"previous_response_id_present", strings.TrimSpace(responseString(req["previous_response_id"])) != "",
+		"inherited_session_key_present", inheritedSessionKey != "",
 		"input_items", responseStateItemCount(req["input"]),
 		"input_bytes", responseStateSize(req["input"]),
 		"message_items", responseStateItemCount(req["messages"]),
@@ -71,15 +77,36 @@ func (h *Handler) Compact(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	h.serveLocalCompaction(w, r, rawBody, req, false)
+	h.serveLocalCompaction(w, r, rawBody, req, false, inheritedSessionKey)
 }
 
 // serveLocalCompaction runs the local history reduction shared by the legacy
 // compact endpoint and the current Responses v2 compaction trigger. Resolving
 // a session-scoped auth object lets the normal dynamic upstream limit lookup
 // use the selected account without opening a DeepSeek chat session.
-func (h *Handler) serveLocalCompaction(w http.ResponseWriter, r *http.Request, rawBody []byte, req map[string]any, responsesV2 bool) {
-	a, err := h.Auth.DetermineWithSession(r, rawBody)
+func (h *Handler) serveLocalCompaction(w http.ResponseWriter, r *http.Request, rawBody []byte, req map[string]any, responsesV2 bool, inheritedSessionKey string) {
+	sessionBody := rawBody
+	if strings.TrimSpace(inheritedSessionKey) != "" {
+		if expandedBody, marshalErr := json.Marshal(req); marshalErr == nil {
+			sessionBody = expandedBody
+		}
+	}
+	var a *auth.RequestAuth
+	var err error
+	if strings.TrimSpace(inheritedSessionKey) != "" {
+		if resolver, ok := h.Auth.(interface {
+			DetermineWithSessionKey(req *http.Request, body []byte, sessionKey string) (*auth.RequestAuth, error)
+		}); ok {
+			a, err = resolver.DetermineWithSessionKey(r, sessionBody, inheritedSessionKey)
+		} else {
+			a, err = h.Auth.DetermineWithSession(r, sessionBody)
+			if a != nil {
+				a.SessionKey = inheritedSessionKey
+			}
+		}
+	} else {
+		a, err = h.Auth.DetermineWithSession(r, sessionBody)
+	}
 	if err != nil {
 		status := http.StatusUnauthorized
 		if err == auth.ErrNoAccount {
@@ -141,6 +168,10 @@ func (h *Handler) serveLocalCompaction(w http.ResponseWriter, r *http.Request, r
 	)
 	h.getResponseStore().putInputState(owner, responseID, stdReq.Messages,
 		stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
+	// A compaction response is still a Responses turn. Persist its session
+	// affinity so a later previous_response_id request cannot move the compacted
+	// branch to another managed account.
+	h.getResponseStore().putSessionKey(owner, responseID, a.SessionKey)
 	h.getResponseStore().put(owner, responseID, responseObj)
 	if stdReq.Stream {
 		writeLocalCompactionStream(w, responseObj, output)

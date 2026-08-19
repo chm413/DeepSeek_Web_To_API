@@ -70,13 +70,16 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	if strings.TrimSpace(c.Admin.Key) != "" || strings.TrimSpace(c.Admin.PasswordHash) != "" || strings.TrimSpace(c.Admin.JWTSecret) != "" || c.Admin.JWTExpireHours > 0 || c.Admin.JWTValidAfterUnix > 0 {
 		m["admin"] = c.Admin
 	}
-	if strings.TrimSpace(c.Server.Port) != "" || strings.TrimSpace(c.Server.BindAddr) != "" || strings.TrimSpace(c.Server.LogLevel) != "" || strings.TrimSpace(c.Server.StaticAdminDir) != "" || c.Server.AutoBuildWebUI != nil || c.Server.HTTPTotalTimeoutSeconds > 0 {
+	if strings.TrimSpace(c.Server.Port) != "" || strings.TrimSpace(c.Server.BindAddr) != "" || strings.TrimSpace(c.Server.LogLevel) != "" || strings.TrimSpace(c.Server.StaticAdminDir) != "" || c.Server.AutoBuildWebUI != nil || c.Server.HTTPTotalTimeoutSeconds > 0 || c.Server.RemoteFileUploadEnabled != nil {
 		m["server"] = c.Server
 	}
 	if strings.TrimSpace(c.Storage.DataDir) != "" ||
 		strings.TrimSpace(c.Storage.AccountsSQLitePath) != "" ||
 		strings.TrimSpace(c.Storage.ChatHistoryPath) != "" ||
 		strings.TrimSpace(c.Storage.ChatHistorySQLitePath) != "" ||
+		strings.TrimSpace(c.Storage.TokenUsageSQLitePath) != "" ||
+		strings.TrimSpace(c.Storage.SafetyWordsSQLitePath) != "" ||
+		strings.TrimSpace(c.Storage.SafetyIPsSQLitePath) != "" ||
 		strings.TrimSpace(c.Storage.RawStreamSampleRoot) != "" {
 		m["storage"] = c.Storage
 	}
@@ -265,6 +268,7 @@ func (c Config) Clone() Config {
 			StaticAdminDir:          c.Server.StaticAdminDir,
 			AutoBuildWebUI:          cloneBoolPtr(c.Server.AutoBuildWebUI),
 			HTTPTotalTimeoutSeconds: c.Server.HTTPTotalTimeoutSeconds,
+			RemoteFileUploadEnabled: cloneBoolPtr(c.Server.RemoteFileUploadEnabled),
 		},
 		Storage: c.Storage,
 		Cache: CacheConfig{

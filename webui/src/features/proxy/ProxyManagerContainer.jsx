@@ -192,18 +192,22 @@ function ProxiesTable({
                                     <button type="button" className="mt-0.5 shrink-0 text-muted-foreground" onClick={() => onToggle(proxy.id)} aria-label={t('proxyManager.selectProxy', { name: proxy.name })}>
                                         {selected.has(proxy.id) ? <CheckSquare2 className="h-4 w-4 text-primary" /> : <Square className="h-4 w-4" />}
                                     </button>
-                                    <div className="min-w-0">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <div className="font-medium text-foreground">{proxy.name || `${proxy.host}:${proxy.port}`}</div>
-                                        <span className="inline-flex items-center rounded-full border border-primary/20 bg-primary/10 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-primary">
-                                            {proxy.type}
-                                        </span>
-                                        {proxy.username && (
-                                            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/20 px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                                                <Shield className="w-3 h-3" />
-                                                {proxy.username}
-                                            </span>
-                                        )}
+                    <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <div className="font-medium text-foreground">{proxy.name || `${proxy.host}:${proxy.port}`}</div>
+                        {(() => {
+                            const usernamePreview = proxy.username_preview || proxy.username || ''
+                            const hasUsername = proxy.has_username || Boolean(usernamePreview)
+                            return hasUsername ? (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/20 px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                                    <Shield className="w-3 h-3" />
+                                    {usernamePreview || '********'}
+                                </span>
+                            ) : null
+                        })()}
+                        <span className="inline-flex items-center rounded-full border border-primary/20 bg-primary/10 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-primary">
+                            {proxy.type}
+                        </span>
                                         {proxy.core_managed && (
                                             <span className="inline-flex items-center gap-1 rounded-full border border-cyan-300/60 bg-cyan-50 px-2 py-1 text-[10px] font-medium text-cyan-700">
                                                 <Cpu className="w-3 h-3" />
@@ -649,7 +653,9 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
     const openCreate = () => { setEditingProxy(null); setForm(createEmptyProxyForm()); setShowModal(true) }
     const openEdit = (proxy) => {
         setEditingProxy(proxy)
-        setForm({ name: proxy.name || '', type: proxy.type || 'socks5h', host: proxy.host || '', port: proxy.port || 1080, username: proxy.username || '', password: '', uri: '' })
+        // Credential values are intentionally never returned by the admin API.
+        // A blank field means "keep the existing value" on update.
+        setForm({ name: proxy.name || '', type: proxy.type || 'socks5h', host: proxy.host || '', port: proxy.port || 1080, username: '', password: '', uri: '' })
         setShowModal(true)
     }
     const closeModal = () => { setShowModal(false); setEditingProxy(null); setForm(createEmptyProxyForm()) }
@@ -661,9 +667,13 @@ export default function ProxyManagerContainer({ config, onRefresh, onMessage, au
         }
         setSaving(true)
         try {
+            const payload = { ...form, port: Number(form.port) }
+            if (editingProxy?.id && !String(payload.username || '').trim()) {
+                delete payload.username
+            }
             const res = await apiFetch(editingProxy?.id ? `/admin/proxies/${encodeURIComponent(editingProxy.id)}` : '/admin/proxies', {
                 method: editingProxy?.id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...form, port: Number(form.port) }),
+                body: JSON.stringify(payload),
             })
             const data = await readApiResponse(res, t('settings.nonJsonResponse', { status: res.status }))
             if (!res.ok) { onMessage('error', data.detail || t('messages.requestFailed')); return }

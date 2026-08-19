@@ -2,10 +2,25 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"DeepSeek_Web_To_API/internal/config"
 )
+
+type adminRuntimeTestConfig struct {
+	key           string
+	passwordHash  string
+	jwtSecret     string
+	expireHours   int
+	jwtValidAfter int64
+}
+
+func (c adminRuntimeTestConfig) AdminKey() string              { return c.key }
+func (c adminRuntimeTestConfig) AdminPasswordHash() string     { return c.passwordHash }
+func (c adminRuntimeTestConfig) AdminJWTSecret() string        { return c.jwtSecret }
+func (c adminRuntimeTestConfig) AdminJWTExpireHours() int      { return c.expireHours }
+func (c adminRuntimeTestConfig) AdminJWTValidAfterUnix() int64 { return c.jwtValidAfter }
 
 func TestJWTCreateVerify(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_ADMIN_KEY", "test-admin-key")
@@ -124,5 +139,25 @@ func TestAdminRuntimeSecurityUsesUnifiedConfigSecrets(t *testing.T) {
 	}
 	if _, err := VerifyJWTWithStore(token, store); err != nil {
 		t.Fatalf("verify jwt with config secret failed: %v", err)
+	}
+}
+
+func TestValidateAdminRuntimeSecurityRejectsKnownAdminKeyPlaceholder(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_ADMIN_KEY", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_JWT_SECRET", "")
+	store := adminRuntimeTestConfig{key: "change-me-admin-key", jwtSecret: "a-unique-jwt-secret"}
+	err := ValidateAdminRuntimeSecurity(store)
+	if err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("expected admin key placeholder rejection, got %v", err)
+	}
+}
+
+func TestValidateAdminRuntimeSecurityRejectsKnownJWTPlaceholder(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_ADMIN_KEY", "")
+	t.Setenv("DEEPSEEK_WEB_TO_API_JWT_SECRET", "")
+	store := adminRuntimeTestConfig{key: "a-unique-admin-key", jwtSecret: "change-me-jwt-secret"}
+	err := ValidateAdminRuntimeSecurity(store)
+	if err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("expected JWT placeholder rejection, got %v", err)
 	}
 }

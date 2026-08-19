@@ -103,7 +103,7 @@ func (h *Handler) addKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
-	key := strings.TrimSpace(chi.URLParam(r, "key"))
+	key := keySelectorFromRequest(r)
 	if key == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "key 不能为空"})
 		return
@@ -119,13 +119,7 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 	nextKey, nextKeyOK := fieldStringOptional(req, "key")
 
 	err := h.Store.Update(func(c *config.Config) error {
-		idx := -1
-		for i, item := range c.APIKeys {
-			if item.Key == key {
-				idx = i
-				break
-			}
-		}
+		idx := findAPIKeyIndex(c.APIKeys, key)
 		if idx < 0 {
 			return fmt.Errorf("key 不存在")
 		}
@@ -134,7 +128,7 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 			if nextKey == "" {
 				return fmt.Errorf("key 不能为空")
 			}
-			if nextKey != key {
+			if nextKey != c.APIKeys[idx].Key {
 				for _, item := range c.APIKeys {
 					if item.Key == nextKey {
 						return fmt.Errorf("key 已存在")
@@ -159,15 +153,9 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteKey(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
+	key := keySelectorFromRequest(r)
 	err := h.Store.Update(func(c *config.Config) error {
-		idx := -1
-		for i, item := range c.APIKeys {
-			if item.Key == key {
-				idx = i
-				break
-			}
-		}
+		idx := findAPIKeyIndex(c.APIKeys, key)
 		if idx < 0 {
 			return fmt.Errorf("key 不存在")
 		}
@@ -179,6 +167,24 @@ func (h *Handler) deleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "total_keys": len(h.Store.Snapshot().Keys)})
+}
+
+func findAPIKeyIndex(keys []config.APIKey, selector string) int {
+	selector = strings.TrimSpace(selector)
+	for i, item := range keys {
+		if item.Key == selector || apiKeyID(item.Key) == selector {
+			return i
+		}
+	}
+	return -1
+}
+
+func keySelectorFromRequest(r *http.Request) string {
+	selector := strings.TrimSpace(chi.URLParam(r, "key"))
+	if selector == "" {
+		selector = strings.TrimSpace(chi.URLParam(r, "id"))
+	}
+	return selector
 }
 
 func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {

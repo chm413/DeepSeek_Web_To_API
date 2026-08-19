@@ -4,18 +4,26 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
 func newAdminProxyTestHandler(t *testing.T, raw string) *Handler {
 	t.Helper()
+	// Keep fixtures that model a successful health probe fresh as the routing
+	// policy now rejects stale probe results.
+	raw = strings.ReplaceAll(raw, `"last_test_at_unix":10`, `"last_test_at_unix":`+fmt.Sprint(time.Now().Unix()))
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", raw)
 	store := config.LoadStore()
 	return &Handler{
@@ -101,6 +109,45 @@ func TestAddCoreProxyStoresURIWithoutExposingIt(t *testing.T) {
 	}
 	if bytes.Contains(readRec.Body.Bytes(), []byte(uri)) || bytes.Contains(readRec.Body.Bytes(), []byte(`"uri"`)) {
 		t.Fatalf("safe config response exposed proxy URI: %s", readRec.Body.String())
+	}
+}
+
+func TestProxyResponseMasksUsernameAndBlankEditPreservesIt(t *testing.T) {
+	response := proxyResponse(config.Proxy{ID: "proxy-1", Username: "proxy-user", LastTestError: "request https://user:secret@example.invalid/path?token=secret failed"})
+	if _, exposed := response["username"]; exposed {
+		t.Fatalf("proxy response exposed raw username: %#v", response)
+	}
+	if response["has_username"] != true || response["username_preview"] != "pr****er" {
+		t.Fatalf("unexpected username metadata: %#v", response)
+	}
+	if strings.Contains(response["last_test_error"].(string), "secret") {
+		t.Fatalf("proxy test error exposed secret: %#v", response["last_test_error"])
+	}
+
+	h := newAdminProxyTestHandler(t, `{"proxies":[{"id":"proxy-1","type":"socks5","host":"127.0.0.1","port":1080,"username":"proxy-user","password":"proxy-password"}]}`)
+	r := chi.NewRouter()
+	r.Put("/admin/proxies/{proxyID}", h.updateProxy)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/admin/proxies/proxy-1", bytes.NewBufferString(`{"type":"socks5","host":"127.0.0.1","port":1081}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blank credential edit failed: %d %s", rec.Code, rec.Body.String())
+	}
+	updated := h.Store.Snapshot().Proxies[0]
+	if updated.Username != "proxy-user" || updated.Password != "proxy-password" || updated.Port != 1081 {
+		t.Fatalf("blank edit did not preserve credentials: %#v", updated)
+	}
+}
+
+func TestSubscriptionResponseSanitizesLegacyLastError(t *testing.T) {
+	response := subscriptionResponse(config.ProxySubscription{
+		ID:        "sub-1",
+		LastError: "legacy fetch failed for https://user:secret@example.invalid/list?token=private-token",
+	})
+	lastError, _ := response["last_error"].(string)
+	for _, secret := range []string{"user:secret", "private-token", "example.invalid"} {
+		if strings.Contains(lastError, secret) {
+			t.Fatalf("subscription response leaked legacy error data %q: %q", secret, lastError)
+		}
 	}
 }
 
@@ -397,5 +444,33 @@ func TestTestProxyUsesStoredProxy(t *testing.T) {
 	}
 	if ok, _ := payload["success"].(bool); !ok {
 		t.Fatalf("expected success payload, got %#v", payload)
+	}
+}
+
+func TestReconcileAndSyncReloginsCommittedAutomaticRouteOnSyncFailure(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_policy":{"auto_route_enabled":true},
+		"proxies":[{"id":"healthy","type":"socks5","host":"127.0.0.1","port":1080,"last_test_at_unix":10,"last_test_success":true}],
+		"accounts":[{"email":"auto@example.com","password":"pwd","proxy_auto_route":true,"token":"old-token"}]
+	}`)
+	originalSync := syncProxyRoutes
+	t.Cleanup(func() { syncProxyRoutes = originalSync })
+	syncProxyRoutes = func(context.Context, xrayproxy.CoreConfigStore) error {
+		return errors.New("simulated xray sync failure")
+	}
+
+	results, err := h.reconcileAndSyncProxyRoutes(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "simulated xray sync failure") {
+		t.Fatalf("expected sync failure, results=%#v err=%v", results, err)
+	}
+	account, ok := h.Store.FindAccount("auto@example.com")
+	if !ok {
+		t.Fatal("automatic account disappeared")
+	}
+	if account.ProxyID != "healthy" || account.Token != "token" {
+		t.Fatalf("committed route was not compensated with a relogin: %#v", account)
+	}
+	if len(results) != 1 || !results[account.Identifier()]["success"].(bool) {
+		t.Fatalf("expected relogin result for committed route, got %#v", results)
 	}
 }

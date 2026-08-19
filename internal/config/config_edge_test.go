@@ -229,6 +229,38 @@ func TestConfigJSONRoundtrip(t *testing.T) {
 	}
 }
 
+func TestConfigJSONRoundtripKeepsServerAndStoragePaths(t *testing.T) {
+	remoteUpload := true
+	cfg := Config{
+		Server: ServerConfig{RemoteFileUploadEnabled: &remoteUpload},
+		Storage: StorageConfig{
+			TokenUsageSQLitePath:  "data/token_usage.sqlite",
+			SafetyWordsSQLitePath: "data/safety_words.sqlite",
+			SafetyIPsSQLitePath:   "data/safety_ips.sqlite",
+		},
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	text := string(encoded)
+	for _, want := range []string{"remote_file_upload_enabled", "token_usage_sqlite_path", "safety_words_sqlite_path", "safety_ips_sqlite_path"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("marshaled config omitted %q: %s", want, text)
+		}
+	}
+	var decoded Config
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if decoded.Server.RemoteFileUploadEnabled == nil || !*decoded.Server.RemoteFileUploadEnabled {
+		t.Fatalf("remote upload setting was not preserved: %#v", decoded.Server)
+	}
+	if decoded.Storage.TokenUsageSQLitePath != cfg.Storage.TokenUsageSQLitePath || decoded.Storage.SafetyWordsSQLitePath != cfg.Storage.SafetyWordsSQLitePath || decoded.Storage.SafetyIPsSQLitePath != cfg.Storage.SafetyIPsSQLitePath {
+		t.Fatalf("storage paths were not preserved: %#v", decoded.Storage)
+	}
+}
+
 func TestAutoDeleteModeResolution(t *testing.T) {
 	tests := []struct {
 		name string

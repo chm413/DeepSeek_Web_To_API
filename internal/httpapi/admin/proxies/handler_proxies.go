@@ -3,6 +3,7 @@ package proxies
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,13 +14,24 @@ import (
 
 	"DeepSeek_Web_To_API/internal/config"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
+	adminshared "DeepSeek_Web_To_API/internal/httpapi/admin/shared"
 	"DeepSeek_Web_To_API/internal/proxyservice"
+	"DeepSeek_Web_To_API/internal/proxysubscription"
 	"DeepSeek_Web_To_API/internal/proxyuri"
 	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
 var proxyConnectivityTester = func(ctx context.Context, proxy config.Proxy, core config.ProxyCoreConfig) map[string]any {
 	return dsclient.TestProxyConnectivityWithCore(ctx, proxy, core)
+}
+
+// syncProxyRoutes is replaceable in package tests. Route mutations are
+// committed before the Xray synchronization step, so callers must be able to
+// exercise and preserve the partial-commit recovery path.
+var syncProxyRoutes = func(ctx context.Context, store xrayproxy.CoreConfigStore) error {
+	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return xrayproxy.SyncAssignedWithStore(syncCtx, store)
 }
 
 func validateProxyMutation(cfg *config.Config) error {
@@ -43,7 +55,8 @@ func proxyResponse(proxy config.Proxy) map[string]any {
 		"type":                 proxy.Type,
 		"host":                 proxy.Host,
 		"port":                 proxy.Port,
-		"username":             proxy.Username,
+		"has_username":         strings.TrimSpace(proxy.Username) != "",
+		"username_preview":     adminshared.MaskSecretPreview(proxy.Username),
 		"has_password":         strings.TrimSpace(proxy.Password) != "",
 		"has_uri":              strings.TrimSpace(proxy.URI) != "",
 		"core_managed":         proxyuri.IsCoreType(proxy.Type),
@@ -56,11 +69,18 @@ func proxyResponse(proxy config.Proxy) map[string]any {
 		"last_test_success":    proxy.LastTestSuccess,
 		"last_latency_ms":      proxy.LastLatencyMS,
 		"last_http_status":     proxy.LastHTTPStatus,
-		"last_test_error":      proxy.LastTestError,
+		"last_test_error":      safeProxyTestError(proxy.LastTestError),
 		"last_exit_ip":         proxy.LastExitIP,
 		"last_country":         proxy.LastCountry,
 		"last_colo":            proxy.LastColo,
 	}
+}
+
+func safeProxyTestError(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return proxysubscription.SanitizeError(fmt.Errorf("%s", value))
 }
 
 func (h *Handler) listProxies(w http.ResponseWriter, _ *http.Request) {
@@ -71,7 +91,7 @@ func (h *Handler) listProxies(w http.ResponseWriter, _ *http.Request) {
 	for _, proxy := range proxies {
 		item := proxyResponse(proxy)
 		normalized := config.NormalizeProxy(proxy)
-		item["route_available"] = !normalized.Disabled && normalized.LastTestAtUnix > 0 && normalized.LastTestSuccess
+		item["route_available"] = proxyservice.ProxyAvailableForRouting(normalized, snapshot.ProxyPolicy)
 		item["assigned_account_count"] = assigned[normalized.ID]
 		item["auto_routed_account_count"] = automatic[normalized.ID]
 		item["is_fallback"] = normalized.ID != "" && normalized.ID == strings.TrimSpace(snapshot.ProxyPolicy.FallbackProxyID)
@@ -112,6 +132,8 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	proxy := toProxy(req)
 	proxy.ID = strings.TrimSpace(proxyID)
+	_, usernameProvided := req["username"]
+	clearUsername, _ := req["clear_username"].(bool)
 
 	err := h.Store.Update(func(c *config.Config) error {
 		for i, existing := range c.Proxies {
@@ -121,6 +143,11 @@ func (h *Handler) updateProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			if proxy.Password == "" {
 				proxy.Password = existing.Password
+			}
+			if !clearUsername && (!usernameProvided || strings.TrimSpace(proxy.Username) == "") {
+				// Admin list responses only expose a preview. An edit that leaves
+				// the username field blank must preserve the existing credential.
+				proxy.Username = existing.Username
 			}
 			if proxy.URI == "" && proxyuri.IsCoreType(proxy.Type) && proxy.Type == existing.Type {
 				proxy.URI = existing.URI
@@ -196,15 +223,20 @@ func (h *Handler) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
-		return
-	}
-	relogin := h.reloginRouteChanges(r.Context(), routeChanges, false)
+	autoRelogins, routeErr := h.reconcileAndSyncProxyRoutes(r.Context())
+	// Deletion has already committed manual route moves. Always process them,
+	// including when the follow-up Xray sync reports an error.
+	manualRelogins := h.reloginRouteChanges(r.Context(), routeChanges, false)
 	h.Pool.Reset()
-	response := map[string]any{"success": true, "route_changes": routeChanges}
-	if len(relogin) > 0 {
-		response["relogin"] = relogin
+	response := map[string]any{"success": routeErr == nil, "route_changes": routeChanges}
+	if len(autoRelogins) > 0 || len(manualRelogins) > 0 {
+		response["relogin"] = mergeReloginResults(autoRelogins, manualRelogins)
+	}
+	if routeErr != nil {
+		response["route_error"] = routeErr.Error()
+		response["partial"] = true
+		writeJSON(w, http.StatusBadGateway, response)
+		return
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -297,22 +329,23 @@ func (h *Handler) updateAccountProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Pool.Reset()
-	autoRelogins, err := h.reconcileAndSyncProxyRoutes(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
-		return
-	}
+	autoRelogins, routeErr := h.reconcileAndSyncProxyRoutes(r.Context())
 	effective, _ := h.Store.FindAccount(identifier)
 	routeChanged := originalProxyID != strings.TrimSpace(effective.ProxyID)
-	response := map[string]any{"success": true, "proxy_id": effective.ProxyID, "auto_route": autoRoute, "route_changed": routeChanged}
-	if routeChanged && !autoRoute {
+	response := map[string]any{"success": routeErr == nil, "proxy_id": effective.ProxyID, "auto_route": autoRoute, "route_changed": routeChanged}
+	if routeChanged {
+		// Setting an automatic route also clears the old token. Re-login the
+		// effective assignment directly; ReconcileAutoRoutes may consider it
+		// valid and therefore have no entry in autoRelogins.
 		response["relogin"] = h.reloginAccountAfterRouteChange(r.Context(), identifier)
-	} else if autoRoute {
-		if relogin, ok := autoRelogins[effective.Identifier()]; ok {
-			response["relogin"] = relogin
-		} else {
-			response["relogin"] = map[string]any{"success": true, "changed": false}
-		}
+	} else if relogin, ok := autoRelogins[effective.Identifier()]; ok {
+		response["relogin"] = relogin
+	}
+	if routeErr != nil {
+		response["route_error"] = routeErr.Error()
+		response["partial"] = true
+		writeJSON(w, http.StatusBadGateway, response)
+		return
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -345,8 +378,26 @@ func (h *Handler) reconcileAndSyncProxyRoutes(ctx context.Context) (map[string]m
 	if err != nil {
 		return nil, err
 	}
+	if len(changes) > 0 {
+		// ReconcileAutoRoutes has already invalidated the prior tokens. Clear
+		// the pool before any sync/relogin result is returned so a request can
+		// never reuse a token bound to the previous egress route.
+		h.Pool.Reset()
+	}
 	if err := syncProxyRoutes(ctx, h.Store); err != nil {
-		return nil, err
+		// The configuration mutation cannot be rolled back safely at this
+		// point. Still attempt account re-login for every committed route
+		// change; otherwise a transient Xray failure leaves accounts tokenless
+		// until some unrelated future route event happens.
+		results := h.reloginAutoRouteChanges(ctx, changes)
+		if len(changes) > 0 {
+			config.Logger.Warn("[proxy_router] route sync failed after committed reconciliation",
+				"accounts", len(changes),
+				"available_nodes", len(proxyservice.AvailableRoutePool(h.Store.Snapshot())),
+				"error", err,
+			)
+		}
+		return results, err
 	}
 	results := h.reloginAutoRouteChanges(ctx, changes)
 	if len(changes) > 0 {
@@ -411,10 +462,4 @@ func (h *Handler) reloginRouteChanges(ctx context.Context, changes []proxyservic
 		results[result.accountID] = result.value
 	}
 	return results
-}
-
-func syncProxyRoutes(ctx context.Context, store xrayproxy.CoreConfigStore) error {
-	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	return xrayproxy.SyncAssignedWithStore(syncCtx, store)
 }

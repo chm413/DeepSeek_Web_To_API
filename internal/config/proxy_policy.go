@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 const (
 	DefaultProxyHealthCheckIntervalMinutes        = 15
 	DefaultProxyAutoDisableAfterFailures          = 3
@@ -52,4 +54,36 @@ func (s ProxySubscription) EffectiveUpdateIntervalMinutes(policy ProxyPolicyConf
 		return s.UpdateIntervalMinutes
 	}
 	return policy.SubscriptionIntervalMinutes()
+}
+
+// ProxyRouteHealthMaxAge is the maximum age of a successful probe that may
+// still be used for egress routing. Keep it in config so the router, request
+// client, and admin status endpoint apply the same freshness rule.
+func ProxyRouteHealthMaxAge(policy ProxyPolicyConfig) time.Duration {
+	maxAge := time.Duration(policy.HealthIntervalMinutes()*2) * time.Minute
+	if maxAge < 30*time.Minute {
+		return 30 * time.Minute
+	}
+	return maxAge
+}
+
+// ProxyAvailableForRouting reports whether a proxy is currently safe to use
+// as an automatically selected egress route. Explicit manual routes may use
+// a configured fallback, but automatic routes must not keep using a stale
+// health result indefinitely.
+func ProxyAvailableForRouting(proxy Proxy, policy ProxyPolicyConfig) bool {
+	return ProxyAvailableForRoutingAt(proxy, time.Now().Unix(), ProxyRouteHealthMaxAge(policy))
+}
+
+// ProxyAvailableForRoutingAt is the deterministic form used by tests and by
+// callers that already have a single reference timestamp.
+func ProxyAvailableForRoutingAt(proxy Proxy, nowUnix int64, maxAge time.Duration) bool {
+	proxy = NormalizeProxy(proxy)
+	if proxy.Disabled || proxy.LastTestAtUnix <= 0 || !proxy.LastTestSuccess {
+		return false
+	}
+	if maxAge <= 0 || nowUnix <= proxy.LastTestAtUnix {
+		return true
+	}
+	return nowUnix-proxy.LastTestAtUnix <= int64(maxAge/time.Second)
 }

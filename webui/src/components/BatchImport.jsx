@@ -42,23 +42,6 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
         }
     }
 
-    const handleExport = async () => {
-        try {
-            const res = await apiFetch('/admin/export')
-            if (res.ok) {
-                const data = await res.json()
-                const cfg = JSON.parse(data.json)
-                const lines = (cfg.accounts || [])
-                    .map(acc => `${acc.email || acc.mobile || ''}:${acc.password || ''}`)
-                    .filter(line => !line.startsWith(':') && !line.endsWith(':'))
-                setAccountInput(lines.join('\n'))
-                onMessage('success', t('batchImport.currentAccountsLoaded'))
-            }
-        } catch (e) {
-            onMessage('error', t('batchImport.fetchConfigFailed'))
-        }
-    }
-
     const copyBase64 = async () => {
         try {
             const res = await apiFetch('/admin/export')
@@ -114,15 +97,12 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
             </div>
 
             <div className="lg:col-span-2 flex flex-col ops-panel overflow-hidden min-h-[400px] lg:h-full">
-                <div className="p-4 border-b border-border flex items-center justify-between bg-slate-50">
+                    <div className="p-4 border-b border-border flex items-center justify-between bg-slate-50">
                     <h3 className="font-semibold flex items-center gap-2">
                         <Upload className="w-4 h-4 text-primary" />
                         {t('batchImport.accountsEditor')}
                     </h3>
                     <div className="flex gap-2">
-                        <button onClick={handleExport} className="btn btn-secondary btn-sm">
-                            {t('batchImport.loadCurrentAccounts')}
-                        </button>
                         <button onClick={handleImport} disabled={loading} className="btn btn-primary btn-sm">
                             {loading ? t('batchImport.importing') : t('batchImport.applyAccounts')}
                         </button>

@@ -12,8 +12,9 @@ case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
 esac
 
 export GOCACHE="${GOCACHE:-${ROOT_DIR}/.tmp/go-build-cache}"
+export GOTMPDIR="${GOTMPDIR:-${ROOT_DIR}/.tmp/go-tmp}"
 export GOLANGCI_LINT_CACHE="${GOLANGCI_LINT_CACHE:-${ROOT_DIR}/.tmp/golangci-lint-cache}"
-mkdir -p "$GOCACHE" "$GOLANGCI_LINT_CACHE"
+mkdir -p "$GOCACHE" "$GOTMPDIR" "$GOLANGCI_LINT_CACHE"
 
 bootstrap_golangci_lint() {
   local version_no_v os arch artifact archive_url tmp_dir archive_path
@@ -52,7 +53,10 @@ bootstrap_golangci_lint() {
     archive_path="${tmp_dir}/golangci-lint.tar.gz"
   fi
 
-  curl -sSfL "${archive_url}" -o "${archive_path}"
+  # GitHub release assets occasionally return a transient 429 from the
+  # hosted-runner egress. Retry the download here instead of failing the
+  # entire quality gate before linting starts.
+  curl --retry 5 --retry-delay 3 --retry-all-errors -sSfL "${archive_url}" -o "${archive_path}"
   if [[ "$os" == "windows" ]]; then
     unzip -q "${archive_path}" -d "${tmp_dir}"
   else

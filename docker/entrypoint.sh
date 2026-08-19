@@ -58,10 +58,99 @@ read_marker() {
   return 1
 }
 
+hash_file() {
+  hash_output=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash_output="$(sha256sum -- "$1")" || return 1
+  elif [ -x /usr/local/bin/busybox ]; then
+    hash_output="$(/usr/local/bin/busybox sha256sum "$1")" || return 1
+  else
+    return 1
+  fi
+  printf '%s\n' "${hash_output%% *}"
+}
+
+metadata_value() {
+  metadata_key="$1"
+  metadata_path="$2"
+  case "${metadata_key}" in
+    tag)
+      sed -n 's/.*"tag":"\([^"]*\)".*/\1/p' "${metadata_path}" | head -n 1
+      ;;
+    binary_sha256)
+      sed -n 's/.*"binary_sha256":"\([^"]*\)".*/\1/p' "${metadata_path}" | head -n 1
+      ;;
+    static_tree_sha256)
+      sed -n 's/.*"static_tree_sha256":"\([^"]*\)".*/\1/p' "${metadata_path}" | head -n 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_sha256() {
+  hash_value="$1"
+  [ "${#hash_value}" -eq 64 ] || return 1
+  case "${hash_value}" in
+    *[!0123456789abcdefABCDEF]* | "") return 1 ;;
+  esac
+  return 0
+}
+
+static_tree_hash() {
+  static_dir="$1"
+  tree_input="${self_update_root}/.static-tree.$$"
+  [ -d "${static_dir}" ] || return 1
+  # Symlinks are rejected even when they point inside the candidate tree.
+  if find "${static_dir}" -type l -print -quit 2>/dev/null | grep . >/dev/null 2>&1; then
+    return 1
+  fi
+  (umask 077 && : > "${tree_input}") || return 1
+  if ! find "${static_dir}" -type f -print 2>/dev/null | sort | while IFS= read -r file; do
+    rel=${file#"${static_dir}"/}
+    printf '%s\000' "${rel}" >> "${tree_input}" || exit 1
+    file_hash="$(hash_file "${file}" 2>/dev/null || true)"
+    [ "${#file_hash}" -eq 64 ] || exit 1
+    printf '%s\000' "${file_hash}" >> "${tree_input}" || exit 1
+  done; then
+    rm -f "${tree_input}"
+    return 1
+  fi
+  if [ ! -s "${tree_input}" ]; then
+    rm -f "${tree_input}"
+    return 1
+  fi
+  tree_hash="$(hash_file "${tree_input}" 2>/dev/null || true)"
+  rm -f "${tree_input}"
+  is_sha256 "${tree_hash}" || return 1
+  printf '%s\n' "${tree_hash}"
+}
+
+release_integrity_is_valid() {
+  release_tag="$1"
+  release_dir="${self_update_root}/versions/${release_tag}"
+  metadata_path="${release_dir}/.verified.json"
+  [ -f "${metadata_path}" ] && [ ! -L "${metadata_path}" ] || return 1
+  declared_tag="$(metadata_value tag "${metadata_path}" 2>/dev/null || true)"
+  [ "${declared_tag}" = "${release_tag}" ] || return 1
+  declared_binary_hash="$(metadata_value binary_sha256 "${metadata_path}" 2>/dev/null || true)"
+  is_sha256 "${declared_binary_hash}" || return 1
+  actual_binary_hash="$(hash_file "${release_dir}/deepseek-web-to-api" 2>/dev/null || true)"
+  [ "${actual_binary_hash}" = "${declared_binary_hash}" ] || return 1
+  declared_static_hash="$(metadata_value static_tree_sha256 "${metadata_path}" 2>/dev/null || true)"
+  is_sha256 "${declared_static_hash}" || return 1
+  actual_static_hash="$(static_tree_hash "${release_dir}/static/admin" 2>/dev/null || true)"
+  [ "${actual_static_hash}" = "${declared_static_hash}" ] || return 1
+  return 0
+}
+
 release_is_runnable() {
   release_tag="$1"
   release_dir="${self_update_root}/versions/${release_tag}"
-  [ -x "${release_dir}/deepseek-web-to-api" ] && [ -d "${release_dir}/static/admin" ]
+  [ -x "${release_dir}/deepseek-web-to-api" ] && [ ! -L "${release_dir}/deepseek-web-to-api" ] && \
+    [ -d "${release_dir}/static/admin" ] && [ ! -L "${release_dir}/static/admin" ] && \
+    release_integrity_is_valid "${release_tag}"
 }
 
 tag_is_newer() {
@@ -209,6 +298,19 @@ while :; do
     immutable_tag="$(read_marker "${immutable_version_file}" 2>/dev/null || true)"
     if [ -n "${current_tag}" ] && [ "${current_tag}" = "${failed_tag}" ]; then
       printf '%s\n' "[self-update] quarantined persistent release will not be started: ${current_tag}" >&2
+      printf '%s\n' "[self-update] starting immutable image release: ${immutable_tag:-unknown}" >&2
+    elif [ -n "${current_tag}" ] && ! release_is_runnable "${current_tag}"; then
+      # A pending candidate can restore current.version to the immutable
+      # image's tag. That tag is intentionally not present in the persistent
+      # versions directory, so it is not a tampered candidate and must not
+      # overwrite failed.version while being used as the fallback.
+      if [ -n "${immutable_tag}" ] && [ "${current_tag}" = "${immutable_tag}" ]; then
+        rm -f "${self_update_root}/current.version"
+        printf '%s\n' "[self-update] persistent marker matches immutable image; using image release: ${immutable_tag}" >&2
+      else
+        mark_failed_candidate "${current_tag}" || true
+        printf '%s\n' "[self-update] persistent release failed integrity validation; quarantining: ${current_tag}" >&2
+      fi
       printf '%s\n' "[self-update] starting immutable image release: ${immutable_tag:-unknown}" >&2
     elif [ -n "${current_tag}" ] && release_is_runnable "${current_tag}" && { [ -z "${immutable_tag}" ] || tag_is_newer "${current_tag}" "${immutable_tag}"; }; then
       release_dir="${self_update_root}/versions/${current_tag}"

@@ -16,6 +16,28 @@ type AutoRouteChange struct {
 	Reason      string `json:"reason"`
 }
 
+// SubscriptionRouteMigrationError identifies a subscription operation that
+// cannot be completed without leaving an account on a removed node or on a
+// direct route. Callers can surface this as a conflict and leave the config
+// untouched.
+type SubscriptionRouteMigrationError struct {
+	err error
+}
+
+func (e *SubscriptionRouteMigrationError) Error() string {
+	if e == nil || e.err == nil {
+		return "subscription route migration cannot be completed safely"
+	}
+	return e.err.Error()
+}
+
+func (e *SubscriptionRouteMigrationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
 type RoutePoolNode struct {
 	ProxyID            string `json:"proxy_id"`
 	LatencyMS          int    `json:"latency_ms"`
@@ -50,7 +72,7 @@ func AvailableRoutePool(cfg config.Config) []RoutePoolNode {
 	nodes := make([]RoutePoolNode, 0, len(cfg.Proxies))
 	for _, raw := range cfg.Proxies {
 		proxy := config.NormalizeProxy(raw)
-		if !proxyAvailableForRouting(proxy) {
+		if !proxyAvailableForRoutingWithPolicy(proxy, cfg.ProxyPolicy) {
 			continue
 		}
 		nodes = append(nodes, RoutePoolNode{
@@ -75,6 +97,13 @@ func AvailableRoutePool(cfg config.Config) []RoutePoolNode {
 		return nodes[i].ProxyID < nodes[j].ProxyID
 	})
 	return nodes
+}
+
+// ProxyAvailableForRouting is the canonical health/freshness check used by
+// both route assignment and administrative status responses. Keeping this
+// exported wrapper avoids UI/API code drifting from the routing policy.
+func ProxyAvailableForRouting(proxy config.Proxy, policy config.ProxyPolicyConfig) bool {
+	return config.ProxyAvailableForRouting(proxy, policy)
 }
 
 // ReconcileAutoRoutes keeps valid assignments sticky. It only assigns an
@@ -130,7 +159,7 @@ func ReassignDeletedProxyRoutes(cfg *config.Config, deleted map[string]struct{})
 			continue
 		}
 		remaining[proxy.ID] = proxy
-		if proxyAvailableForRouting(proxy) {
+		if proxyAvailableForRoutingWithPolicy(proxy, cfg.ProxyPolicy) {
 			available[proxy.ID] = proxy
 		}
 	}
@@ -222,6 +251,60 @@ func ReassignDeletedProxyRoutes(cfg *config.Config, deleted map[string]struct{})
 	return changes, nil
 }
 
+// ReassignSubscriptionRemovedRoutes plans route moves for nodes that a
+// subscription refresh or deletion is about to remove. A fallback node that
+// is itself being removed cannot be silently cleared when manual accounts
+// still depend on it; the operation is rejected instead. Automatic accounts
+// may proceed when the normal healthy route pool can provide replacements.
+func ReassignSubscriptionRemovedRoutes(cfg *config.Config, deleted map[string]struct{}) ([]AutoRouteChange, error) {
+	if cfg == nil || len(deleted) == 0 {
+		return nil, nil
+	}
+	wanted := make(map[string]struct{}, len(deleted))
+	for id := range deleted {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	fallbackID := strings.TrimSpace(cfg.ProxyPolicy.FallbackProxyID)
+	fallbackRemoved := false
+	if fallbackID != "" {
+		_, fallbackRemoved = wanted[fallbackID]
+	}
+	manualAffected := false
+	for _, account := range cfg.Accounts {
+		if account.ProxyAutoRoute {
+			continue
+		}
+		if _, removing := wanted[strings.TrimSpace(account.ProxyID)]; removing {
+			manualAffected = true
+			break
+		}
+	}
+	if fallbackRemoved && manualAffected {
+		return nil, &SubscriptionRouteMigrationError{err: errors.New("cannot remove subscription nodes while manual accounts require the configured fallback proxy")}
+	}
+	if fallbackRemoved {
+		// No manual account depends on the removed fallback. Clear it before
+		// planning automatic moves so the deleted ID can never be persisted as a
+		// fallback or interpreted as a direct route.
+		cfg.ProxyPolicy.FallbackProxyID = ""
+	}
+	changes, err := ReassignDeletedProxyRoutes(cfg, wanted)
+	if err != nil {
+		return nil, &SubscriptionRouteMigrationError{err: err}
+	}
+	for _, account := range cfg.Accounts {
+		if _, removing := wanted[strings.TrimSpace(account.ProxyID)]; removing {
+			return nil, &SubscriptionRouteMigrationError{err: errors.New("subscription route migration left an account on a removed proxy")}
+		}
+	}
+	return changes, nil
+}
+
 func activeAssignmentsExcluding(cfg config.Config, excluded map[string]struct{}) map[string]int {
 	counts := make(map[string]int)
 	for _, account := range cfg.Accounts {
@@ -256,7 +339,7 @@ func applyAutoRouteChanges(cfg *config.Config) []AutoRouteChange {
 	available := make(map[string]config.Proxy)
 	for _, raw := range cfg.Proxies {
 		proxy := config.NormalizeProxy(raw)
-		if proxyAvailableForRouting(proxy) {
+		if proxyAvailableForRoutingWithPolicy(proxy, cfg.ProxyPolicy) {
 			available[proxy.ID] = proxy
 		}
 	}
@@ -280,6 +363,13 @@ func applyAutoRouteChanges(cfg *config.Config) []AutoRouteChange {
 			continue
 		}
 		nextID := leastAssignedRoute(available, counts)
+		if nextID == "" {
+			// Do not turn a managed egress route into an empty assignment when
+			// every node is unhealthy. The client keeps this account unavailable
+			// until a probe recovers a route; it must never silently fall back to
+			// direct egress.
+			continue
+		}
 		if nextID == currentID {
 			continue
 		}
@@ -324,8 +414,8 @@ func leastAssignedRoute(available map[string]config.Proxy, counts map[string]int
 	return ids[0]
 }
 
-func proxyAvailableForRouting(proxy config.Proxy) bool {
-	return !proxy.Disabled && proxy.LastTestAtUnix > 0 && proxy.LastTestSuccess
+func proxyAvailableForRoutingWithPolicy(proxy config.Proxy, policy config.ProxyPolicyConfig) bool {
+	return config.ProxyAvailableForRouting(proxy, policy)
 }
 
 func effectiveRouteLatency(latency int) int {

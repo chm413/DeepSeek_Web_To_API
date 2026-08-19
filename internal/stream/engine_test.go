@@ -2,6 +2,8 @@ package stream
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -43,5 +45,33 @@ func TestConsumeSSEPrefersContextCancellationOverReadyParsedLines(t *testing.T) 
 	}
 	if parsedCalled {
 		t.Fatal("expected parsed lines not to be processed after context cancellation wins")
+	}
+}
+
+func TestConsumeSSEReportsUnexpectedEOFAfterPartialOutput(t *testing.T) {
+	var gotReason StopReason
+	var gotErr error
+
+	ConsumeSSE(ConsumeConfig{
+		Context:           context.Background(),
+		Body:              strings.NewReader("data: {\"p\":\"response/content\",\"v\":\"partial\"}\n"),
+		ThinkingEnabled:   false,
+		InitialType:       "text",
+		KeepAliveInterval: 0,
+	}, ConsumeHooks{
+		OnParsed: func(parsed sse.LineResult) ParsedDecision {
+			return ParsedDecision{ContentSeen: len(parsed.Parts) > 0}
+		},
+		OnFinalize: func(reason StopReason, scannerErr error) {
+			gotReason = reason
+			gotErr = scannerErr
+		},
+	})
+
+	if gotReason != StopReasonUpstreamCompleted {
+		t.Fatalf("expected upstream_completed reason, got %q", gotReason)
+	}
+	if !errors.Is(gotErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected unexpected EOF, got %v", gotErr)
 	}
 }

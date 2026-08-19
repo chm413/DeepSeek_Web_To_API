@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/xrayproxy"
@@ -50,10 +51,19 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	importedKeys, importedAccounts, importedProxies := 0, 0, 0
+	credentialChangeCutoff := time.Now().Unix()
 	err = h.Store.Update(func(c *config.Config) error {
+		previousAdmin := c.Admin
 		next := c.Clone()
 		if mode == "replace" {
 			next = incoming.Clone()
+			// HTTP exports deliberately omit administrator credentials.  A
+			// redacted export must therefore not turn a live, config-backed
+			// administration boundary into an inaccessible instance when it is
+			// imported with replace mode.  Preserve each omitted or empty secret
+			// while still allowing an explicitly supplied non-empty credential to
+			// rotate that field.
+			next.Admin = preserveRedactedAdminCredentials(previousAdmin, next.Admin)
 			next.Accounts = normalizeAndDedupeAccounts(next.Accounts)
 			importedKeys = len(next.APIKeys)
 			importedAccounts = len(next.Accounts)
@@ -121,7 +131,19 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(incoming.Embeddings.Provider) != "" {
 				next.Embeddings.Provider = incoming.Embeddings.Provider
 			}
-			if strings.TrimSpace(incoming.Admin.PasswordHash) != "" {
+			if rawAdmin, ok := payload["admin"].(map[string]any); ok {
+				if _, present := rawAdmin["key"]; present && strings.TrimSpace(incoming.Admin.Key) != "" {
+					next.Admin.Key = incoming.Admin.Key
+				}
+				if _, present := rawAdmin["password_hash"]; present && strings.TrimSpace(incoming.Admin.PasswordHash) != "" {
+					next.Admin.PasswordHash = incoming.Admin.PasswordHash
+				}
+				if _, present := rawAdmin["jwt_secret"]; present && strings.TrimSpace(incoming.Admin.JWTSecret) != "" {
+					next.Admin.JWTSecret = incoming.Admin.JWTSecret
+				}
+			} else if strings.TrimSpace(incoming.Admin.PasswordHash) != "" {
+				// Keep compatibility with older callers that provided a decoded
+				// admin block through a non-map payload representation.
 				next.Admin.PasswordHash = incoming.Admin.PasswordHash
 			}
 			if incoming.Admin.JWTExpireHours > 0 {
@@ -208,6 +230,10 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if adminCredentialsChanged(previousAdmin, next.Admin) && next.Admin.JWTValidAfterUnix < credentialChangeCutoff {
+			next.Admin.JWTValidAfterUnix = credentialChangeCutoff
+		}
+
 		normalizeSettingsConfig(&next)
 		if err := validateSettingsConfig(next); err != nil {
 			return newRequestError(err.Error())
@@ -239,4 +265,23 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 		"imported_proxies":  importedProxies,
 		"message":           "config imported",
 	})
+}
+
+func adminCredentialsChanged(before, after config.AdminConfig) bool {
+	return strings.TrimSpace(before.Key) != strings.TrimSpace(after.Key) ||
+		strings.TrimSpace(before.PasswordHash) != strings.TrimSpace(after.PasswordHash) ||
+		strings.TrimSpace(before.JWTSecret) != strings.TrimSpace(after.JWTSecret)
+}
+
+func preserveRedactedAdminCredentials(previous, imported config.AdminConfig) config.AdminConfig {
+	if strings.TrimSpace(imported.Key) == "" {
+		imported.Key = previous.Key
+	}
+	if strings.TrimSpace(imported.PasswordHash) == "" {
+		imported.PasswordHash = previous.PasswordHash
+	}
+	if strings.TrimSpace(imported.JWTSecret) == "" {
+		imported.JWTSecret = previous.JWTSecret
+	}
+	return imported
 }

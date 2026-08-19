@@ -103,6 +103,29 @@ func TryPrepareRootSessionChunkingWithFailover(ctx context.Context, ds any, reso
 				"model", req.ResolvedModel,
 				"account", a.AccountID,
 				"original_prompt_units", promptcompat.PromptUnits(req.FinalPrompt),
+				"failure_class", sessionChunkFailureClass(err),
+				"upstream_status", sessionChunkFailureStatus(err),
+				"reason", CompletionErrorDetail(err).Code)
+			continue
+		}
+		// Account-scoped failures must never be retried in the pinned root.
+		// Move to a replacement account first; the complete canonical prompt is
+		// then rebuilt there with its own dynamic input ceiling.
+		if ShouldReplayPinnedBranch(err) {
+			if !SwitchManagedAccountForPinnedBranch(ctx, resolver, a, err) {
+				return nil, err
+			}
+			cfg = refreshRootSessionPromptLimits(ctx, ds, a, req, cfg)
+			sessionCapacityReplays = 0
+			transientBranchReplays = 0
+			config.Logger.Warn("[prompt_limit] restarting same-session prompt chunks on another account",
+				"surface", req.Surface,
+				"model", req.ResolvedModel,
+				"from_account", beforeID,
+				"to_account", a.AccountID,
+				"original_prompt_units", promptcompat.PromptUnits(req.FinalPrompt),
+				"failure_class", sessionChunkFailureClass(err),
+				"upstream_status", sessionChunkFailureStatus(err),
 				"reason", CompletionErrorDetail(err).Code)
 			continue
 		}
@@ -118,20 +141,12 @@ func TryPrepareRootSessionChunkingWithFailover(ctx context.Context, ds any, reso
 				"original_prompt_units", promptcompat.PromptUnits(req.FinalPrompt),
 				"replay", transientBranchReplays,
 				"max_replays", 1,
+				"failure_class", sessionChunkFailureClass(err),
+				"upstream_status", sessionChunkFailureStatus(err),
 				"error", err)
 			continue
 		}
-		if !SwitchManagedAccountForPinnedBranch(ctx, resolver, a, err) {
-			return nil, err
-		}
-		cfg = refreshRootSessionPromptLimits(ctx, ds, a, req, cfg)
-		sessionCapacityReplays = 0
-		transientBranchReplays = 0
-		config.Logger.Warn("[prompt_limit] restarting same-session prompt chunks on another account",
-			"surface", req.Surface,
-			"model", req.ResolvedModel,
-			"original_prompt_units", promptcompat.PromptUnits(req.FinalPrompt),
-			"reason", CompletionErrorDetail(err).Code)
+		return nil, err
 	}
 }
 

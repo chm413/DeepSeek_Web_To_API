@@ -19,6 +19,33 @@ func TestAccountIdentifierRequiresEmailOrMobile(t *testing.T) {
 	}
 }
 
+func TestWriteConfigBytesReplacesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	if err := writeConfigBytes(path, []byte(`{"new":true}`)); err != nil {
+		t.Fatalf("atomically replace config: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read replaced config: %v", err)
+	}
+	if got := string(content); got != `{"new":true}` {
+		t.Fatalf("config content = %q", got)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".config-*.tmp"))
+	if err != nil {
+		t.Fatalf("glob temporary configs: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temporary configs were not removed: %#v", leftovers)
+	}
+}
+
 func TestAccountIdentifierTreatsLegacyMobileEmailAsEmail(t *testing.T) {
 	acc := Account{Mobile: " user@example.com ", Password: "p"}
 	if got := acc.Identifier(); got != "user@example.com" {
@@ -136,6 +163,9 @@ func TestLoadStorePreservesFileBackedTokensForRuntime(t *testing.T) {
 		"accounts":[{"email":"u@example.com","password":"p","token":"persisted-token"}]
 	}`); err != nil {
 		t.Fatalf("write temp config: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp config: %v", err)
 	}
 
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
@@ -849,6 +879,9 @@ func TestAccountTestStatusIsRuntimeOnlyAndNotPersisted(t *testing.T) {
 	}`); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp config: %v", err)
+	}
 
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", tmp.Name())
@@ -907,6 +940,9 @@ func TestAccountSessionCountIsRuntimeOnlyAndNotPersisted(t *testing.T) {
 		"accounts":[{"email":"u@example.com","password":"p"}]
 	}`); err != nil {
 		t.Fatalf("write temp config: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp config: %v", err)
 	}
 
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", "")

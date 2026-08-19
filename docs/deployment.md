@@ -208,7 +208,7 @@ docker compose up -d
 关键点：
 
 - 容器内端口保持 `5001`。
-- 宿主机端口通过 `.env` 的 `DEEPSEEK_WEB_TO_API_HOST_PORT` 控制。
+- 宿主机端口通过 `.env` 的 `DEEPSEEK_WEB_TO_API_HOST_PORT` 控制；默认只绑定 `127.0.0.1`。若确实需要让反向代理或局域网接口接入，显式设置 `DEEPSEEK_WEB_TO_API_HOST_BIND_ADDR`，并同时配置防火墙/TLS。
 - 初始结构化配置写在 `.env` 的 `DEEPSEEK_WEB_TO_API_CONFIG_JSON`。
 - 持久化目录挂载为 `./data:/app/data`，保存 `config.json` 回写文件、`accounts.sqlite`、历史记录和缓存。
 - 从旧 Compose 根目录 `config.json` 升级时，`legacy-config-migration` 会在主服务启动前

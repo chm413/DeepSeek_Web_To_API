@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -161,7 +162,7 @@ func (c *Client) resolveProxyForAccount(acc config.Account) (config.Proxy, confi
 		return config.Proxy{}, snap.ProxyCore, false
 	}
 	if acc.ProxyAutoRoute {
-		if selected.Disabled || selected.LastTestAtUnix <= 0 || !selected.LastTestSuccess {
+		if !config.ProxyAvailableForRouting(selected, snap.ProxyPolicy) {
 			return config.Proxy{}, snap.ProxyCore, false
 		}
 		return selected, snap.ProxyCore, true
@@ -199,8 +200,11 @@ func (c *Client) requestClientsForAuth(ctx context.Context, a *auth.RequestAuth)
 func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
 	proxyCfg, coreCfg, ok := c.resolveProxyForAccount(acc)
 	if !ok {
-		if acc.ProxyAutoRoute {
-			return c.unavailableAutomaticRouteClients(acc)
+		if strings.TrimSpace(acc.ProxyID) != "" {
+			if acc.ProxyAutoRoute {
+				return c.unavailableAutomaticRouteClients(acc)
+			}
+			return c.unavailableAssignedRouteClients(acc)
 		}
 		return c.defaultRequestClients()
 	}
@@ -242,8 +246,16 @@ func (c *Client) requestClientsForAccount(acc config.Account) requestClients {
 }
 
 func (c *Client) unavailableAutomaticRouteClients(acc config.Account) requestClients {
+	return c.unavailableRouteClients(acc, fmt.Sprintf("automatic proxy route for account %s is waiting for an available node", acc.Identifier()))
+}
+
+func (c *Client) unavailableAssignedRouteClients(acc config.Account) requestClients {
+	return c.unavailableRouteClients(acc, fmt.Sprintf("assigned proxy route for account %s is unavailable", acc.Identifier()))
+}
+
+func (c *Client) unavailableRouteClients(acc config.Account, message string) requestClients {
 	dialContext := func(context.Context, string, string) (net.Conn, error) {
-		return nil, fmt.Errorf("automatic proxy route for account %s is waiting for an available node", acc.Identifier())
+		return nil, errors.New(message)
 	}
 	totalTimeout := config.HTTPTotalTimeout()
 	if c != nil && c.Store != nil {

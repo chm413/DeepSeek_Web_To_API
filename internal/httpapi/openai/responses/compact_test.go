@@ -19,6 +19,40 @@ type responsesCompactionErrorDSStub struct {
 	err error
 }
 
+type compactSessionAffinityAuthStub struct {
+	keyUsed string
+}
+
+func (s *compactSessionAffinityAuthStub) auth() *auth.RequestAuth {
+	return &auth.RequestAuth{
+		UseConfigToken: true,
+		DeepSeekToken:  "token-compact",
+		CallerID:       "caller:compact",
+		AccountID:      "account-compact",
+		SessionKey:     s.keyUsed,
+		TriedAccounts:  map[string]bool{},
+	}
+}
+
+func (s *compactSessionAffinityAuthStub) Determine(_ *http.Request) (*auth.RequestAuth, error) {
+	return s.auth(), nil
+}
+
+func (s *compactSessionAffinityAuthStub) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error) {
+	return s.auth(), nil
+}
+
+func (s *compactSessionAffinityAuthStub) DetermineWithSession(_ *http.Request, _ []byte) (*auth.RequestAuth, error) {
+	return s.auth(), nil
+}
+
+func (s *compactSessionAffinityAuthStub) DetermineWithSessionKey(_ *http.Request, _ []byte, key string) (*auth.RequestAuth, error) {
+	s.keyUsed = key
+	return s.auth(), nil
+}
+
+func (*compactSessionAffinityAuthStub) Release(_ *auth.RequestAuth) {}
+
 func (s responsesCompactionErrorDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, _ map[string]any, _ string, _ int) (*http.Response, error) {
 	return nil, s.err
 }
@@ -260,6 +294,46 @@ func TestCompactReturnsTenantBoundLocalHandle(t *testing.T) {
 		if strings.Contains(prompt, dropped) {
 			t.Fatalf("expanded compact state retained dropped history %q: %q", dropped, prompt)
 		}
+	}
+}
+
+func TestCompactPreviousResponseReusesSessionAffinity(t *testing.T) {
+	authStub := &compactSessionAffinityAuthStub{}
+	h := &Handler{
+		Store: responsesHistoryConfigStub{},
+		Auth:  authStub,
+		DS: responsesHistoryDSStub{resp: makeResponsesHistorySSEHTTPResponse(
+			`data: {"p":"response/content","v":"Keep the compacted branch."}`,
+			`data: [DONE]`,
+		)},
+	}
+	owner := "caller:compact"
+	h.responses = newResponseStore(0)
+	previousID := "resp_compact_previous"
+	h.responses.putInput(owner, previousID, []any{
+		map[string]any{"role": "user", "content": "first requirement"},
+		map[string]any{"role": "assistant", "content": "first answer"},
+	})
+	h.responses.put(owner, previousID, map[string]any{
+		"id": previousID,
+		"output": []any{map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []any{map[string]any{"type": "output_text", "text": "second answer"}},
+		}},
+	})
+	h.responses.putSessionKey(owner, previousID, "session-bound")
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{
+  "model":"deepseek-v4-flash",
+  "previous_response_id":"resp_compact_previous",
+  "input":[{"role":"user","content":"latest requirement"}]
+}`))
+	rec := httptest.NewRecorder()
+	h.Compact(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if authStub.keyUsed != "session-bound" {
+		t.Fatalf("compact request lost previous response session affinity: %q", authStub.keyUsed)
 	}
 }
 

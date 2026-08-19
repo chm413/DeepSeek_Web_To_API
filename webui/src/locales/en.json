@@ -575,7 +575,7 @@
         "plainAccountsDesc": "Email and mobile accounts use the same format. Mobile numbers are normalized before being written to the account SQLite store.",
         "quickTemplates": "Quick Templates",
         "dataExport": "Data Export",
-        "dataExportDesc": "Copy the Base64-encoded configuration for .env or backup migration.",
+        "dataExportDesc": "Copy a redacted Base64 configuration for non-secret settings. Reconfigure administrator, account, proxy, and subscription credentials in the new environment.",
         "copyBase64": "Copy Base64 config",
         "copied": "Copied",
         "variableName": "Variable name",

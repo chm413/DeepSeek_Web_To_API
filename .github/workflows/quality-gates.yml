@@ -33,14 +33,9 @@ jobs:
           REQUIRED_GO_VERSION: ${{ env.GO_VERSION }}
         run: bash ./scripts/ci/select-go-toolchain.sh
 
-      - name: Setup golangci-lint
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: ${{ env.GOLANGCI_LINT_VERSION }}
-          install-mode: binary
-          verify: true
-
       - name: Go Format and Lint Gates
+        env:
+          GOLANGCI_LINT_VERSION: ${{ env.GOLANGCI_LINT_VERSION }}
         run: bash ./scripts/lint.sh
 
       - name: Refactor Line Gate

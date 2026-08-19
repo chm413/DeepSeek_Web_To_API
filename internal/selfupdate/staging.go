@@ -5,15 +5,18 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,10 +44,12 @@ const (
 )
 
 type verifiedMetadata struct {
-	Tag       string    `json:"tag"`
-	AssetName string    `json:"asset_name"`
-	SHA256    string    `json:"sha256"`
-	StagedAt  time.Time `json:"staged_at"`
+	Tag              string    `json:"tag"`
+	AssetName        string    `json:"asset_name"`
+	SHA256           string    `json:"sha256"`
+	BinarySHA256     string    `json:"binary_sha256"`
+	StaticTreeSHA256 string    `json:"static_tree_sha256"`
+	StagedAt         time.Time `json:"staged_at"`
 }
 
 func (m *Manager) Download(ctx context.Context, requestedTag string) (*Release, error) {
@@ -572,7 +577,22 @@ func (m *Manager) extractVerifiedArchive(archivePath string, release *Release, c
 	if !hasBinary || !hasStatic {
 		return errors.New("release archive is missing binary or web UI assets")
 	}
-	metadata := verifiedMetadata{Tag: release.Tag, AssetName: release.AssetName, SHA256: checksum, StagedAt: m.now().UTC()}
+	binarySHA, err := hashRegularFile(filepath.Join(stage, "deepseek-web-to-api"))
+	if err != nil {
+		return fmt.Errorf("hash staged binary: %w", err)
+	}
+	staticSHA, err := hashStaticTree(filepath.Join(stage, "static", "admin"))
+	if err != nil {
+		return fmt.Errorf("hash staged web UI assets: %w", err)
+	}
+	metadata := verifiedMetadata{
+		Tag:              release.Tag,
+		AssetName:        release.AssetName,
+		SHA256:           checksum,
+		BinarySHA256:     binarySHA,
+		StaticTreeSHA256: staticSHA,
+		StagedAt:         m.now().UTC(),
+	}
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
 		return err
@@ -656,17 +676,24 @@ func (m *Manager) stagedRelease(tag string) (bool, error) {
 	binaryPath := filepath.Join(root, "deepseek-web-to-api")
 	staticDir := filepath.Join(root, "static", "admin")
 	metadataPath := filepath.Join(root, metadataFile)
-	if info, err := os.Stat(binaryPath); err != nil || info.IsDir() || !info.Mode().IsRegular() {
+	if info, err := os.Lstat(binaryPath); err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		if err == nil {
 			err = errors.New("staged binary is not a regular file")
 		}
 		return false, err
 	}
-	if info, err := os.Stat(staticDir); err != nil || !info.IsDir() {
+	if info, err := os.Lstat(staticDir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		if err == nil {
 			err = errors.New("staged web UI assets are missing")
 		}
 		return false, err
+	}
+	metadataInfo, err := os.Lstat(metadataPath)
+	if err != nil {
+		return false, err
+	}
+	if !metadataInfo.Mode().IsRegular() || metadataInfo.Mode()&os.ModeSymlink != 0 {
+		return false, errors.New("staged verification metadata is not a regular file")
 	}
 	encoded, err := os.ReadFile(metadataPath)
 	if err != nil {
@@ -676,13 +703,102 @@ func (m *Manager) stagedRelease(tag string) (bool, error) {
 	if err := json.Unmarshal(encoded, &metadata); err != nil {
 		return false, fmt.Errorf("decode staged verification metadata: %w", err)
 	}
-	if metadata.Tag != tag || len(metadata.SHA256) != sha256.Size*2 {
+	if metadata.Tag != tag || len(metadata.SHA256) != sha256.Size*2 ||
+		len(metadata.BinarySHA256) != sha256.Size*2 || len(metadata.StaticTreeSHA256) != sha256.Size*2 {
 		return false, errors.New("staged verification metadata is invalid")
 	}
 	if _, err := hex.DecodeString(metadata.SHA256); err != nil {
 		return false, errors.New("staged verification metadata has an invalid checksum")
 	}
+	if _, err := hex.DecodeString(metadata.BinarySHA256); err != nil {
+		return false, errors.New("staged verification metadata has an invalid binary checksum")
+	}
+	if _, err := hex.DecodeString(metadata.StaticTreeSHA256); err != nil {
+		return false, errors.New("staged verification metadata has an invalid static tree checksum")
+	}
+	binarySHA, err := hashRegularFile(binaryPath)
+	if err != nil {
+		return false, fmt.Errorf("hash staged binary: %w", err)
+	}
+	staticSHA, err := hashStaticTree(staticDir)
+	if err != nil {
+		return false, fmt.Errorf("hash staged web UI assets: %w", err)
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(binarySHA)), []byte(strings.ToLower(metadata.BinarySHA256))) != 1 {
+		return false, errors.New("staged binary checksum mismatch")
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(staticSHA)), []byte(strings.ToLower(metadata.StaticTreeSHA256))) != 1 {
+		return false, errors.New("staged web UI assets checksum mismatch")
+	}
 	return true, nil
+}
+
+func hashRegularFile(filename string) (string, error) {
+	info, err := os.Lstat(filename)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%s is not a regular file", filename)
+	}
+	file, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// hashStaticTree binds both the content and relative names of every static
+// file. This prevents a staged release from being altered after download by
+// adding, removing, or replacing an asset while retaining the old metadata.
+func hashStaticTree(root string) (string, error) {
+	entries := make([]string, 0)
+	err := filepath.WalkDir(root, func(filename string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("static asset contains a symbolic link: %s", filename)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("static asset is not a regular file: %s", filename)
+		}
+		rel, err := filepath.Rel(root, filename)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(entries) == 0 {
+		return "", errors.New("static asset tree is empty")
+	}
+	sort.Strings(entries)
+	hash := sha256.New()
+	for _, rel := range entries {
+		if _, err := io.WriteString(hash, rel+"\x00"); err != nil {
+			return "", err
+		}
+		fileHash, err := hashRegularFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.WriteString(hash, fileHash+"\x00"); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (m *Manager) readMarker(name string) (string, error) {

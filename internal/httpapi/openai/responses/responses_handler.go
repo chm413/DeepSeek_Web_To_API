@@ -111,7 +111,7 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if compactTriggered {
-		h.serveLocalCompaction(w, r, rawBody, req, true)
+		h.serveLocalCompaction(w, r, rawBody, req, true, inheritedSessionKey)
 		return
 	}
 	compactThresholdTokens, compactThresholdApplied, compactThresholdErr := shared.ResponsesCompactThreshold(req)
@@ -300,7 +300,8 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		} else {
 			stdReq = compactedReq
 			incrementalBaseReq = stdReq
-			handle := h.getResponseStore().putCompaction(owner, stdReq.Messages)
+			handle := h.getResponseStore().putCompactionState(owner, stdReq.Messages,
+				stdReq.ToolsRaw, stdReq.HasTools, stdReq.ToolChoiceRaw, stdReq.HasToolChoice)
 			if handle == "" {
 				config.Logger.Error("[responses_compact] failed to persist automatic compaction state", "surface", "responses", "model", stdReq.ResolvedModel)
 				writeOpenAIError(w, http.StatusInternalServerError, "failed to store automatic compaction state")

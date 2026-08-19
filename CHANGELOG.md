@@ -1,5 +1,12 @@
 # 更新日志
 
+## 2026-08-18 (1.2.4)
+
+- Hardened admin login, credential export, access logging, subscription fetching, and proxy route migration.
+- Added verified Xray downloads with requested-version refresh and transactional installation.
+- Added bounded same-session prompt-chunk retries and explicit 429 capacity/account failover handling.
+- Synchronized the WebUI and server release version.
+
 ## 2026-08-18 (1.2.3)
 
 - Added structured Responses state-transfer logs with context sizes, prompt units, tool counts, contract fingerprints, inheritance/override decisions, cache replay stages, and missing-state diagnostics. Sensitive tool schemas and request contents are never written to logs.

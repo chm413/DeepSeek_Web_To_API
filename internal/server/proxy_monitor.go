@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,7 @@ func startProxyMonitor(ctx context.Context, store *config.Store, pool *account.P
 			case <-syncRequests:
 				reconcileAndSyncProxyRoutes(ctx, store, pool, ds)
 			case now := <-ticker.C:
-				refreshDueSubscriptions(ctx, store, pool, now)
+				refreshDueSubscriptions(ctx, store, pool, ds, now)
 				policy := store.Snapshot().ProxyPolicy
 				if !policy.HealthChecksEnabled() {
 					continue
@@ -144,7 +145,7 @@ func syncAssignedProxyRoutes(parent context.Context, store *config.Store) {
 	config.Logger.Info("[proxy_monitor] xray routes synchronized", "routes", xrayproxy.Default().RouteCount(), "processes", xrayproxy.Default().Count())
 }
 
-func refreshDueSubscriptions(parent context.Context, store *config.Store, pool *account.Pool, now time.Time) {
+func refreshDueSubscriptions(parent context.Context, store *config.Store, pool *account.Pool, ds *dsclient.Client, now time.Time) {
 	snapshot := store.Snapshot()
 	for _, subscription := range snapshot.ProxySubscriptions {
 		if subscription.Disabled || subscription.AutoUpdateDisabled {
@@ -159,10 +160,30 @@ func refreshDueSubscriptions(parent context.Context, store *config.Store, pool *
 		result, err := proxyservice.RefreshSubscription(ctx, store, subscription.ID)
 		cancel()
 		if err != nil {
-			config.Logger.Warn("[proxy_monitor] subscription refresh failed", "subscription_id", subscription.ID, "error", err)
+			var commitErr *proxyservice.SubscriptionRefreshCommitError
+			if len(result.RouteChanges) > 0 || errors.As(err, &commitErr) {
+				// RefreshSubscription may have committed the new assignments and
+				// cleared account tokens before Xray synchronization failed. Do not
+				// discard those changes; retry synchronization and relogin now.
+				config.Logger.Warn("[proxy_monitor] subscription refresh partially committed", "subscription_id", subscription.ID, "error", err, "route_changes", len(result.RouteChanges))
+				if pool != nil {
+					pool.Reset()
+				}
+				syncAssignedProxyRoutes(parent, store)
+				reloginProxyRouteChanges(parent, store, pool, ds, result.RouteChanges)
+			} else {
+				config.Logger.Warn("[proxy_monitor] subscription refresh failed", "subscription_id", subscription.ID, "error", err)
+			}
 			continue
 		}
 		config.Logger.Info("[proxy_monitor] subscription refreshed", "subscription_id", subscription.ID, "nodes", result.NodeCount, "added", result.Added, "updated", result.Updated, "removed", result.Removed, "invalid", result.Invalid)
+		if len(result.RouteChanges) > 0 {
+			if pool != nil {
+				pool.Reset()
+			}
+			config.Logger.Info("[proxy_monitor] subscription route assignments changed", "subscription_id", subscription.ID, "accounts", len(result.RouteChanges))
+			reloginProxyRouteChanges(parent, store, pool, ds, result.RouteChanges)
+		}
 		if pool != nil {
 			pool.Reset()
 		}

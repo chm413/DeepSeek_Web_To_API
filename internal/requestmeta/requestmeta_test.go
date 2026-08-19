@@ -40,7 +40,7 @@ func TestClientIPPrefersForwardedHeader(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.RemoteAddr = "127.0.0.1:4567"
-	req.Header.Set("X-Forwarded-For", "198.51.100.11, 10.0.0.1")
+	req.Header.Set("X-Forwarded-For", "198.51.100.11, 127.0.0.2")
 
 	if got := ClientIP(req); got != "198.51.100.11" {
 		t.Fatalf("client ip=%q", got)
@@ -76,11 +76,49 @@ func TestClientIPUsesRightmostUntrustedXFFEntry(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.RemoteAddr = "127.0.0.1:4567"
 	// Attacker prepends a forged "8.8.8.8" to the chain. The real
-	// public client is 198.51.100.11; 10.0.0.1 is the trusted reverse
+	// public client is 198.51.100.11; 127.0.0.2 is the trusted reverse
 	// proxy that delivered the request to us.
-	req.Header.Set("X-Forwarded-For", "8.8.8.8, 198.51.100.11, 10.0.0.1")
+	req.Header.Set("X-Forwarded-For", "8.8.8.8, 198.51.100.11, 127.0.0.2")
 
 	if got := ClientIP(req); got != "198.51.100.11" {
 		t.Fatalf("rightmost-untrusted XFF expected, got %q", got)
+	}
+}
+
+func TestClientIPIgnoresForwardingHeadersFromPrivatePeerByDefault(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.RemoteAddr = "10.42.0.9:4567"
+	req.Header.Set("X-Forwarded-For", "198.51.100.11")
+	req.Header.Set("X-Real-IP", "203.0.113.42")
+
+	if got := ClientIP(req); got != "10.42.0.9" {
+		t.Fatalf("private peer forwarding headers must not be trusted by default; got %q", got)
+	}
+}
+
+func TestClientIPUsesExplicitlyTrustedPrivateProxy(t *testing.T) {
+	// trusted proxy configuration is process-global and production configures
+	// it once at startup before serving requests.
+	SetTrustedProxyCIDRs([]string{"10.42.0.0/16"})
+	t.Cleanup(func() { SetTrustedProxyCIDRs(nil) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.RemoteAddr = "10.42.0.9:4567"
+	req.Header.Set("X-Forwarded-For", "198.51.100.11, 10.42.0.1")
+
+	if got := ClientIP(req); got != "198.51.100.11" {
+		t.Fatalf("explicitly trusted private proxy was not honored; got %q", got)
+	}
+}
+
+func TestSetTrustedProxyCIDRsRejectsCatchAll(t *testing.T) {
+	SetTrustedProxyCIDRs([]string{"0.0.0.0/0"})
+	t.Cleanup(func() { SetTrustedProxyCIDRs(nil) })
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.RemoteAddr = "192.168.1.9:4567"
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	if got := ClientIP(req); got != "192.168.1.9" {
+		t.Fatalf("catch-all trusted proxy range must be ignored, got %q", got)
 	}
 }

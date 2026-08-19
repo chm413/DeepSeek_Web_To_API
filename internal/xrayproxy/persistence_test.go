@@ -33,7 +33,7 @@ func TestSettingsFromStorePersistsManagedInstallation(t *testing.T) {
 	binaryPath := writeManagedCore(t, downloadDir, "v25.1.0")
 	store := &corePersistenceStore{cfg: config.Config{ProxyCore: config.ProxyCoreConfig{
 		DownloadDir:     downloadDir,
-		DownloadVersion: "v24.9.9",
+		DownloadVersion: "v25.1.0",
 	}}}
 
 	resolved, err := ResolveOrDownload(context.Background(), SettingsFromStore(store))
@@ -50,7 +50,7 @@ func TestSettingsFromStorePersistsManagedInstallation(t *testing.T) {
 	if core.InstalledVersion != "v25.1.0" {
 		t.Fatalf("persisted installed version = %q", core.InstalledVersion)
 	}
-	if core.DownloadVersion != "v24.9.9" {
+	if core.DownloadVersion != "v25.1.0" {
 		t.Fatalf("requested version was overwritten: %q", core.DownloadVersion)
 	}
 	if store.updates != 1 {

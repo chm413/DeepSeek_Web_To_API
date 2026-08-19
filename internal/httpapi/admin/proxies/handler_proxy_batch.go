@@ -2,6 +2,7 @@ package proxies
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -95,6 +96,16 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 			}
 			affected = len(wanted)
 		} else {
+			if action == "disable" {
+				// A disabled node must be treated like a removed route. Move
+				// manual accounts to the configured fallback and rebalance
+				// automatic accounts before the node becomes unavailable.
+				var routeErr error
+				routeChanges, routeErr = proxyservice.ReassignSubscriptionRemovedRoutes(cfg, wanted)
+				if routeErr != nil {
+					return routeErr
+				}
+			}
 			for i := range cfg.Proxies {
 				proxy := config.NormalizeProxy(cfg.Proxies[i])
 				if _, exists := wanted[proxy.ID]; !exists {
@@ -120,21 +131,31 @@ func (h *Handler) proxyBatchAction(w http.ResponseWriter, r *http.Request) {
 		if writeProxyDeletionConflict(w, err) {
 			return
 		}
+		var migrationErr *proxyservice.SubscriptionRouteMigrationError
+		if errors.As(err, &migrationErr) {
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": migrationErr.Error()})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	if _, err := h.reconcileAndSyncProxyRoutes(r.Context()); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
-		return
-	}
-	relogin := h.reloginRouteChanges(r.Context(), routeChanges, false)
+	autoRelogins, routeErr := h.reconcileAndSyncProxyRoutes(r.Context())
+	// The batch mutation has already moved affected accounts and cleared their
+	// tokens. Do not discard those changes if Xray synchronization is partial.
+	manualRelogins := h.reloginRouteChanges(r.Context(), routeChanges, false)
 	h.Pool.Reset()
-	response := map[string]any{"success": true, "action": action, "affected": affected}
-	if action == "delete" {
+	response := map[string]any{"success": routeErr == nil, "action": action, "affected": affected}
+	if action == "delete" || action == "disable" {
 		response["route_changes"] = routeChanges
-		if len(relogin) > 0 {
-			response["relogin"] = relogin
-		}
+	}
+	if len(autoRelogins) > 0 || len(manualRelogins) > 0 {
+		response["relogin"] = mergeReloginResults(autoRelogins, manualRelogins)
+	}
+	if routeErr != nil {
+		response["route_error"] = routeErr.Error()
+		response["partial"] = true
+		writeJSON(w, http.StatusBadGateway, response)
+		return
 	}
 	writeJSON(w, http.StatusOK, response)
 }

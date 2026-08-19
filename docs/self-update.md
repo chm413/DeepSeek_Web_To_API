@@ -4,13 +4,17 @@ The Docker self-update feature lets a running container switch application
 files without replacing its image. It is intentionally limited to release
 archives published by this repository's GitHub Release workflow.
 
+Release archive names use the Git tag verbatim. The workflow and the local
+`scripts/build-release-archives.sh` default to `v<version>` from `VERSION`,
+for example `deepseek-web-to-api_v1.2.4_linux_amd64.tar.gz`.
+
 The first image that supports this feature must be deployed normally. Later
 updates only write the persistent Compose `./data` volume.
 
 ## Version Source And Release Build
 
 `VERSION` is the single release-version source. Push a matching stable tag,
-for example `v1.2.3`, to start `release-artifacts.yml`. The workflow checks
+for example `v1.2.4`, to start `release-artifacts.yml`. The workflow checks
 that the tag and `VERSION` agree, runs the release gates, then publishes:
 
 - Linux archive assets for `linux/amd64` and `linux/arm64`.
@@ -33,7 +37,10 @@ creates a GitHub Release by itself.
 5. Verified files are staged in `/app/data/self-update/versions/<tag>/`.
 6. Applying an update writes a pending marker and exits with code `75` after
    the HTTP response is sent. The image entrypoint starts that candidate.
-7. The candidate promotes itself only after it has bound the HTTP listener.
+7. Before launching a persistent candidate, the image entrypoint requires a
+   matching `.verified.json` tag and binary SHA-256. The candidate then checks
+   the binary and complete static asset tree again before promotion.
+8. The candidate promotes itself only after it has bound the HTTP listener.
    If it fails before readiness, the entrypoint keeps the old current version,
    restores the old rollback pointer, records the failed tag, and falls back
    in the same launcher process.
@@ -94,7 +101,7 @@ overwrite their own executable.
   pending.rollback.previous.version
   failed.version
   versions/
-    v1.2.3/
+    v1.2.4/
       deepseek-web-to-api
       static/admin/
       .verified.json

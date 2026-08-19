@@ -2,7 +2,9 @@ package proxies
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/xrayproxy"
 )
 
 func TestProxyPolicyUpdatePersistsEffectiveSettings(t *testing.T) {
@@ -63,15 +66,24 @@ func TestProxySubscriptionURLIsStoredButNeverReturned(t *testing.T) {
 	}
 }
 
-func TestDeleteSubscriptionRetainsAssignedNodeDisabledAndClearsFallback(t *testing.T) {
+func TestDeleteSubscriptionMigratesAssignedNodeToFallback(t *testing.T) {
 	raw := `{
 		"proxy_subscriptions":[{"id":"sub-1","name":"Airport","url":"https://example.com/sub"}],
-		"proxies":[{"id":"proxy-1","name":"Node","type":"socks5","host":"127.0.0.1","port":1080,"subscription_id":"sub-1"}],
-		"proxy_policy":{"fallback_proxy_id":"proxy-1"},
-		"accounts":[{"email":"user@example.com","password":"pwd","proxy_id":"proxy-1"}]
+		"proxies":[
+			{"id":"proxy-1","name":"Node","type":"socks5","host":"127.0.0.1","port":1080,"subscription_id":"sub-1"},
+			{"id":"fallback","name":"Fallback","type":"socks5","host":"127.0.0.1","port":1081}
+		],
+		"proxy_policy":{"fallback_proxy_id":"fallback"},
+		"accounts":[{"email":"user@example.com","password":"pwd","token":"old-token","proxy_id":"proxy-1"}]
 	}`
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", raw)
 	store := config.LoadStore()
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.Accounts[0].Token = "keep"
+		return nil
+	}); err != nil {
+		t.Fatalf("seed account token: %v", err)
+	}
 	h := newHTTPAdminHarnessWithStore(store)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodDelete, "/proxies/subscriptions/sub-1", nil))
@@ -79,11 +91,81 @@ func TestDeleteSubscriptionRetainsAssignedNodeDisabledAndClearsFallback(t *testi
 		t.Fatalf("subscription delete status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	snapshot := store.Snapshot()
-	if len(snapshot.ProxySubscriptions) != 0 || snapshot.ProxyPolicy.FallbackProxyID != "" {
-		t.Fatalf("expected subscription and fallback cleared, got %#v", snapshot)
+	if len(snapshot.ProxySubscriptions) != 0 || snapshot.ProxyPolicy.FallbackProxyID != "fallback" {
+		t.Fatalf("expected subscription deleted and fallback retained, got %#v", snapshot)
 	}
-	if len(snapshot.Proxies) != 1 || !snapshot.Proxies[0].Disabled || snapshot.Proxies[0].DisabledReason != config.ProxyDisabledSubscriptionRemoved {
-		t.Fatalf("expected assigned node retained disabled, got %#v", snapshot.Proxies)
+	if len(snapshot.Proxies) != 1 || snapshot.Proxies[0].ID != "fallback" {
+		t.Fatalf("expected removed node to be deleted, got %#v", snapshot.Proxies)
+	}
+	account := snapshot.Accounts[0]
+	if account.ProxyID != "fallback" || account.Token == "old-token" {
+		t.Fatalf("expected account to move and invalidate its old token, got %#v", account)
+	}
+}
+
+func TestDeleteSubscriptionRejectsManualRouteWhenFallbackIsRemoved(t *testing.T) {
+	raw := `{
+		"proxy_subscriptions":[{"id":"sub-1","name":"Airport","url":"https://example.com/sub"}],
+		"proxies":[{"id":"proxy-1","name":"Node","type":"socks5","host":"127.0.0.1","port":1080,"subscription_id":"sub-1"}],
+		"proxy_policy":{"fallback_proxy_id":"proxy-1"},
+		"accounts":[{"email":"user@example.com","password":"pwd","token":"keep","proxy_id":"proxy-1"}]
+	}`
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", raw)
+	store := config.LoadStore()
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.Accounts[0].Token = "keep"
+		return nil
+	}); err != nil {
+		t.Fatalf("seed account token: %v", err)
+	}
+	h := newHTTPAdminHarnessWithStore(store)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminReq(http.MethodDelete, "/proxies/subscriptions/sub-1", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected safe route conflict, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	snapshot := store.Snapshot()
+	if len(snapshot.ProxySubscriptions) != 1 || len(snapshot.Proxies) != 1 || snapshot.Accounts[0].ProxyID != "proxy-1" || snapshot.Accounts[0].Token != "keep" {
+		t.Fatalf("failed deletion changed configuration: %#v", snapshot)
+	}
+}
+
+func TestDeleteSubscriptionPreservesRouteChangesWhenXraySyncFails(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_subscriptions":[{"id":"sub-1","name":"Airport","url":"https://example.com/sub"}],
+		"proxies":[
+			{"id":"node","name":"Node","type":"socks5","host":"127.0.0.1","port":1080,"subscription_id":"sub-1"},
+			{"id":"fallback","name":"Fallback","type":"socks5","host":"127.0.0.1","port":1081}
+		],
+		"proxy_policy":{"fallback_proxy_id":"fallback"},
+		"accounts":[{"email":"user@example.com","password":"pwd","token":"old-token","proxy_id":"node"}]
+	}`)
+	originalSync := syncProxyRoutes
+	t.Cleanup(func() { syncProxyRoutes = originalSync })
+	syncProxyRoutes = func(context.Context, xrayproxy.CoreConfigStore) error {
+		return errors.New("simulated xray sync failure")
+	}
+
+	r := chi.NewRouter()
+	r.Delete("/admin/proxies/subscriptions/{subscriptionID}", h.deleteProxySubscription)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/admin/proxies/subscriptions/sub-1", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected partial deletion gateway status, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode partial deletion response: %v", err)
+	}
+	if payload["success"] != false || payload["partial"] != true {
+		t.Fatalf("expected explicit partial response, got %#v", payload)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("node_deleted_fallback")) || !bytes.Contains(rec.Body.Bytes(), []byte("simulated xray sync failure")) {
+		t.Fatalf("response lost committed route/sync details: %s", rec.Body.String())
+	}
+	account, ok := h.Store.FindAccount("user@example.com")
+	if !ok || account.ProxyID != "fallback" || account.Token != "token" {
+		t.Fatalf("committed fallback route was not relogged: %#v", account)
 	}
 }
 
@@ -115,6 +197,41 @@ func TestProxyBatchActionDisablesSelectedNodes(t *testing.T) {
 	}
 	if len(payload.Items) != 2 || payload.Items[0].Disabled || !payload.Items[1].Disabled || payload.Items[1].DisabledReason != config.ProxyDisabledManual {
 		t.Fatalf("unexpected batch state: %#v", payload.Items)
+	}
+}
+
+func TestProxyBatchDisableMigratesAssignedRoutesBeforeDisabling(t *testing.T) {
+	h := newAdminProxyTestHandler(t, `{
+		"proxy_policy":{"auto_route_enabled":true,"fallback_proxy_id":"fallback"},
+		"proxies":[
+			{"id":"disabled-node","type":"socks5","host":"127.0.0.1","port":1080},
+			{"id":"fallback","type":"socks5","host":"127.0.0.1","port":1081},
+			{"id":"healthy","type":"socks5","host":"127.0.0.1","port":1082,"last_test_at_unix":10,"last_test_success":true}
+		],
+		"accounts":[
+			{"email":"manual@example.com","password":"pwd","token":"manual-token","proxy_id":"disabled-node"},
+			{"email":"automatic@example.com","password":"pwd","token":"automatic-token","proxy_id":"disabled-node","proxy_auto_route":true}
+		]
+	}`)
+	h.DS = nil
+	r := chi.NewRouter()
+	r.Post("/admin/proxies/actions", h.proxyBatchAction)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, adminReq(http.MethodPost, "/admin/proxies/actions", []byte(`{"proxy_ids":["disabled-node"],"action":"disable"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected route migration before disable, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	snapshot := h.Store.Snapshot()
+	if snapshot.Accounts[0].ProxyID != "fallback" || snapshot.Accounts[0].Token != "" {
+		t.Fatalf("manual account was not moved/invalidate: %#v", snapshot.Accounts[0])
+	}
+	if snapshot.Accounts[1].ProxyID != "healthy" || snapshot.Accounts[1].Token != "" {
+		t.Fatalf("automatic account was not rebalanced/invalidate: %#v", snapshot.Accounts[1])
+	}
+	for _, proxy := range snapshot.Proxies {
+		if proxy.ID == "disabled-node" && !proxy.Disabled {
+			t.Fatalf("selected proxy was not disabled: %#v", proxy)
+		}
 	}
 }
 

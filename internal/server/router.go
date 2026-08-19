@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -55,6 +56,7 @@ func NewApp() (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	configureTrustedProxyCIDRs()
 	pool := account.NewPool(store)
 	var dsClient *dsclient.Client
 	resolver := auth.NewResolver(store, pool, func(ctx context.Context, acc config.Account) (string, error) {
@@ -224,6 +226,49 @@ func NewApp() (*App, error) {
 	return app, nil
 }
 
+// configureTrustedProxyCIDRs keeps forwarding-header trust explicit. Private
+// address space is often shared with clients (LAN, VPN, Docker bridge), so it
+// is deliberately not trusted unless the operator names the proxy CIDR here.
+func configureTrustedProxyCIDRs() {
+	raw, present := os.LookupEnv("DEEPSEEK_WEB_TO_API_TRUSTED_PROXY_CIDRS")
+	if !present || strings.TrimSpace(raw) == "" {
+		requestmeta.SetTrustedProxyCIDRs(nil)
+		return
+	}
+	values := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	})
+	valid := make([]string, 0, len(values))
+	invalid := make([]string, 0)
+	for _, value := range values {
+		ip, network, err := net.ParseCIDR(value)
+		if err != nil {
+			invalid = append(invalid, value)
+			continue
+		}
+		bits := 128
+		if ip.To4() != nil {
+			bits = 32
+		}
+		ones, _ := network.Mask.Size()
+		if ones == 0 || ones > bits {
+			invalid = append(invalid, value)
+			continue
+		}
+		valid = append(valid, value)
+	}
+	if len(valid) == 0 {
+		requestmeta.SetTrustedProxyCIDRs(nil)
+		config.Logger.Warn("[server] invalid trusted proxy CIDR setting; using loopback-only defaults", "invalid_count", len(invalid))
+		return
+	}
+	requestmeta.SetTrustedProxyCIDRs(valid)
+	if len(invalid) > 0 {
+		config.Logger.Warn("[server] ignored invalid trusted proxy CIDRs", "invalid_count", len(invalid), "trusted_count", len(valid))
+	}
+	config.Logger.Info("[server] configured trusted proxy CIDRs", "trusted_count", len(valid))
+}
+
 // StartSelfUpdate starts periodic release checks after the main process has
 // completed its network and admin-security initialization.
 func (a *App) StartSelfUpdate(ctx context.Context) {
@@ -331,7 +376,52 @@ func (f *filteredLogFormatter) NewLogEntry(r *http.Request) middleware.LogEntry 
 			return noopLogEntry{}
 		}
 	}
-	return f.base.NewLogEntry(r)
+	return f.base.NewLogEntry(sanitizeLoggedRequest(r))
+}
+
+// sanitizeLoggedRequest returns a shallow request copy so the access logger
+// cannot persist API/admin credentials embedded in a query or key-management
+// path. The live request remains untouched for downstream authentication.
+func sanitizeLoggedRequest(r *http.Request) *http.Request {
+	if r == nil || r.URL == nil {
+		return r
+	}
+	clone := new(http.Request)
+	*clone = *r
+	urlCopy := *r.URL
+	query := urlCopy.Query()
+	for name := range query {
+		if sensitiveLogQueryKey(name) {
+			query.Set(name, "[REDACTED]")
+		}
+	}
+	urlCopy.RawQuery = query.Encode()
+	pathParts := strings.Split(urlCopy.Path, "/")
+	if len(pathParts) >= 4 && pathParts[1] == "admin" && pathParts[2] == "keys" && pathParts[3] != "" {
+		urlCopy.Path = "/admin/keys/[REDACTED]"
+		urlCopy.RawPath = ""
+	}
+	clone.URL = &urlCopy
+	clone.RequestURI = urlCopy.RequestURI()
+	return clone
+}
+
+func sensitiveLogQueryKey(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var normalized strings.Builder
+	for _, r := range name {
+		if r == '_' || r == '-' {
+			continue
+		}
+		normalized.WriteRune(r)
+	}
+	switch normalized.String() {
+	case "key", "apikey", "token", "accesstoken", "refreshtoken", "adminkey",
+		"password", "passwd", "secret", "clientsecret", "privatekey", "authorization":
+		return true
+	default:
+		return false
+	}
 }
 
 type noopLogEntry struct{}

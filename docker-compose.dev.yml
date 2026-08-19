@@ -17,7 +17,7 @@ services:
     command: ["go", "run", "./cmd/DeepSeek_Web_To_API"]
     ports:
       # Host port is configurable via DEEPSEEK_WEB_TO_API_HOST_PORT; container port stays fixed at 5001.
-      - "${DEEPSEEK_WEB_TO_API_HOST_PORT:-6011}:5001"
+      - "${DEEPSEEK_WEB_TO_API_HOST_BIND_ADDR:-127.0.0.1}:${DEEPSEEK_WEB_TO_API_HOST_PORT:-6011}:5001"
     env_file:
       - .env
     environment:

@@ -317,6 +317,13 @@ func requestBodyShouldBeRead(r *http.Request) bool {
 	if r == nil || r.Body == nil || r.Body == http.NoBody {
 		return false
 	}
+	// Administrative payloads are not part of the public content-safety scan.
+	// Skipping the eager 64 MiB copy here also ensures route-specific limits in
+	// requestbody/auth are applied before an attacker can duplicate a large
+	// login or config-import body in this middleware.
+	if r.URL != nil && strings.HasPrefix(strings.TrimSpace(r.URL.Path), "/admin/") {
+		return false
+	}
 	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
 		return false
 	}

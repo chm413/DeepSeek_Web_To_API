@@ -8,10 +8,14 @@ import (
 )
 
 func TestNewFromEnvDefaults(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE", "")
 	t.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE_LIMIT", "")
 	t.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE_MAX_BODY_BYTES", "")
 
 	s := NewFromEnv()
+	if s.Enabled() {
+		t.Fatal("expected packet capture to be disabled by default")
+	}
 	if s.Limit() != 20 {
 		t.Fatalf("expected default limit 20, got %d", s.Limit())
 	}
@@ -21,9 +25,13 @@ func TestNewFromEnvDefaults(t *testing.T) {
 }
 
 func TestNewFromEnvHonorsOverrides(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE", "true")
 	t.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE_LIMIT", "7")
 	t.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE_MAX_BODY_BYTES", "8192")
 	s := NewFromEnv()
+	if !s.Enabled() {
+		t.Fatal("expected explicit packet capture opt-in to enable capture")
+	}
 	if s.Limit() != 7 {
 		t.Fatalf("expected override limit 7, got %d", s.Limit())
 	}

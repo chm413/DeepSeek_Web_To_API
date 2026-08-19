@@ -2,6 +2,7 @@ package sse
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -16,10 +17,38 @@ func TestStartParsedLinePumpEmptyBody(t *testing.T) {
 		collected = append(collected, r)
 	}
 	if err := <-done; err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error for an empty stream: %v", err)
 	}
 	if len(collected) != 0 {
 		t.Fatalf("expected no results for empty body, got %d", len(collected))
+	}
+}
+
+func TestStartParsedLinePumpReportsUnexpectedEOFAfterContent(t *testing.T) {
+	body := strings.NewReader("data: {\"p\":\"response/content\",\"v\":\"partial\"}\n")
+	results, done := StartParsedLinePump(context.Background(), body, false, "text")
+
+	var content string
+	for result := range results {
+		for _, part := range result.Parts {
+			content += part.Text
+		}
+	}
+	if content != "partial" {
+		t.Fatalf("expected partial content to be delivered before EOF, got %q", content)
+	}
+	if err := <-done; !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected unexpected EOF after partial content, got %v", err)
+	}
+}
+
+func TestStartParsedLinePumpFinishedStatusCountsAsTerminal(t *testing.T) {
+	body := strings.NewReader("data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n")
+	results, done := StartParsedLinePump(context.Background(), body, false, "text")
+	for range results {
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("expected FINISHED status to terminate cleanly, got %v", err)
 	}
 }
 

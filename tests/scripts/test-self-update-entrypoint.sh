@@ -31,6 +31,13 @@ make_release() {
   local dir="$UPDATE_ROOT/versions/$tag"
   mkdir -p "$dir/static/admin"
   make_binary "$dir/deepseek-web-to-api" "$label" "$exit_code"
+  printf '%s\n' "$label" > "$dir/static/admin/index.html"
+  local binary_sha256
+  binary_sha256="$(sha256sum "$dir/deepseek-web-to-api" | awk '{print $1}')"
+  local static_file_hash static_tree_sha256
+  static_file_hash="$(sha256sum "$dir/static/admin/index.html" | awk '{print $1}')"
+  static_tree_sha256="$(printf 'index.html\000%s\000' "$static_file_hash" | sha256sum | awk '{print $1}')"
+  printf '{"tag":"%s","binary_sha256":"%s","static_tree_sha256":"%s"}\n' "$tag" "$binary_sha256" "$static_tree_sha256" > "$dir/.verified.json"
 }
 
 run_entrypoint() {
@@ -121,6 +128,30 @@ printf 'v1.4.0\n' > "$UPDATE_ROOT/current.version"
 run_entrypoint
 if [[ "$(cat "$LOG_FILE")" != "newer-persistent" ]]; then
   echo "newer persistent release must win over immutable image" >&2
+  exit 1
+fi
+
+: > "$LOG_FILE"
+# A persistent release whose binary changed after staging must be quarantined
+# before it is ever executed. The immutable image remains the fallback.
+printf 'tampered\n' >> "$UPDATE_ROOT/versions/v1.4.0/deepseek-web-to-api"
+printf 'v1.4.0\n' > "$UPDATE_ROOT/current.version"
+run_entrypoint
+if [[ "$(cat "$LOG_FILE")" != "immutable" ]]; then
+  echo "tampered persistent release must not be executed" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
+: > "$LOG_FILE"
+# Static assets are part of the verified release contract too.
+make_release "v1.6.0" "tampered-static" 0
+printf 'tampered-static\n' >> "$UPDATE_ROOT/versions/v1.6.0/static/admin/index.html"
+printf 'v1.6.0\n' > "$UPDATE_ROOT/current.version"
+run_entrypoint
+if [[ "$(cat "$LOG_FILE")" != "immutable" ]]; then
+  echo "tampered static assets must not be executed" >&2
+  cat "$LOG_FILE" >&2
   exit 1
 fi
 

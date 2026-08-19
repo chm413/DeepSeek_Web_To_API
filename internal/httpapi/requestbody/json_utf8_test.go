@@ -3,6 +3,7 @@ package requestbody
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -129,6 +130,19 @@ func TestValidateJSONUTF8RejectsTrailingInvalidBytesAfterJSONValue(t *testing.T)
 	}
 }
 
+func TestValidateJSONUTF8RejectsTrailingJSONValue(t *testing.T) {
+	handler := ValidateJSONUTF8(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(`{"admin_key":"valid"}{"ignored":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if body, ok := req.Body.(*errorReadCloser); !ok || !errors.Is(body.err, ErrInvalidJSONBody) {
+		t.Fatalf("expected invalid JSON body marker, got %#v", req.Body)
+	}
+}
+
 func TestIsJSONContentType(t *testing.T) {
 	for _, raw := range []string{
 		"application/json",
@@ -154,5 +168,25 @@ func TestIsJSONContentType(t *testing.T) {
 func TestIsKnownJSONRequestPathIncludesGeminiStream(t *testing.T) {
 	if !isKnownJSONRequestPath(http.MethodPost, "/v1beta/models/gemini-pro:streamGenerateContent") {
 		t.Fatal("expected Gemini stream generate path to be recognized as json")
+	}
+}
+
+func TestValidateJSONUTF8UsesSmallLimitForAdminLogin(t *testing.T) {
+	body := bytes.NewBufferString(`{"admin_key":"` + strings.Repeat("a", maxAdminLoginJSONUTF8ValidationSize) + `"}`)
+	handler := ValidateJSONUTF8(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if err := req.Body.(*errorReadCloser).err; !errors.Is(err, errRequestBodyTooLarge) {
+		t.Fatalf("expected admin login body limit error, got %v", err)
+	}
+}
+
+func TestJSONValidationLimitBoundsOtherAdminRoutes(t *testing.T) {
+	if got := jsonValidationLimit(httptest.NewRequest(http.MethodPost, "/admin/config/import", nil)); got != maxAdminJSONUTF8ValidationSize {
+		t.Fatalf("admin config import limit = %d, want %d", got, maxAdminJSONUTF8ValidationSize)
 	}
 }

@@ -18,21 +18,25 @@ import (
 )
 
 type sessionChunkingDSStub struct {
-	createCount    int
-	messageID      int
-	mainPrompts    []string
-	mainParents    []int
-	plannerCalls   int
-	deleted        []string
-	rawCalls       int
-	rawPrompts     []string
-	rawSessions    []string
-	rawThinking    []bool
-	emptyControl   int
-	emptyFragment  int
-	idOnlyFragment int
-	idOnlyControl  int
-	uniqueSessions bool
+	createCount       int
+	messageID         int
+	mainPrompts       []string
+	mainParents       []int
+	plannerCalls      int
+	deleted           []string
+	rawCalls          int
+	rawPrompts        []string
+	rawSessions       []string
+	rawThinking       []bool
+	rawMaxAttempts    []int
+	emptyControl      int
+	emptyFragment     int
+	eofFragment       int
+	fragmentErrors    []error
+	fragmentResponses []*http.Response
+	idOnlyFragment    int
+	idOnlyControl     int
+	uniqueSessions    bool
 }
 
 func (s *sessionChunkingDSStub) CreateSession(context.Context, *auth.RequestAuth, int) (string, error) {
@@ -79,7 +83,8 @@ func (s *sessionChunkingDSStub) CallCompletionPinnedRaw(ctx context.Context, a *
 	return s.callCompletionRaw(ctx, a, payload, pow)
 }
 
-func (s *sessionChunkingDSStub) CallCompletionRaw(ctx context.Context, a *auth.RequestAuth, payload map[string]any, pow string, _ int) (*http.Response, error) {
+func (s *sessionChunkingDSStub) CallCompletionRaw(ctx context.Context, a *auth.RequestAuth, payload map[string]any, pow string, maxAttempts int) (*http.Response, error) {
+	s.rawMaxAttempts = append(s.rawMaxAttempts, maxAttempts)
 	return s.callCompletionRaw(ctx, a, payload, pow)
 }
 
@@ -90,6 +95,20 @@ func (s *sessionChunkingDSStub) callCompletionRaw(ctx context.Context, a *auth.R
 	s.rawSessions = append(s.rawSessions, fmt.Sprint(payload["chat_session_id"]))
 	thinking, _ := payload["thinking_enabled"].(bool)
 	s.rawThinking = append(s.rawThinking, thinking)
+	if strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") && len(s.fragmentErrors) > 0 {
+		err := s.fragmentErrors[0]
+		s.fragmentErrors = s.fragmentErrors[1:]
+		return nil, err
+	}
+	if strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") && len(s.fragmentResponses) > 0 {
+		resp := s.fragmentResponses[0]
+		s.fragmentResponses = s.fragmentResponses[1:]
+		return resp, nil
+	}
+	if s.eofFragment > 0 && strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
+		s.eofFragment--
+		return chunkingEOFSSE(), nil
+	}
 	if s.emptyFragment > 0 && strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
 		s.emptyFragment--
 		return chunkingEmptySSE(), nil
@@ -296,10 +315,15 @@ func TestTryPrepareSessionChunkingAcceptsCompletedMessageIDOnlyControl(t *testin
 	}
 }
 
-func TestTryPrepareSessionChunkingDoesNotReplayIndeterminateFragment(t *testing.T) {
-	oldDelay := sessionChunkTransitionDelay
+func TestTryPrepareSessionChunkingRetriesEmptyDoneFragment(t *testing.T) {
+	oldTransitionDelay := sessionChunkTransitionDelay
+	oldRetryDelay := sessionChunkFragmentRetryDelay
 	sessionChunkTransitionDelay = 0
-	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
+	sessionChunkFragmentRetryDelay = 0
+	t.Cleanup(func() {
+		sessionChunkTransitionDelay = oldTransitionDelay
+		sessionChunkFragmentRetryDelay = oldRetryDelay
+	})
 
 	ds := &sessionChunkingDSStub{emptyFragment: 1}
 	cfg := config.DefaultPromptLimitSettings()
@@ -313,21 +337,267 @@ func TestTryPrepareSessionChunkingDoesNotReplayIndeterminateFragment(t *testing.
 		FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
 		IncrementalFormatPrompt: "Return exactly one JSON object.",
 	}
-	_, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
-	if err == nil || !IsRetryableSessionChunkingFailure(err) {
-		t.Fatalf("expected retryable indeterminate fragment error, got %v", err)
+	prepared, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
+	if err != nil || prepared == nil {
+		t.Fatalf("expected retry after empty done fragment, prepared=%#v err=%v", prepared, err)
 	}
-	fragmentCalls := 0
-	for _, prompt := range ds.rawPrompts {
+	fragmentIndexes := make([]int, 0, 2)
+	for index, prompt := range ds.rawPrompts {
 		if strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
-			fragmentCalls++
+			fragmentIndexes = append(fragmentIndexes, index)
 		}
 	}
-	if fragmentCalls != 1 {
-		t.Fatalf("indeterminate fragment must not be replayed in its original session, calls=%d", fragmentCalls)
+	if len(fragmentIndexes) < prepared.ChunkCount {
+		t.Fatalf("expected one extra intermediate fragment attempt, calls=%d chunks=%d", len(fragmentIndexes), prepared.ChunkCount)
 	}
-	if !containsChunkingTestString(ds.deleted, "main-session") {
-		t.Fatalf("failed root session was not discarded: %#v", ds.deleted)
+	first, second := fragmentIndexes[0], fragmentIndexes[1]
+	if ds.rawSessions[first] != "main-session" || ds.rawSessions[second] != "main-session" {
+		t.Fatalf("clean empty done must retry in the same root session: %#v", ds.rawSessions)
+	}
+	if containsChunkingTestString(ds.deleted, "main-session") {
+		t.Fatalf("successful same-session retry must not discard the root: %#v", ds.deleted)
+	}
+}
+
+func TestTryPrepareSessionChunkingRetriesTransient502Fragment(t *testing.T) {
+	oldTransitionDelay := sessionChunkTransitionDelay
+	oldRetryDelay := sessionChunkFragmentRetryDelay
+	sessionChunkTransitionDelay = 0
+	sessionChunkFragmentRetryDelay = 0
+	t.Cleanup(func() {
+		sessionChunkTransitionDelay = oldTransitionDelay
+		sessionChunkFragmentRetryDelay = oldRetryDelay
+	})
+
+	ds := &sessionChunkingDSStub{fragmentErrors: []error{&dsclient.RequestFailure{
+		Op:         "completion",
+		Kind:       dsclient.FailureUpstreamStatus,
+		StatusCode: http.StatusBadGateway,
+		Message:    "upstream gateway reset before SSE response",
+	}}}
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.SessionChunkingEnable = true
+	cfg.MaxCharsExpert = 10000
+	cfg.SessionChunkingTargetRatio = 0.9
+	cfg.SessionChunkingMaxChunks = 16
+	cfg.SessionChunkingCommitTimeoutSeconds = 5
+	req := promptcompat.StandardRequest{
+		ResolvedModel:           "deepseek-v4-pro",
+		FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
+		IncrementalFormatPrompt: "Return exactly one JSON object.",
+	}
+	prepared, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
+	if err != nil || prepared == nil {
+		t.Fatalf("expected retry after transient 502, prepared=%#v err=%v", prepared, err)
+	}
+	fragmentIndexes := make([]int, 0, 2)
+	for index, prompt := range ds.rawPrompts {
+		if strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
+			fragmentIndexes = append(fragmentIndexes, index)
+		}
+	}
+	if len(fragmentIndexes) < prepared.ChunkCount {
+		t.Fatalf("expected one extra transient fragment attempt, calls=%d chunks=%d", len(fragmentIndexes), prepared.ChunkCount)
+	}
+	first, second := fragmentIndexes[0], fragmentIndexes[1]
+	if ds.rawSessions[first] != "main-session" || ds.rawSessions[second] != "main-session" {
+		t.Fatalf("transient 502 must retry in the same root session: %#v", ds.rawSessions)
+	}
+	if ds.rawMaxAttempts != nil {
+		t.Fatalf("fragment 502 must use pinned completion so no account-switching raw call is made: raw max attempts=%v", ds.rawMaxAttempts)
+	}
+}
+
+func TestTryPrepareSessionChunkingPreserves502WhenResponseBodyIsEmpty(t *testing.T) {
+	oldTransitionDelay := sessionChunkTransitionDelay
+	oldRetryDelay := sessionChunkFragmentRetryDelay
+	sessionChunkTransitionDelay = 0
+	sessionChunkFragmentRetryDelay = 0
+	t.Cleanup(func() {
+		sessionChunkTransitionDelay = oldTransitionDelay
+		sessionChunkFragmentRetryDelay = oldRetryDelay
+	})
+
+	ds := &sessionChunkingDSStub{fragmentResponses: []*http.Response{{StatusCode: http.StatusBadGateway}}}
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.SessionChunkingEnable = true
+	cfg.MaxCharsExpert = 10000
+	cfg.SessionChunkingTargetRatio = 0.9
+	cfg.SessionChunkingMaxChunks = 16
+	cfg.SessionChunkingCommitTimeoutSeconds = 5
+	req := promptcompat.StandardRequest{
+		ResolvedModel:           "deepseek-v4-pro",
+		FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
+		IncrementalFormatPrompt: "Return exactly one JSON object.",
+	}
+	prepared, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
+	if err != nil || prepared == nil {
+		t.Fatalf("empty-body 502 should be retried as transient, prepared=%#v err=%v", prepared, err)
+	}
+	if len(ds.fragmentResponses) != 0 {
+		t.Fatalf("empty-body 502 response was not consumed: %#v", ds.fragmentResponses)
+	}
+}
+
+func TestTryPrepareSessionChunkingDoesNotRetry429InSameSession(t *testing.T) {
+	tests := []struct {
+		name              string
+		err               error
+		wantCapacity      bool
+		wantAccountReplay bool
+	}{
+		{
+			name: "session capacity",
+			err: &dsclient.RequestFailure{
+				Op:             "completion",
+				Kind:           dsclient.FailureUpstreamStatus,
+				StatusCode:     http.StatusTooManyRequests,
+				RateLimitScope: dsclient.RateLimitScopeSessionCapacity,
+				Message:        "maximum conversation turns reached",
+			},
+			wantCapacity: true,
+		},
+		{
+			name: "account rate limit",
+			err: &dsclient.RequestFailure{
+				Op:         "completion",
+				Kind:       dsclient.FailureUpstreamStatus,
+				StatusCode: http.StatusTooManyRequests,
+				Message:    "rate limited",
+			},
+			wantAccountReplay: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldTransitionDelay := sessionChunkTransitionDelay
+			oldRetryDelay := sessionChunkFragmentRetryDelay
+			sessionChunkTransitionDelay = 0
+			sessionChunkFragmentRetryDelay = 0
+			t.Cleanup(func() {
+				sessionChunkTransitionDelay = oldTransitionDelay
+				sessionChunkFragmentRetryDelay = oldRetryDelay
+			})
+
+			ds := &sessionChunkingDSStub{fragmentErrors: []error{tc.err}}
+			cfg := config.DefaultPromptLimitSettings()
+			cfg.SessionChunkingEnable = true
+			cfg.MaxCharsExpert = 10000
+			cfg.SessionChunkingTargetRatio = 0.9
+			cfg.SessionChunkingMaxChunks = 16
+			cfg.SessionChunkingCommitTimeoutSeconds = 5
+			req := promptcompat.StandardRequest{
+				ResolvedModel:           "deepseek-v4-pro",
+				FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
+				IncrementalFormatPrompt: "Return exactly one JSON object.",
+			}
+			_, err := TryPrepareSessionChunking(context.Background(), ds, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg, "", 0)
+			if err == nil {
+				t.Fatal("expected fragment 429 to fail preparation")
+			}
+			fragmentCalls := 0
+			for _, prompt := range ds.rawPrompts {
+				if strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
+					fragmentCalls++
+				}
+			}
+			if fragmentCalls != 1 {
+				t.Fatalf("429 must not be retried in the same session, fragment_calls=%d", fragmentCalls)
+			}
+			if got := IsSessionCapacityRateLimit(err); got != tc.wantCapacity {
+				t.Fatalf("session capacity classification=%v want=%v: %v", got, tc.wantCapacity, err)
+			}
+			if got := ShouldReplayPinnedBranch(err); got != tc.wantAccountReplay {
+				t.Fatalf("account replay classification=%v want=%v: %v", got, tc.wantAccountReplay, err)
+			}
+		})
+	}
+}
+
+func TestTryPrepareRootSessionChunkingReplaysSameAccountAfterPersistent502(t *testing.T) {
+	oldTransitionDelay := sessionChunkTransitionDelay
+	oldRetryDelay := sessionChunkFragmentRetryDelay
+	sessionChunkTransitionDelay = 0
+	sessionChunkFragmentRetryDelay = 0
+	t.Cleanup(func() {
+		sessionChunkTransitionDelay = oldTransitionDelay
+		sessionChunkFragmentRetryDelay = oldRetryDelay
+	})
+
+	badGateway := func() error {
+		return &dsclient.RequestFailure{
+			Op:         "completion",
+			Kind:       dsclient.FailureUpstreamStatus,
+			StatusCode: http.StatusBadGateway,
+			Message:    "upstream gateway reset before SSE response",
+		}
+	}
+	ds := &sessionChunkingDSStub{
+		uniqueSessions: true,
+		fragmentErrors: []error{badGateway(), badGateway()},
+	}
+	cfg := config.DefaultPromptLimitSettings()
+	cfg.SessionChunkingEnable = true
+	cfg.MaxCharsExpert = 10000
+	cfg.SessionChunkingTargetRatio = 0.9
+	cfg.SessionChunkingMaxChunks = 16
+	cfg.SessionChunkingCommitTimeoutSeconds = 5
+	req := promptcompat.StandardRequest{
+		Surface:                 "test",
+		ResolvedModel:           "deepseek-v4-pro",
+		FinalPrompt:             strings.Repeat("safe paragraph boundary.\n\n", 500),
+		IncrementalFormatPrompt: "Return exactly one JSON object.",
+	}
+	prepared, err := TryPrepareRootSessionChunkingWithFailover(context.Background(), ds, nil, &auth.RequestAuth{AccountID: "account", DeepSeekToken: "token"}, req, cfg)
+	if err != nil || prepared == nil {
+		t.Fatalf("persistent 502 should rebuild the same-account root, prepared=%#v err=%v", prepared, err)
+	}
+	if prepared.SessionID != "main-session-4" {
+		t.Fatalf("expected rebuilt root session, got %q", prepared.SessionID)
+	}
+	if !containsChunkingTestString(ds.deleted, "main-session-2") {
+		t.Fatalf("failed 502 root was not deleted: %#v", ds.deleted)
+	}
+	fragmentSessions := make([]string, 0, 2)
+	for index, prompt := range ds.rawPrompts {
+		if strings.Contains(prompt, "[OVERSIZED_REQUEST_INTERMEDIATE") {
+			fragmentSessions = append(fragmentSessions, ds.rawSessions[index])
+		}
+	}
+	if len(fragmentSessions) < 2 || fragmentSessions[0] != "main-session-2" || fragmentSessions[1] != "main-session-2" {
+		t.Fatalf("persistent 502 did not exhaust same-session attempts before root replay: %#v", fragmentSessions)
+	}
+}
+
+func TestSessionChunkEndClassifiesDoneAndEOFSeparately(t *testing.T) {
+	doneErr := newSessionChunkUncommittedError("session", 7, "fragment", "upstream finished before required reasoning/content started", sessionChunkTerminalDone, 0, false, nil, time.Millisecond)
+	if !isRetryableSameSessionFragmentFailure(doneErr) {
+		t.Fatal("empty [DONE] without a response ID must get one bounded same-session retry")
+	}
+	if !IsRetryableSessionChunkingFailure(doneErr) {
+		t.Fatal("empty [DONE] must also permit bounded same-account root replay after retry exhaustion")
+	}
+	eofErr := newSessionChunkUncommittedError("session", 7, "fragment", "upstream stream ended before fragment commit", sessionChunkTerminalEOF, 0, false, nil, time.Millisecond)
+	if isRetryableSameSessionFragmentFailure(eofErr) {
+		t.Fatal("EOF must not duplicate an indeterminate fragment in the same session")
+	}
+	if !IsRetryableSessionChunkingFailure(eofErr) {
+		t.Fatal("EOF must permit bounded same-account root replay")
+	}
+}
+
+func TestSessionChunkHTTPFailureSeparatesCapacityAccountAndGateway(t *testing.T) {
+	capacityErr := sessionChunkHTTPFailure(http.StatusTooManyRequests, `{"message":"maximum conversation turns reached"}`)
+	if !IsSessionCapacityRateLimit(capacityErr) || ShouldReplayPinnedBranch(capacityErr) {
+		t.Fatalf("capacity 429 was not kept on the same account: class=%s err=%v", sessionChunkFailureClass(capacityErr), capacityErr)
+	}
+	accountErr := sessionChunkHTTPFailure(http.StatusTooManyRequests, `{"message":"rate limited"}`)
+	if IsSessionCapacityRateLimit(accountErr) || !ShouldReplayPinnedBranch(accountErr) {
+		t.Fatalf("ambiguous account 429 was not classified for account failover: class=%s err=%v", sessionChunkFailureClass(accountErr), accountErr)
+	}
+	gatewayErr := sessionChunkHTTPFailure(http.StatusBadGateway, "gateway reset")
+	if !IsRetryableSessionChunkingFailure(gatewayErr) || ShouldReplayPinnedBranch(gatewayErr) {
+		t.Fatalf("502 was not classified as same-account transient root replay: class=%s err=%v", sessionChunkFailureClass(gatewayErr), gatewayErr)
 	}
 }
 
@@ -336,7 +606,7 @@ func TestTryPrepareSessionChunkingKeepsExistingBranchAfterIndeterminateFragment(
 	sessionChunkTransitionDelay = 0
 	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
 
-	ds := &sessionChunkingDSStub{emptyFragment: 1}
+	ds := &sessionChunkingDSStub{eofFragment: 1}
 	cfg := config.DefaultPromptLimitSettings()
 	cfg.SessionChunkingEnable = true
 	cfg.MaxCharsExpert = 10000
@@ -361,11 +631,11 @@ func TestTryPrepareSessionChunkingKeepsExistingBranchAfterIndeterminateFragment(
 }
 
 func TestSessionChunkIndeterminateDeadlineCanRebuildButCallerCancelCannot(t *testing.T) {
-	timeoutErr := newSessionChunkUncommittedError("session", 7, "fragment", "timed out waiting for fragment commit", 0, false, context.DeadlineExceeded, time.Millisecond)
+	timeoutErr := newSessionChunkUncommittedError("session", 7, "fragment", "timed out waiting for fragment commit", sessionChunkTerminalTimeout, 0, false, context.DeadlineExceeded, time.Millisecond)
 	if !IsRetryableSessionChunkingFailure(timeoutErr) {
 		t.Fatalf("local fragment deadline must allow a fresh-root rebuild: %v", timeoutErr)
 	}
-	cancelledErr := newSessionChunkUncommittedError("session", 7, "fragment", "caller cancelled", 0, false, context.Canceled, time.Millisecond)
+	cancelledErr := newSessionChunkUncommittedError("session", 7, "fragment", "caller cancelled", sessionChunkTerminalTimeout, 0, false, context.Canceled, time.Millisecond)
 	if IsRetryableSessionChunkingFailure(cancelledErr) {
 		t.Fatalf("caller cancellation must not rebuild a fresh root: %v", cancelledErr)
 	}
@@ -376,7 +646,7 @@ func TestTryPrepareRootSessionChunkingRebuildsAfterIndeterminateFragment(t *test
 	sessionChunkTransitionDelay = 0
 	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
 
-	ds := &sessionChunkingDSStub{emptyFragment: 1, uniqueSessions: true}
+	ds := &sessionChunkingDSStub{eofFragment: 1, uniqueSessions: true}
 	cfg := config.DefaultPromptLimitSettings()
 	cfg.SessionChunkingEnable = true
 	cfg.MaxCharsExpert = 10000
@@ -412,7 +682,7 @@ func TestTryPrepareRootSessionChunkingBoundsIndeterminateReplay(t *testing.T) {
 	sessionChunkTransitionDelay = 0
 	t.Cleanup(func() { sessionChunkTransitionDelay = oldDelay })
 
-	ds := &sessionChunkingDSStub{emptyFragment: 2, uniqueSessions: true}
+	ds := &sessionChunkingDSStub{eofFragment: 2, uniqueSessions: true}
 	cfg := config.DefaultPromptLimitSettings()
 	cfg.SessionChunkingEnable = true
 	cfg.MaxCharsExpert = 10000
@@ -453,6 +723,14 @@ func chunkingEmptySSE() *http.Response {
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+	}
+}
+
+func chunkingEOFSSE() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("")),
 	}
 }
 

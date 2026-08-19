@@ -52,26 +52,20 @@ type Metadata struct {
 	ConversationID string
 }
 
-// defaultTrustedProxyCIDRs accepts only loopback and private-network
-// peers. When ds2api is deployed behind Caddy / Nginx on the same host,
-// the proxy's connection appears as 127.0.0.1 and the X-Forwarded-For
-// header is set by the proxy after stripping any client-supplied value
-// — that's the deployment shape documented in docs/deployment.md.
-// Internet-facing peers DO NOT match these CIDRs, so client-supplied
-// X-Forwarded-For / X-Real-IP / CF-Connecting-IP headers are ignored
-// for those connections (their RemoteAddr is the source of truth).
+// defaultTrustedProxyCIDRs accepts only loopback peers. A private address is
+// not proof that the immediate peer is a reverse proxy: on a LAN, VPN, or
+// Docker bridge an untrusted client can connect from RFC1918 space and forge
+// forwarding headers. Same-host Caddy / Nginx deployments continue to work
+// because their connection appears as 127.0.0.1 or ::1. Operators using a
+// reverse proxy elsewhere must opt in with SetTrustedProxyCIDRs at startup;
+// the server wires DEEPSEEK_WEB_TO_API_TRUSTED_PROXY_CIDRS to that setter.
 //
-// Operators with a trusted proxy on a different IP should add an
-// override via SetTrustedProxyCIDRs at startup; the default set is
-// safe-by-default for direct-to-internet exposure.
+// Forwarding headers are ignored for any other peer, and the connection
+// address remains the source of truth.
+// — that's the deployment shape documented in docs/deployment.md.
 var defaultTrustedProxyCIDRs = []string{
 	"127.0.0.0/8",
 	"::1/128",
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
-	"fc00::/7",
-	"fe80::/10",
 }
 
 var trustedProxyNets = parseTrustedNets(defaultTrustedProxyCIDRs)
@@ -90,10 +84,18 @@ func SetTrustedProxyCIDRs(cidrs []string) {
 func parseTrustedNets(raw []string) []*net.IPNet {
 	nets := make([]*net.IPNet, 0, len(raw))
 	for _, c := range raw {
-		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(c))
-		if err == nil && ipnet != nil {
-			nets = append(nets, ipnet)
+		ip, ipnet, err := net.ParseCIDR(strings.TrimSpace(c))
+		if err != nil || ipnet == nil || ip == nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		// A catch-all proxy range would re-enable header spoofing for every
+		// direct client. Require a non-zero, well-formed prefix even when this
+		// setter is called outside the server bootstrap path.
+		if ones <= 0 || bits <= 0 || ones > bits {
+			continue
+		}
+		nets = append(nets, ipnet)
 	}
 	return nets
 }
@@ -113,7 +115,7 @@ func isTrustedProxy(ip net.IP) bool {
 // ClientIP resolves the originating client IP using a "trusted-proxy
 // chain" model: client-supplied headers (X-Forwarded-For, X-Real-IP,
 // CF-Connecting-IP) are honored ONLY when the immediate TCP peer is in
-// the trusted-proxy set (loopback / RFC1918 / ULA by default). When the
+// the explicitly trusted-proxy set (loopback by default). When the
 // peer is internet-facing, those headers are ignored and the peer
 // address is returned verbatim. This blocks the trivial XFF spoof in
 // which an attacker sends `X-Forwarded-For: <admin-allowlisted-ip>` to

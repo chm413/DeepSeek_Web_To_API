@@ -2,6 +2,7 @@ package requestbody
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime"
@@ -12,10 +13,17 @@ import (
 
 var (
 	ErrInvalidUTF8Body     = errors.New("invalid utf-8 request body")
+	ErrInvalidJSONBody     = errors.New("invalid json request body")
 	errRequestBodyTooLarge = errors.New("request body too large")
 )
 
 const maxJSONUTF8ValidationSize = 100 << 20
+
+// Administrative JSON is bounded before any handler decoder runs. Individual
+// routes may apply a smaller limit (for example the 8 KiB login body or the
+// 16 MiB batch-account body), but none should trigger the public 100 MiB copy.
+const maxAdminJSONUTF8ValidationSize = 16 << 20
+const maxAdminLoginJSONUTF8ValidationSize = 8 << 10
 
 // ValidateJSONUTF8 validates complete JSON request bodies before downstream
 // decoders can silently replace malformed UTF-8 or stop before trailing bytes.
@@ -25,7 +33,7 @@ func ValidateJSONUTF8(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if shouldValidateJSONBody(r) {
-			r.Body = validateAndReplayBody(r.Body)
+			r.Body = validateAndReplayBody(r.Body, jsonValidationLimit(r), true)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -85,19 +93,43 @@ func isKnownJSONRequestPath(method, path string) bool {
 	}
 }
 
-func validateAndReplayBody(body io.ReadCloser) io.ReadCloser {
+func jsonValidationLimit(r *http.Request) int64 {
+	if r != nil && r.URL != nil && strings.TrimSpace(r.URL.Path) == "/admin/login" {
+		return maxAdminLoginJSONUTF8ValidationSize
+	}
+	if r != nil && r.URL != nil && strings.HasPrefix(strings.TrimSpace(r.URL.Path), "/admin/") {
+		return maxAdminJSONUTF8ValidationSize
+	}
+	return maxJSONUTF8ValidationSize
+}
+
+func validateAndReplayBody(body io.ReadCloser, limit int64, validateJSON bool) io.ReadCloser {
 	if body == nil {
 		return body
 	}
-	raw, err := io.ReadAll(io.LimitReader(body, maxJSONUTF8ValidationSize+1))
+	if limit <= 0 {
+		limit = maxJSONUTF8ValidationSize
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return &errorReadCloser{err: err, closer: body}
 	}
-	if len(raw) > maxJSONUTF8ValidationSize {
+	if int64(len(raw)) > limit {
 		return &errorReadCloser{err: errRequestBodyTooLarge, closer: body}
 	}
 	if !utf8.Valid(raw) {
 		return &errorReadCloser{err: ErrInvalidUTF8Body, closer: body}
+	}
+	if validateJSON && len(bytes.TrimSpace(raw)) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return &errorReadCloser{err: ErrInvalidJSONBody, closer: body}
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return &errorReadCloser{err: ErrInvalidJSONBody, closer: body}
+		}
 	}
 	return &replayReadCloser{Reader: bytes.NewReader(raw), closer: body}
 }

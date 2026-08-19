@@ -6,6 +6,30 @@ cd "$ROOT_DIR"
 
 source "${ROOT_DIR}/scripts/release-targets.sh"
 
+resolve_release_tag() {
+  local tag="${RELEASE_TAG:-}" version_file
+
+  if [[ -n "$tag" ]]; then
+    printf '%s\n' "$tag"
+    return 0
+  fi
+  if [[ ! -f VERSION ]]; then
+    echo "release tag is empty; set RELEASE_TAG or provide VERSION." >&2
+    return 1
+  fi
+
+  version_file="$(tr -d '[:space:]' < VERSION)"
+  if [[ -z "$version_file" ]]; then
+    echo "VERSION is empty; set RELEASE_TAG or provide a release version." >&2
+    return 1
+  fi
+
+  # GitHub Releases and the self-update asset resolver use the tag verbatim.
+  # The release workflow derives v<version> from VERSION, so manual archive
+  # builds must do the same or their files cannot be found after upload.
+  printf 'v%s\n' "${version_file#v}"
+}
+
 build_one() {
   local tag="$1" build_version="$2" goos="$3" goarch="$4" goarm="$5" label="$6"
   local pkg stage bin
@@ -47,14 +71,12 @@ if [[ "${1:-}" == "--build-one" ]]; then
   exit 0
 fi
 
-tag="${RELEASE_TAG:-}"
-if [[ -z "$tag" && -f VERSION ]]; then
-  tag="$(tr -d '[:space:]' < VERSION)"
+if [[ "${1:-}" == "--print-resolved-tag" ]]; then
+  resolve_release_tag
+  exit $?
 fi
-if [[ -z "$tag" ]]; then
-  echo "release tag is empty; set RELEASE_TAG or provide VERSION." >&2
-  exit 1
-fi
+
+tag="$(resolve_release_tag)"
 
 build_version="${BUILD_VERSION:-$tag}"
 jobs="${RELEASE_BUILD_JOBS:-}"

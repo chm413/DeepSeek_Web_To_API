@@ -386,7 +386,7 @@ func stripThinkTags(s string) string {
 }
 
 func isStatusPath(path string) bool {
-	return path == "response/status" || path == "status"
+	return path == "response/status" || path == "status" || path == "response/quasi_status" || path == "quasi_status"
 }
 
 func extractContentRecursive(items []any, defaultType string) ([]ContentPart, bool) {

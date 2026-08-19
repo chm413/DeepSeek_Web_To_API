@@ -15,6 +15,7 @@ import (
 
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
+	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
 	"DeepSeek_Web_To_API/internal/promptcompat"
 	"DeepSeek_Web_To_API/internal/sse"
 )
@@ -24,10 +25,20 @@ const (
 	sessionChunkPlannerLookaheadUnits  = 4000
 	sessionChunkEnvelopeReserveUnits   = 4096
 	sessionChunkControlMaxAttempts     = 4
+	sessionChunkFragmentMaxAttempts    = 2
 )
 
 var sessionChunkTransitionDelay = 1500 * time.Millisecond
 var sessionChunkControlRetryDelay = 750 * time.Millisecond
+var sessionChunkFragmentRetryDelay = 750 * time.Millisecond
+
+type sessionChunkTerminal string
+
+const (
+	sessionChunkTerminalEOF     sessionChunkTerminal = "eof"
+	sessionChunkTerminalDone    sessionChunkTerminal = "done"
+	sessionChunkTerminalTimeout sessionChunkTerminal = "timeout"
+)
 
 // sessionChunkUncommittedError means the upstream did not provide enough
 // evidence to advance the parent pointer for a fragment. A root branch can be
@@ -35,6 +46,7 @@ var sessionChunkControlRetryDelay = 750 * time.Millisecond
 // any response message or visible generation was observed.
 type sessionChunkUncommittedError struct {
 	reason            string
+	terminal          sessionChunkTerminal
 	responseMessageID int
 	started           bool
 	cause             error
@@ -172,8 +184,11 @@ func TryPrepareSessionChunking(ctx context.Context, ds any, a *auth.RequestAuth,
 		if units := promptcompat.PromptUnits(wirePrompt); units > limit {
 			return nil, fmt.Errorf("session chunk %d wire prompt exceeds limit: %d > %d", index+1, units, limit)
 		}
-		allowFirstFragmentFailover := index == 0 && strings.TrimSpace(existingSessionID) == ""
-		parentID, err = commitSessionChunkTurn(ctx, caller, a, &sessionID, parentID, wirePrompt, modelType, true, true, "fragment", timeout, allowFirstFragmentFailover)
+		// CreateSession has already bound this branch to the current account.
+		// Every child turn must therefore use pinned credentials; an account
+		// scoped 429 is returned to the root failover loop, which can discard
+		// this session before switching accounts and replaying the full prompt.
+		parentID, err = commitSessionChunkFragmentTurn(ctx, caller, a, &sessionID, parentID, wirePrompt, modelType, timeout, index+1, len(chunks))
 		if err != nil {
 			return nil, fmt.Errorf("commit session chunk %d/%d: %w", index+1, len(chunks), err)
 		}
@@ -279,6 +294,186 @@ func appendSessionChunkFormat(b *strings.Builder, formatPrompt string) {
 	b.WriteString("\n[END_FINAL_RESPONSE_FORMAT_REQUIREMENTS]\n")
 }
 
+// commitSessionChunkFragmentTurn allows one bounded retry only when the
+// upstream has positively ended the turn without allocating a response
+// message. A transport 502/network failure before any SSE response is also
+// safe to retry once. EOF is deliberately different: it is indeterminate and
+// the caller must rebuild the complete root instead of risking a duplicate
+// fragment in the existing conversation.
+func commitSessionChunkFragmentTurn(ctx context.Context, caller sessionChunkingCaller, a *auth.RequestAuth, sessionID *string, parentID int, prompt, modelType string, timeout time.Duration, chunkIndex, chunkCount int) (int, error) {
+	var lastErr error
+	for attempt := 1; attempt <= sessionChunkFragmentMaxAttempts; attempt++ {
+		responseID, err := commitSessionChunkTurn(ctx, caller, a, sessionID, parentID, prompt, modelType, true, true, "fragment", timeout, false)
+		if err == nil {
+			return responseID, nil
+		}
+		lastErr = err
+		if !isRetryableSameSessionFragmentFailure(err) || attempt == sessionChunkFragmentMaxAttempts {
+			config.Logger.Warn("[prompt_limit] fragment commit retry stopped",
+				"chunk_index", chunkIndex, "chunk_count", chunkCount,
+				"attempt", attempt, "max_attempts", sessionChunkFragmentMaxAttempts,
+				"session_id", strings.TrimSpace(sessionChunkSessionID(sessionID)),
+				"parent_message_id", parentID,
+				"fragment_prompt_units", promptcompat.PromptUnits(prompt),
+				"failure_class", sessionChunkFailureClass(err),
+				"upstream_status", sessionChunkFailureStatus(err), "error", err)
+			break
+		}
+		config.Logger.Warn("[prompt_limit] retrying uncommitted fragment in the same session",
+			"chunk_index", chunkIndex, "chunk_count", chunkCount,
+			"attempt", attempt+1, "max_attempts", sessionChunkFragmentMaxAttempts,
+			"session_id", strings.TrimSpace(sessionChunkSessionID(sessionID)),
+			"parent_message_id", parentID,
+			"fragment_prompt_units", promptcompat.PromptUnits(prompt),
+			"failure_class", sessionChunkFailureClass(err),
+			"upstream_status", sessionChunkFailureStatus(err), "error", err)
+		if err := waitSessionChunkFragmentRetry(ctx, attempt); err != nil {
+			return 0, err
+		}
+	}
+	return 0, lastErr
+}
+
+func isRetryableSameSessionFragmentFailure(err error) bool {
+	if err == nil || IsSessionCapacityRateLimit(err) || ShouldReplayPinnedBranch(err) {
+		return false
+	}
+	if detail := CompletionErrorDetail(err); detail.Stopped {
+		return false
+	}
+	var uncommitted *sessionChunkUncommittedError
+	if errors.As(err, &uncommitted) {
+		// A clean [DONE] with no ID/content means no assistant turn was
+		// committed. EOF remains indeterminate and is handled by root replay.
+		return uncommitted.terminal == sessionChunkTerminalDone && uncommitted.responseMessageID == 0 && !uncommitted.started
+	}
+	detail := CompletionErrorDetail(err)
+	if detail.Code == "upstream_network_error" {
+		return true
+	}
+	return detail.Code == "upstream_http_status" && isTransientSessionChunkStatus(detail.Status)
+}
+
+func isTransientSessionChunkStatus(status int) bool {
+	switch status {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func waitSessionChunkFragmentRetry(ctx context.Context, attempt int) error {
+	delay := time.Duration(attempt) * sessionChunkFragmentRetryDelay
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func sessionChunkSessionID(sessionID *string) string {
+	if sessionID == nil {
+		return ""
+	}
+	return *sessionID
+}
+
+func sessionChunkTerminalFailureClass(terminal sessionChunkTerminal) string {
+	switch terminal {
+	case sessionChunkTerminalDone:
+		return "done_without_commit"
+	case sessionChunkTerminalEOF:
+		return "eof_without_commit"
+	case sessionChunkTerminalTimeout:
+		return "timeout_without_commit"
+	default:
+		return "uncommitted"
+	}
+}
+
+func sessionChunkFailureClass(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if IsSessionCapacityRateLimit(err) {
+		return "session_capacity_429"
+	}
+	if ShouldReplayPinnedBranch(err) {
+		return "account_scoped_failure"
+	}
+	var uncommitted *sessionChunkUncommittedError
+	if errors.As(err, &uncommitted) {
+		return sessionChunkTerminalFailureClass(uncommitted.terminal)
+	}
+	detail := CompletionErrorDetail(err)
+	switch detail.Code {
+	case "upstream_network_error":
+		return "network"
+	case "upstream_timeout":
+		return "timeout"
+	case "upstream_http_status":
+		return fmt.Sprintf("upstream_http_%d", detail.Status)
+	default:
+		return detail.Code
+	}
+}
+
+func sessionChunkFailureStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	var failure *dsclient.RequestFailure
+	if errors.As(err, &failure) && failure.StatusCode > 0 {
+		return failure.StatusCode
+	}
+	return CompletionErrorDetail(err).Status
+}
+
+// sessionChunkHTTPFailure keeps status information when an alternate caller
+// returns a non-200 response together with a nil Go error. The production
+// client normally converts this into RequestFailure before returning, but
+// preserving it here prevents a 502/429 from being flattened into an opaque
+// generic error at the chunk boundary.
+func sessionChunkHTTPFailure(status int, body string) error {
+	failure := &dsclient.RequestFailure{
+		Op:         "completion",
+		Kind:       dsclient.FailureUpstreamStatus,
+		StatusCode: status,
+		Message:    strings.TrimSpace(body),
+	}
+	if status == http.StatusTooManyRequests && sessionChunkBodyIndicatesCapacity(body) {
+		failure.RateLimitScope = dsclient.RateLimitScopeSessionCapacity
+	}
+	return failure
+}
+
+func sessionChunkBodyIndicatesCapacity(body string) bool {
+	message := strings.ToLower(strings.TrimSpace(body))
+	if message == "" {
+		return false
+	}
+	for _, pattern := range []string{
+		"conversation context", "conversation limit", "conversation turn", "conversation has reached",
+		"session context", "session limit", "session turn", "session has reached",
+		"maximum turns", "maximum messages", "too many messages", "context window",
+		"context length", "prompt is too long", "input is too long",
+		"会话上下文", "会话轮次", "会话达到上限", "会话已达到上限",
+		"对话上下文", "对话轮次", "对话达到上限", "上下文长度", "上下文超限",
+	} {
+		if strings.Contains(message, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a *auth.RequestAuth, sessionID *string, parentID int, prompt, modelType string, thinking, interruptAfterStart bool, turnKind string, timeout time.Duration, allowAccountSwitch bool) (int, error) {
 	if sessionID == nil || strings.TrimSpace(*sessionID) == "" {
 		return 0, fmt.Errorf("session id is required")
@@ -307,7 +502,11 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 	}
 	var resp *http.Response
 	if allowAccountSwitch {
-		resp, err = caller.CallCompletionRaw(turnCtx, a, payload, pow, 3)
+		// The outer fragment loop owns the bounded transient retry. Keep the
+		// client attempt budget at one so a first-fragment 502/network failure
+		// cannot silently switch accounts before the failure is classified. The
+		// client's dedicated 429 path may still move an account when appropriate.
+		resp, err = caller.CallCompletionRaw(turnCtx, a, payload, pow, 1)
 	} else {
 		resp, err = caller.CallCompletionPinnedRaw(turnCtx, a, payload, pow)
 	}
@@ -321,7 +520,22 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 	if err != nil {
 		return 0, err
 	}
-	if resp == nil || resp.Body == nil {
+	if resp == nil {
+		return 0, fmt.Errorf("upstream returned no response body")
+	}
+	if resp.StatusCode != http.StatusOK {
+		var body []byte
+		if resp.Body != nil {
+			body, _ = io.ReadAll(io.LimitReader(resp.Body, 4096))
+		}
+		if resp.Body != nil {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				config.Logger.Warn("[prompt_limit] close session chunk response failed", "session_id", *sessionID, "error", closeErr)
+			}
+		}
+		return 0, sessionChunkHTTPFailure(resp.StatusCode, string(body))
+	}
+	if resp.Body == nil {
 		return 0, fmt.Errorf("upstream returned no response body")
 	}
 	defer func() {
@@ -329,10 +543,6 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 			config.Logger.Warn("[prompt_limit] close session chunk response failed", "session_id", *sessionID, "error", closeErr)
 		}
 	}()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 0, fmt.Errorf("upstream returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
 
 	initialType := "text"
 	if thinking {
@@ -355,7 +565,7 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 							"response_message_id", responseID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 						return responseID, nil
 					}
-					return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream stream ended before fragment commit", responseID, started, streamErr, time.Since(startedAt))
+					return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream stream ended before fragment commit", sessionChunkTerminalEOF, responseID, started, streamErr, time.Since(startedAt))
 				}
 				continue
 			}
@@ -412,7 +622,7 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 						"response_message_id", responseID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 					return responseID, nil
 				}
-				return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream finished before required reasoning/content started", responseID, started, nil, time.Since(startedAt))
+				return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream finished before required reasoning/content started", sessionChunkTerminalDone, responseID, started, nil, time.Since(startedAt))
 			}
 		case err := <-done:
 			streamErr = err
@@ -430,7 +640,7 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 						"response_message_id", responseID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 					return responseID, nil
 				}
-				return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream stream ended before fragment commit", responseID, started, streamErr, time.Since(startedAt))
+				return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "upstream stream ended before fragment commit", sessionChunkTerminalEOF, responseID, started, streamErr, time.Since(startedAt))
 			}
 		case <-turnCtx.Done():
 			// A caller cancellation is definitive and must not manufacture a
@@ -440,12 +650,12 @@ func commitSessionChunkTurn(ctx context.Context, caller sessionChunkingCaller, a
 			if ctx.Err() != nil {
 				return 0, fmt.Errorf("wait for fragment commit: %w", ctx.Err())
 			}
-			return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "timed out waiting for fragment commit", responseID, started, turnCtx.Err(), time.Since(startedAt))
+			return 0, newSessionChunkUncommittedError(*sessionID, parentID, turnKind, "timed out waiting for fragment commit", sessionChunkTerminalTimeout, responseID, started, turnCtx.Err(), time.Since(startedAt))
 		}
 	}
 }
 
-func newSessionChunkUncommittedError(sessionID string, parentMessageID int, turnKind, reason string, responseMessageID int, started bool, cause error, elapsed time.Duration) error {
+func newSessionChunkUncommittedError(sessionID string, parentMessageID int, turnKind, reason string, terminal sessionChunkTerminal, responseMessageID int, started bool, cause error, elapsed time.Duration) error {
 	config.Logger.Warn("[prompt_limit] same-session turn ended without a confirmed fragment commit",
 		"turn", turnKind,
 		"session_id", strings.TrimSpace(sessionID),
@@ -454,9 +664,12 @@ func newSessionChunkUncommittedError(sessionID string, parentMessageID int, turn
 		"observed_reasoning_or_content", started,
 		"elapsed_ms", elapsed.Milliseconds(),
 		"reason", reason,
+		"terminal", terminal,
+		"failure_class", sessionChunkTerminalFailureClass(terminal),
 		"stream_error", cause)
 	return &sessionChunkUncommittedError{
 		reason:            reason,
+		terminal:          terminal,
 		responseMessageID: responseMessageID,
 		started:           started,
 		cause:             cause,
@@ -468,7 +681,7 @@ func newSessionChunkUncommittedError(sessionID string, parentMessageID int, turn
 // intentionally narrower than generic errors so client cancellation, a
 // content filter, and a real upstream status stay visible to the caller.
 func IsRetryableSessionChunkingFailure(err error) bool {
-	if err == nil {
+	if err == nil || IsSessionCapacityRateLimit(err) || ShouldReplayPinnedBranch(err) {
 		return false
 	}
 	var uncommitted *sessionChunkUncommittedError
@@ -481,7 +694,14 @@ func IsRetryableSessionChunkingFailure(err error) bool {
 		}
 		return true
 	}
-	return CompletionErrorDetail(err).Code == "upstream_network_error"
+	detail := CompletionErrorDetail(err)
+	if detail.Stopped {
+		return false
+	}
+	if detail.Code == "upstream_network_error" || detail.Code == "upstream_timeout" {
+		return true
+	}
+	return detail.Code == "upstream_http_status" && isTransientSessionChunkStatus(detail.Status)
 }
 
 func commitSessionChunkControlTurn(ctx context.Context, caller sessionChunkingCaller, a *auth.RequestAuth, sessionID *string, parentID int, prompt, turnKind string, timeout time.Duration) (int, error) {

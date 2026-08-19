@@ -1,10 +1,12 @@
 # DeepSeek Web To API
 
+Release version: **v1.2.4**
+
 语言 / Language: [中文](README.MD) | [English](README.en.md)
 
 DeepSeek Web To API 是一个自托管 Go 网关，将 DeepSeek Web 会话转换为 OpenAI、Anthropic Claude 和 Gemini 兼容接口，并提供账号、会话、缓存、日志和代理路由管理台。
 
-当前版本：**v1.2.3**
+当前版本：**v1.2.4**
 
 ## 主要能力
 
@@ -30,7 +32,7 @@ Account C ─┘                 └─ inbound B -> HY2 node
 - 未被启用账号引用的节点不会常驻 Xray 配置。
 - 单节点或批量测试临时加入共享进程，测试后恢复账号路由集合。
 - 自动路由池只包含最新检测成功的节点；账号按启用账号分配数最少优先，首次分配或当前节点失效时才切换，并在切换后重新登录获取 Token。
-- 手动路由的节点连续失败达到阈值后自动禁用；已配置兜底节点时切换到兜底，否则直连。自动路由账号无健康节点时阻断请求，不静默泄漏到直连。
+- 手动路由的节点连续失败达到阈值后自动禁用；已配置兜底节点时切换到兜底，否则阻断请求。只有账号明确选择空代理时才直连，失效绑定不会静默泄漏到直连。
 - Xray 缺失时可从官方 XTLS/Xray-core Release 自动下载到 `data/xray`。Docker 中该目录位于持久化卷 `/app/data/xray`。
 
 详见 [Xray 与代理订阅](docs/xray-proxy.md)。
@@ -56,7 +58,7 @@ docker compose up -d
 docker compose ps
 ```
 
-默认映射 `6011:5001`，可用 `DEEPSEEK_WEB_TO_API_HOST_PORT` 修改宿主机端口。`./data` 保存配置回写、SQLite、缓存、日志和 Xray 核心。镜像为 `ghcr.io/chm413/deepseek-web-to-api:latest`，内置 `/healthz` 健康检查。
+默认仅映射 `127.0.0.1:6011:5001`，可用 `DEEPSEEK_WEB_TO_API_HOST_PORT` 修改宿主机端口；需要局域网或反向代理从其他接口访问时，显式设置 `DEEPSEEK_WEB_TO_API_HOST_BIND_ADDR`。`./data` 保存配置回写、SQLite、缓存、日志和 Xray 核心。镜像为 `ghcr.io/chm413/deepseek-web-to-api:latest`，内置 `/healthz` 健康检查。
 
 ### 本地构建
 
@@ -88,7 +90,8 @@ Shadowsocks 插件传输不受此 Xray 集成支持；含 URI `plugin` 参数或
 推荐从 [.env.example](.env.example) 和 [config.example.json](config.example.json) 开始。敏感字段包括账号密码、Token、代理密码、节点 URI、订阅 URL、API Key 和管理员凭据。
 
 - 安全管理读取接口不返回账号密码、代理密码、节点 URI 或订阅 URL。
-- 完整配置导出包含秘密，只应保存到可信位置。
+- 管理 API 的配置导出会主动脱敏，不返回原始凭据；依赖 URI 凭据的 VLESS/VMess/Hy2/Shadowsocks 节点不会写入脱敏导出，迁移后需重新导入节点和账号凭据。本地配置文件和 SQLite 数据库仍应按敏感数据保护。
+- 转发头默认只信任回环地址；若反代运行在其他主机或容器，请用 `DEEPSEEK_WEB_TO_API_TRUSTED_PROXY_CIDRS` 显式填写精确 CIDR。
 - Docker 部署应保持 `/app/data` 可写，否则配置、SQLite 和 Xray 下载无法持久化。
 - 对外提供服务时应使用 HTTPS 反向代理，并限制管理端入口。
 
@@ -100,7 +103,7 @@ npm run build --prefix webui
 bash ./scripts/lint.sh
 ```
 
-根目录的 `VERSION` 是发布版本源。推送与其一致的版本标签（如 `v1.2.3`）会自动运行发布门禁，构建 Windows/Linux/macOS 发布包、校验和及 `linux/amd64`、`linux/arm64` GHCR 镜像，并创建或更新对应的 GitHub Release。也可从 Actions 手动触发发布；标签和 `VERSION` 不一致时流水线会明确失败，避免错误版本进入更新通道。
+根目录的 `VERSION` 是发布版本源。推送与其一致的版本标签（如 `v1.2.4`）会自动运行发布门禁，构建 Windows/Linux/macOS 发布包、校验和及 `linux/amd64`、`linux/arm64` GHCR 镜像，并创建或更新对应的 GitHub Release。也可从 Actions 手动触发发布；标签和 `VERSION` 不一致时流水线会明确失败，避免错误版本进入更新通道。
 
 ## 文档
 

@@ -112,6 +112,34 @@ func TestManagerRejectsChecksumMismatchWithoutStaging(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsTamperedStagedRuntime(t *testing.T) {
+	const tag = "v1.2.0"
+	archive := releaseArchive(t, tag, "amd64", nil)
+	checksum := sha256.Sum256(archive)
+	server := releaseServer(t, tag, "amd64", archive, hex.EncodeToString(checksum[:]))
+	defer server.Close()
+	container := true
+	manager := New(nil, Options{
+		Root:           t.TempDir(),
+		GitHubAPI:      server.URL,
+		HTTPClient:     server.Client(),
+		GOOS:           "linux",
+		GOARCH:         "amd64",
+		CurrentVersion: func() string { return "1.1.9" },
+		Container:      &container,
+	})
+	if _, err := manager.Download(context.Background(), tag); err != nil {
+		t.Fatalf("stage release: %v", err)
+	}
+	root := filepath.Join(manager.root, "versions", tag)
+	if err := os.WriteFile(filepath.Join(root, "deepseek-web-to-api"), []byte("tampered"), 0o750); err != nil {
+		t.Fatalf("tamper staged binary: %v", err)
+	}
+	if staged, err := manager.stagedRelease(tag); err == nil || staged || !strings.Contains(err.Error(), "binary checksum mismatch") {
+		t.Fatalf("tampered binary was accepted: staged=%v err=%v", staged, err)
+	}
+}
+
 func TestManagerRejectsTraversalArchive(t *testing.T) {
 	const tag = "v1.2.0"
 	archive := releaseArchive(t, tag, "amd64", map[string][]byte{

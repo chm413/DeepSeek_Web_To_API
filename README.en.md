@@ -4,7 +4,7 @@ Language: [中文](README.MD) | [English](README.en.md)
 
 DeepSeek Web To API is a self-hosted Go gateway that exposes DeepSeek Web sessions through OpenAI, Anthropic Claude, and Gemini-compatible APIs. It includes an admin console for accounts, sessions, caches, logs, and proxy routing.
 
-Current version: **v1.2.3**
+Current version: **v1.2.4**
 
 ## Features
 
@@ -30,7 +30,7 @@ Account C ─┘                 └─ inbound B -> HY2 node
 - Nodes not referenced by enabled accounts do not remain in the resident Xray configuration.
 - Manual and batch tests temporarily add routes to the shared process, then restore the account route set.
 - The automatic route pool contains only nodes whose latest test passed. Accounts prefer the node with the fewest enabled-account assignments, move only when unassigned or when the current node fails, and log in again after a route change.
-- Manually routed nodes are disabled after the configured consecutive-failure threshold. They use the configured fallback node, or a direct connection when no fallback is available. Automatically routed accounts are blocked when no healthy node exists instead of silently leaking to a direct connection.
+- Manually routed nodes are disabled after the configured consecutive-failure threshold. They use the configured fallback node, or fail closed when no fallback is available. Only an account that explicitly selects an empty proxy uses a direct connection; a stale binding never silently leaks to direct. Automatically routed accounts are blocked when no healthy node exists.
 - Missing Xray binaries can be downloaded from official XTLS/Xray-core releases into `data/xray`. In Docker this persists under `/app/data/xray`.
 
 See [Xray and proxy subscriptions](docs/xray-proxy.md).
@@ -56,7 +56,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Compose maps host port `6011` to container port `5001` by default. Override it with `DEEPSEEK_WEB_TO_API_HOST_PORT`. The `./data` volume stores configuration writeback, SQLite files, caches, logs, and Xray. The image is `ghcr.io/chm413/deepseek-web-to-api:latest` and includes a `/healthz` container health check.
+Compose maps `127.0.0.1:6011` to container port `5001` by default. Override the port with `DEEPSEEK_WEB_TO_API_HOST_PORT`, or deliberately expose a different host interface with `DEEPSEEK_WEB_TO_API_HOST_BIND_ADDR`. The `./data` volume stores configuration writeback, SQLite files, caches, logs, and Xray. The image is `ghcr.io/chm413/deepseek-web-to-api:latest` and includes a `/healthz` container health check.
 
 ### Local Build
 
@@ -88,7 +88,8 @@ The management endpoints are under `/admin/proxies/*` and require administrator 
 Start with [.env.example](.env.example) and [config.example.json](config.example.json). Secrets include account passwords and tokens, proxy credentials, node URIs, subscription URLs, API keys, and admin credentials.
 
 - Safe admin read APIs never return account passwords, proxy passwords, node URIs, or subscription URLs.
-- Full configuration exports contain secrets and must be handled as sensitive files.
+- Configuration exports from the admin API are redacted and never contain raw credentials. URI-credentialed VLESS/VMess/Hy2/Shadowsocks nodes are omitted from a redacted export and must be re-imported with account credentials after migration; the local source files and SQLite databases remain sensitive.
+- Forwarding headers are trusted only from loopback by default. Set `DEEPSEEK_WEB_TO_API_TRUSTED_PROXY_CIDRS` to the exact reverse-proxy CIDR(s) when deploying behind another host or container.
 - Docker deployments must keep `/app/data` writable so configuration, SQLite databases, and Xray downloads persist.
 - Use an HTTPS reverse proxy and restrict access to the admin console for internet-facing deployments.
 
@@ -100,7 +101,7 @@ npm run build --prefix webui
 bash ./scripts/lint.sh
 ```
 
-`VERSION` at the repository root is the release-version source. Push a matching version tag, for example `v1.2.3`, to run the release gates and publish Windows/Linux/macOS archives, checksums, and `linux/amd64` and `linux/arm64` GHCR images. The workflow creates or updates the matching GitHub Release. It can also be dispatched manually; a tag that disagrees with `VERSION` fails explicitly rather than entering the update channel with the wrong version.
+`VERSION` at the repository root is the release-version source. Push a matching version tag, for example `v1.2.4`, to run the release gates and publish Windows/Linux/macOS archives, checksums, and `linux/amd64` and `linux/arm64` GHCR images. The workflow creates or updates the matching GitHub Release. It can also be dispatched manually; a tag that disagrees with `VERSION` fails explicitly rather than entering the update channel with the wrong version.
 
 ## Documentation
 

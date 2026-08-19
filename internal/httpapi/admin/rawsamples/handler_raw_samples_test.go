@@ -15,6 +15,14 @@ import (
 	"DeepSeek_Web_To_API/internal/devcapture"
 )
 
+// Raw-sample tests exercise the opt-in packet-capture path explicitly. The
+// production default remains disabled; enable it before the package singleton
+// is first initialized so these tests do not depend on a developer shell env.
+func TestMain(m *testing.M) {
+	_ = os.Setenv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE", "true")
+	os.Exit(m.Run())
+}
+
 type stubOpenAIChatCaller struct{}
 
 func (stubOpenAIChatCaller) ChatCompletions(w http.ResponseWriter, _ *http.Request) {

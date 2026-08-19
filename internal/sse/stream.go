@@ -66,6 +66,8 @@ func StartParsedLinePump(ctx context.Context, body io.Reader, thinkingEnabled bo
 		currentType := initialType
 		var pending *LineResult
 		pendingChars := 0
+		terminalSeen := false
+		parsedSeen := false
 
 		sendResult := func(r LineResult) bool {
 			select {
@@ -103,12 +105,26 @@ func StartParsedLinePump(ctx context.Context, body io.Reader, thinkingEnabled bo
 					if !flushPending() {
 						return
 					}
+					// A clean upstream stream must carry an explicit terminal
+					// marker ([DONE], FINISHED, or a protocol error/content
+					// filter).  Treat a transport EOF without one as an
+					// unexpected disconnect so streaming callers do not emit a
+					// misleading successful completion after partial output.
+					if item.err == nil && parsedSeen && !terminalSeen {
+						item.err = io.ErrUnexpectedEOF
+					}
 					done <- item.err
 					return
 				}
 				line := item.line
 				result := ParseDeepSeekContentLine(line, thinkingEnabled, currentType)
 				currentType = result.NextType
+				if result.Parsed {
+					parsedSeen = true
+				}
+				if result.Stop || result.ErrorMessage != "" || result.ContentFilter {
+					terminalSeen = true
+				}
 
 				canAccumulate := result.Parsed && !result.Stop && result.ErrorMessage == "" && !result.ContentFilter && result.ResponseMessageID == 0
 				if canAccumulate {

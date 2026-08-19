@@ -91,6 +91,19 @@ also accepted when the backend omits its visible acknowledgement; an immediate
 response ID but ends without visible content, that ID is only a provisional
 parent: the random checkpoint must successfully acknowledge it before any later
 fragment can be attached.
+Fragment failure recovery is bounded and keeps the failure scope explicit. A
+clean empty `[DONE]` without a response ID, or a transient 502/network failure
+before an SSE response, is retried once with the same `chat_session_id` and
+parent. An EOF or local deadline is indeterminate and is never duplicated in
+place; the partial root is discarded and the complete canonical prompt is
+replayed on the same account at most once. A stream that exposes only a new
+response ID is kept as a provisional parent and must pass the checkpoint probe;
+if that verification fails, the same root-replay rule applies.
+A conversation-capacity 429 follows that same-account root replay path without
+cooling the account. An account-scoped 429/401/403 skips the in-flight branch,
+switches the managed account, refreshes its live input limit, and replays the
+complete root there. Logs include the fragment index, attempt, parent/message
+IDs, UTF-16 prompt units, terminal (`done`/`eof`/`timeout`), and failure class.
 The final fragment is sent to the originally requested model as a pinned child
 turn. Every fragment, probe, cancellation turn, and final turn repeats the
 request's forced response-format prompt. The original `StandardRequest`, usage

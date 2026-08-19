@@ -50,6 +50,14 @@ func TestMiddlewareAddsRequestMetadata(t *testing.T) {
 	}
 }
 
+func TestRequestBodyShouldNotEagerlyCopyAdminPayloads(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(`{"admin_key":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	if requestBodyShouldBeRead(req) {
+		t.Fatal("admin login body must be left for its route-specific size limit")
+	}
+}
+
 func testStore(t *testing.T, cfg string) *config.Store {
 	t.Helper()
 	dir := t.TempDir()

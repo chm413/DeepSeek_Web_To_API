@@ -76,9 +76,12 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
     }
 
     const openEditKey = (item) => {
-        if (!item?.key) return
+        if (!item?.key && !item?.id) return
         setEditingKey(item)
         setNewKey({
+            // The server intentionally returns only a preview for existing
+            // keys. Leave the value blank to edit metadata without rotating
+            // the secret, or enter a new value to rotate it.
             key: item.key || '',
             name: item.name || '',
             remark: item.remark || '',
@@ -130,22 +133,22 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
     }
 
     const addKey = async () => {
-        const isEditing = Boolean(editingKey?.key)
-        if (!newKey.key.trim()) {
+        const isEditing = Boolean(editingKey?.key || editingKey?.id)
+        const enteredKey = newKey.key.trim()
+        if (!isEditing && !enteredKey) {
             return
         }
         setLoading(true)
         try {
             const endpoint = isEditing
-                ? `/admin/keys/${encodeURIComponent(editingKey.key)}`
+                ? (editingKey.id
+                    ? `/admin/keys/id/${encodeURIComponent(editingKey.id)}`
+                    : `/admin/keys/${encodeURIComponent(editingKey.key)}`)
                 : '/admin/keys'
             const method = isEditing ? 'PUT' : 'POST'
-            const payload = isEditing
-                ? { key: newKey.key.trim(), name: newKey.name, remark: newKey.remark }
-                : { key: newKey.key.trim(), name: newKey.name, remark: newKey.remark }
-            if (!payload.key) {
-                return
-            }
+            const payload = { name: newKey.name, remark: newKey.remark }
+            if (enteredKey) payload.key = enteredKey
+            if (!isEditing && !payload.key) return
             const res = await apiFetch(endpoint, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
@@ -166,10 +169,15 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
         }
     }
 
-    const deleteKey = async (key) => {
+    const deleteKey = async (item) => {
+        const key = typeof item === 'string' ? item : (item?.id || item?.key)
+        if (!key) return
         if (!confirm(t('accountManager.deleteKeyConfirm'))) return
         try {
-            const res = await apiFetch(`/admin/keys/${encodeURIComponent(key)}`, { method: 'DELETE' })
+            const endpoint = typeof item === 'object' && item?.id
+                ? `/admin/keys/id/${encodeURIComponent(item.id)}`
+                : `/admin/keys/${encodeURIComponent(key)}`
+            const res = await apiFetch(endpoint, { method: 'DELETE' })
             if (res.ok) {
                 onMessage('success', t('messages.deleted'))
                 onRefresh()

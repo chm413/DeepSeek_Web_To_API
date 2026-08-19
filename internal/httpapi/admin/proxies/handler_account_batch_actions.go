@@ -167,11 +167,7 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.Pool.Reset()
-	autoRelogins, err := h.reconcileAndSyncProxyRoutes(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
-		return
-	}
+	autoRelogins, routeErr := h.reconcileAndSyncProxyRoutes(r.Context())
 	routeChanged += len(autoRelogins)
 	manualRelogins := h.reloginManualRouteChanges(r.Context(), manualChanges)
 	relogin := mergeRouteReloginResults(autoRelogins, manualRelogins)
@@ -184,8 +180,8 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 		"relogin_attempted", relogin["attempted"],
 		"relogin_failed", relogin["failed"],
 	)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":        true,
+	response := map[string]any{
+		"success":        routeErr == nil,
 		"action":         action,
 		"affected":       affected,
 		"total_accounts": len(h.Store.Snapshot().Accounts),
@@ -193,7 +189,14 @@ func (h *Handler) batchAccountActions(w http.ResponseWriter, r *http.Request) {
 		"auto_route":     action == "set_proxy" && req.AutoRoute,
 		"proxy_id":       targetProxyID,
 		"relogin":        relogin,
-	})
+	}
+	if routeErr != nil {
+		response["route_error"] = routeErr.Error()
+		response["partial"] = true
+		writeJSON(w, http.StatusBadGateway, response)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func uniqueAccountIdentifiers(raw []string) []string {

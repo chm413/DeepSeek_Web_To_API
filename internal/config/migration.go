@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,13 @@ import (
 // version. Release versions can change frequently while a config migration
 // must remain monotonic and safe to retry.
 const CurrentConfigSchemaVersion = 2
+
+const (
+	defaultMigrationBackupKeep          = 1
+	defaultMigrationBackupRetentionDays = 7
+	maxMigrationBackupKeep              = 32
+	maxMigrationBackupRetentionDays     = 3650
+)
 
 type ConfigMigrationReport struct {
 	FromVersion int
@@ -124,6 +132,12 @@ func persistConfigMigration(destination, source string, cfg Config, accountsDB b
 	}
 	if err := writeConfigBytes(destination, b); err != nil {
 		return fmt.Errorf("write migrated config (backup %s): %w", backupPath, err)
+	}
+	if err := pruneMigrationBackups(filepath.Dir(destination), time.Now()); err != nil {
+		// The migrated config is already valid and durable. A cleanup failure
+		// must not roll it back, but it is important to surface the retained
+		// sensitive backup so the operator can remove it manually.
+		Logger.Warn("[config] migration backup cleanup deferred", "error", err, "directory", filepath.Dir(destination))
 	}
 	Logger.Info("[config] migrated legacy config", "from_version", report.FromVersion, "to_version", report.ToVersion, "changes", report.Changes, "source", source, "destination", destination, "backup", backupPath)
 	return nil
@@ -276,17 +290,104 @@ func backupMigratedConfig(destination string, content []byte, fromVersion int) (
 	}
 	ok := false
 	defer func() {
-		_ = file.Close()
 		if !ok {
-			_ = os.Remove(path)
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				Logger.Warn("[config] failed to remove incomplete migration backup", "path", path, "error", err)
+			}
 		}
 	}()
 	if _, err := file.Write(content); err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			Logger.Warn("[config] failed to close incomplete migration backup", "path", path, "error", closeErr)
+		}
 		return "", fmt.Errorf("write config migration backup: %w", err)
 	}
 	if err := file.Sync(); err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			Logger.Warn("[config] failed to close unsynced migration backup", "path", path, "error", closeErr)
+		}
 		return "", fmt.Errorf("sync config migration backup: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close config migration backup: %w", err)
 	}
 	ok = true
 	return path, nil
+}
+
+type migrationBackupEntry struct {
+	path    string
+	modTime time.Time
+}
+
+// pruneMigrationBackups removes stale migration copies that may contain
+// passwords, tokens, and API keys. It keeps only the newest configured number
+// of fresh backups and never follows symlinks. A failed cleanup is returned so
+// callers can log it without making a successful migration unusable.
+func pruneMigrationBackups(configDir string, now time.Time) error {
+	dir := filepath.Join(configDir, "migrations", "backups")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	backups := make([]migrationBackupEntry, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "config-v") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect migration backup %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		backups = append(backups, migrationBackupEntry{path: filepath.Join(dir, name), modTime: info.ModTime()})
+	}
+	sort.Slice(backups, func(i, j int) bool {
+		if backups[i].modTime.Equal(backups[j].modTime) {
+			return backups[i].path > backups[j].path
+		}
+		return backups[i].modTime.After(backups[j].modTime)
+	})
+	keep := migrationBackupKeep()
+	cutoff := now.Add(-migrationBackupRetention())
+	kept := 0
+	for _, backup := range backups {
+		if kept < keep && !backup.modTime.Before(cutoff) {
+			kept++
+			continue
+		}
+		if err := os.Remove(backup.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove migration backup %s: %w", filepath.Base(backup.path), err)
+		}
+	}
+	return nil
+}
+
+func migrationBackupKeep() int {
+	value := defaultMigrationBackupKeep
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_MIGRATION_BACKUP_KEEP")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 1 && parsed <= maxMigrationBackupKeep {
+			value = parsed
+		}
+	}
+	return value
+}
+
+func migrationBackupRetention() time.Duration {
+	days := defaultMigrationBackupRetentionDays
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_MIGRATION_BACKUP_RETENTION_DAYS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 1 && parsed <= maxMigrationBackupRetentionDays {
+			days = parsed
+		}
+	}
+	return time.Duration(days) * 24 * time.Hour
 }

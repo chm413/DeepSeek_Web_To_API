@@ -175,7 +175,7 @@ STORE --> ALIASES
 
 ### 运行建议
 
-- 反代部署时将 `server.bind_addr` 设置为 `127.0.0.1`，由 Caddy/Nginx 暴露公网端口；Docker Compose 会通过环境变量覆盖为 `0.0.0.0`。
+- 反代部署时将 `server.bind_addr` 设置为 `127.0.0.1`，由 Caddy/Nginx 暴露公网端口；Docker Compose 容器内仍监听 `0.0.0.0`，但宿主机端口默认只绑定 `127.0.0.1`。需要其他宿主机接口时显式设置 `DEEPSEEK_WEB_TO_API_HOST_BIND_ADDR`。
 - 容器部署时保留容器内 `server.port=5001`，只通过 Compose 的宿主机端口映射调整外部端口。
 - 账号不再需要写入 JSON；在管理台"批量导入"中粘贴 `账号:密码` 文本即可写入 `accounts.sqlite`。
 - 若旧 JSON 中仍有 `accounts`，账号 SQLite 为空时会自动迁移，随后保存配置时会剥离 `accounts` 字段；兼容旧导入格式中把邮箱误写到 `mobile` 字段的账号，加载和导入时会自动归一到 `email`。

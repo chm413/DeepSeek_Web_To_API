@@ -2,17 +2,19 @@ package proxyservice
 
 import (
 	"testing"
+	"time"
 
 	"DeepSeek_Web_To_API/internal/config"
 )
 
 func TestReconcileAutoRoutesIsStickyAndBalancesEnabledAccounts(t *testing.T) {
 	enabled := true
+	now := time.Now().Unix()
 	store := &memoryStore{cfg: config.Config{
 		ProxyPolicy: config.ProxyPolicyConfig{AutomaticRoutingEnabled: &enabled},
 		Proxies: []config.Proxy{
-			{ID: "node-a", Type: "socks5", Host: "127.0.0.1", Port: 1080, LastTestAtUnix: 10, LastTestSuccess: true, LastLatencyMS: 80},
-			{ID: "node-b", Type: "socks5", Host: "127.0.0.1", Port: 1081, LastTestAtUnix: 10, LastTestSuccess: true, LastLatencyMS: 30},
+			{ID: "node-a", Type: "socks5", Host: "127.0.0.1", Port: 1080, LastTestAtUnix: now, LastTestSuccess: true, LastLatencyMS: 80},
+			{ID: "node-b", Type: "socks5", Host: "127.0.0.1", Port: 1081, LastTestAtUnix: now, LastTestSuccess: true, LastLatencyMS: 30},
 		},
 		Accounts: []config.Account{
 			{Email: "manual@example.com", Password: "pwd", ProxyID: "node-b"},
@@ -41,11 +43,12 @@ func TestReconcileAutoRoutesIsStickyAndBalancesEnabledAccounts(t *testing.T) {
 
 func TestReconcileAutoRoutesMovesOnlyFailedAssignments(t *testing.T) {
 	enabled := true
+	now := time.Now().Unix()
 	store := &memoryStore{cfg: config.Config{
 		ProxyPolicy: config.ProxyPolicyConfig{AutomaticRoutingEnabled: &enabled},
 		Proxies: []config.Proxy{
-			{ID: "failed", Type: "socks5", Host: "127.0.0.1", Port: 1080, LastTestAtUnix: 20, LastTestSuccess: false},
-			{ID: "healthy", Type: "socks5", Host: "127.0.0.1", Port: 1081, LastTestAtUnix: 20, LastTestSuccess: true, LastLatencyMS: 50},
+			{ID: "failed", Type: "socks5", Host: "127.0.0.1", Port: 1080, LastTestAtUnix: now, LastTestSuccess: false},
+			{ID: "healthy", Type: "socks5", Host: "127.0.0.1", Port: 1081, LastTestAtUnix: now, LastTestSuccess: true, LastLatencyMS: 50},
 		},
 		Accounts: []config.Account{
 			{Email: "auto@example.com", Password: "pwd", ProxyID: "failed", ProxyAutoRoute: true, Token: "stale"},
@@ -69,14 +72,37 @@ func TestReconcileAutoRoutesMovesOnlyFailedAssignments(t *testing.T) {
 	}
 }
 
+func TestReconcileAutoRoutesKeepsAssignedNodeWhenNoHealthyReplacementExists(t *testing.T) {
+	enabled := true
+	store := &memoryStore{cfg: config.Config{
+		ProxyPolicy: config.ProxyPolicyConfig{AutomaticRoutingEnabled: &enabled},
+		Proxies: []config.Proxy{
+			{ID: "failed", Type: "socks5", Host: "127.0.0.1", Port: 1080, LastTestAtUnix: time.Now().Unix(), LastTestSuccess: false},
+		},
+		Accounts: []config.Account{{Email: "auto@example.com", Password: "pwd", Token: "keep", ProxyID: "failed", ProxyAutoRoute: true}},
+	}}
+	changes, err := ReconcileAutoRoutes(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("missing replacement must not clear an egress assignment: %#v", changes)
+	}
+	account := store.Snapshot().Accounts[0]
+	if account.ProxyID != "failed" || account.Token != "keep" {
+		t.Fatalf("missing replacement mutated account route: %#v", account)
+	}
+}
+
 func TestReassignDeletedProxyRoutesUsesFallbackAndHealthyAutomaticRoute(t *testing.T) {
 	enabled := true
+	now := time.Now().Unix()
 	cfg := config.Config{
 		ProxyPolicy: config.ProxyPolicyConfig{AutomaticRoutingEnabled: &enabled, FallbackProxyID: "fallback"},
 		Proxies: []config.Proxy{
 			{ID: "retired", Type: "socks5", Host: "127.0.0.1", Port: 1080},
 			{ID: "fallback", Type: "socks5", Host: "127.0.0.1", Port: 1081},
-			{ID: "healthy", Type: "socks5", Host: "127.0.0.1", Port: 1082, LastTestAtUnix: 1, LastTestSuccess: true},
+			{ID: "healthy", Type: "socks5", Host: "127.0.0.1", Port: 1082, LastTestAtUnix: now, LastTestSuccess: true},
 		},
 		Accounts: []config.Account{
 			{Email: "manual@example.com", Password: "pwd", Token: "manual-token", ProxyID: "retired"},
@@ -117,5 +143,15 @@ func TestReassignDeletedProxyRoutesRejectsAutomaticDeletionWithoutReplacementAto
 	}
 	if cfg.Accounts[0] != before || len(cfg.Proxies) != 1 || cfg.Proxies[0].ID != "retired" {
 		t.Fatalf("failed route plan mutated config: before=%#v after=%#v", before, cfg)
+	}
+}
+
+func TestAvailableRoutePoolRejectsStaleSuccessfulProxy(t *testing.T) {
+	old := time.Now().Add(-2 * time.Hour).Unix()
+	cfg := config.Config{
+		Proxies: []config.Proxy{{ID: "stale", Type: "socks5", Host: "127.0.0.1", Port: 1080, LastTestAtUnix: old, LastTestSuccess: true}},
+	}
+	if pool := AvailableRoutePool(cfg); len(pool) != 0 {
+		t.Fatalf("stale successful proxy remained routable: %#v", pool)
 	}
 }

@@ -45,6 +45,7 @@ export default function ApiKeysPanel({
         : (config?.keys || []).map(key => ({ key, name: '', remark: '' }))
 
     const handleCopyKey = async (key) => {
+        if (!key) return
         try {
             if (navigator.clipboard?.writeText) {
                 await navigator.clipboard.writeText(key)
@@ -100,13 +101,19 @@ export default function ApiKeysPanel({
                             <div key={i} className="px-4 py-3 flex items-center justify-between hover:bg-blue-50/45 transition-colors group">
                                 <div className="grid grid-cols-1 md:grid-cols-[minmax(120px,180px)_minmax(220px,1fr)_minmax(120px,1fr)] gap-2 flex-1 items-center">
                                     <div className="text-sm font-bold">{item.name || '-'}</div>
-                                    <button
-                                        onClick={() => handleCopyKey(item.key)}
-                                        className="font-mono text-xs bg-slate-50 border border-border px-3 py-1.5 rounded-md inline-block hover:border-blue-200 hover:bg-white hover:text-primary transition-colors text-left"
-                                        title={t('accountManager.copyKeyTitle')}
-                                    >
-                                        {maskSecret(item.key)}
-                                    </button>
+                                    {item.key ? (
+                                        <button
+                                            onClick={() => handleCopyKey(item.key)}
+                                            className="font-mono text-xs bg-slate-50 border border-border px-3 py-1.5 rounded-md inline-block hover:border-blue-200 hover:bg-white hover:text-primary transition-colors text-left"
+                                            title={t('accountManager.copyKeyTitle')}
+                                        >
+                                            {maskSecret(item.key)}
+                                        </button>
+                                    ) : (
+                                        <span className="font-mono text-xs text-muted-foreground">
+                                            {item.key_preview || '********'}
+                                        </span>
+                                    )}
                                     <div className="text-sm text-muted-foreground truncate">{item.remark || '-'}</div>
                                     {copiedKey === item.key && (
                                         <span className="text-xs text-green-500 animate-pulse">{t('accountManager.copied')}</span>
@@ -125,13 +132,14 @@ export default function ApiKeysPanel({
                                     </button>
                                     <button
                                         onClick={() => handleCopyKey(item.key)}
+                                        disabled={!item.key}
                                         className="p-2 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-md transition-colors"
                                         title={t('accountManager.copyKeyTitle')}
                                     >
                                         {copiedKey === item.key ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
                                     </button>
                                     <button
-                                        onClick={() => onDeleteKey(item.key)}
+                                        onClick={() => onDeleteKey(item)}
                                         className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-md transition-colors"
                                         title={t('accountManager.deleteKeyTitle')}
                                     >

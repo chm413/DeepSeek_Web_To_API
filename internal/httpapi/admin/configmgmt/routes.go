@@ -15,7 +15,18 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Post("/keys", h.addKey)
 	r.Put("/keys/{key}", h.updateKey)
 	r.Delete("/keys/{key}", h.deleteKey)
+	// Opaque key IDs keep secrets out of browser history, proxies, and logs.
+	r.Put("/keys/id/{id}", h.updateKeyByID)
+	r.Delete("/keys/id/{id}", h.deleteKeyByID)
 	r.Post("/import", h.batchImport)
+}
+
+func (h *Handler) updateKeyByID(w http.ResponseWriter, r *http.Request) {
+	h.updateKey(w, r)
+}
+
+func (h *Handler) deleteKeyByID(w http.ResponseWriter, r *http.Request) {
+	h.deleteKey(w, r)
 }
 
 func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request)    { h.getConfig(w, r) }

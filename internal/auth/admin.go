@@ -83,6 +83,14 @@ func adminJWTSecretMissingError() error {
 	return errors.New("admin.jwt_secret is required for admin token signing and verification")
 }
 
+func adminCredentialPlaceholderError() error {
+	return errors.New("admin credential uses a known placeholder; set a unique admin.key or admin.password_hash")
+}
+
+func adminJWTSecretPlaceholderError() error {
+	return errors.New("admin.jwt_secret uses a known placeholder; set a unique random secret")
+}
+
 // ValidateAdminCredentialConfigured checks whether admin authentication can be established.
 // This is used by command startup to fail fast when both env + config credential sources are absent.
 func ValidateAdminCredentialConfigured(store AdminConfigReader) error {
@@ -98,10 +106,42 @@ func ValidateAdminRuntimeSecurity(store AdminConfigReader) error {
 	if err := ValidateAdminCredentialConfigured(store); err != nil {
 		return err
 	}
-	if strings.TrimSpace(jwtSecret(store)) == "" {
+	secret := strings.TrimSpace(jwtSecret(store))
+	if secret == "" {
 		return adminJWTSecretMissingError()
 	}
+	// A copied example configuration must never become a usable production
+	// admin boundary.  Check the effective credential source only: a stale
+	// admin.key next to a configured password hash is not used for login.
+	if strings.TrimSpace(adminPasswordHash(store)) == "" && isKnownAdminPlaceholder(effectiveAdminKey(store)) {
+		return adminCredentialPlaceholderError()
+	}
+	if isKnownAdminPlaceholder(secret) {
+		return adminJWTSecretPlaceholderError()
+	}
 	return nil
+}
+
+func adminPasswordHash(store AdminConfigReader) string {
+	if store == nil {
+		return ""
+	}
+	return strings.TrimSpace(store.AdminPasswordHash())
+}
+
+// isKnownAdminPlaceholder intentionally matches only conventional example
+// values and marker forms.  It avoids rejecting arbitrary operator secrets
+// merely because they contain words such as "default".
+func isKnownAdminPlaceholder(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return false
+	}
+	switch v {
+	case "change-me-admin-key", "change-me-jwt-secret", "change-me", "replace-me", "replace-me-admin-key", "replace-me-jwt-secret":
+		return true
+	}
+	return strings.HasPrefix(v, "change-me-") || strings.HasPrefix(v, "replace-me-")
 }
 
 func jwtSecret(store AdminConfigReader) string {

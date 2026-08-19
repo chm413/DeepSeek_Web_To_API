@@ -6,7 +6,7 @@ export default function AddKeyModal({ show, t, editingKey, newKey, setNewKey, lo
         return null
     }
 
-    const isEditing = Boolean(editingKey?.key)
+    const isEditing = Boolean(editingKey?.key || editingKey?.id)
     const displayKey = newKey.key
 
     return (

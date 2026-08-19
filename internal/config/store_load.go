@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func loadStore() (*Store, error) {
@@ -26,6 +27,9 @@ func loadStore() (*Store, error) {
 		err = errors.Join(err, validateErr)
 	}
 	path := ConfigPath()
+	if cleanupErr := pruneMigrationBackups(filepath.Dir(path), time.Now()); cleanupErr != nil {
+		Logger.Warn("[config] migration backup cleanup failed", "error", cleanupErr, "directory", filepath.Dir(path))
+	}
 	if migrationErr == nil && !fromEnv && sourcePath != "" && configHasLegacyRuntimeFields(sourcePath) {
 		markConfigMigrationChange(&migrationReport, "removed deprecated runtime-only account fields")
 	}

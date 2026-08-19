@@ -575,7 +575,7 @@
         "plainAccountsDesc": "邮箱和手机号都使用同一种格式；手机号会自动规范化后写入账号 SQLite。",
         "quickTemplates": "快速模板",
         "dataExport": "数据导出",
-        "dataExportDesc": "获取配置的 Base64 字符串，用于写入 .env 或备份迁移。",
+        "dataExportDesc": "获取已脱敏配置的 Base64 字符串，用于迁移非秘密设置；管理员、账号、代理和订阅凭据需要在新环境重新配置。",
         "copyBase64": "复制 Base64 配置",
         "copied": "已复制",
         "variableName": "变量名",

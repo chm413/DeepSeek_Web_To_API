@@ -2,7 +2,9 @@ package proxyservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,7 +14,147 @@ import (
 	"DeepSeek_Web_To_API/internal/config"
 )
 
-func TestRefreshSubscriptionImportsUpdatesAndDisablesRemovedAssignedNode(t *testing.T) {
+func useTestSubscriptionFetcher(t *testing.T) {
+	t.Helper()
+	previous := fetchSubscription
+	fetchSubscription = func(ctx context.Context, rawURL string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = response.Body.Close() }()
+		return io.ReadAll(response.Body)
+	}
+	t.Cleanup(func() { fetchSubscription = previous })
+}
+
+func TestRefreshSubscriptionImportsUpdatesAndMigratesRemovedAssignedNode(t *testing.T) {
+	useTestSubscriptionFetcher(t)
+	var version atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		if version.Load() == 0 {
+			_, _ = fmt.Fprintln(w, "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none#first")
+			return
+		}
+		_, _ = fmt.Fprintln(w, "hysteria2://password@example.net:443#second")
+	}))
+	defer server.Close()
+
+	store := &memoryStore{cfg: config.Config{
+		ProxySubscriptions: []config.ProxySubscription{{ID: "sub-a", Name: "Airport", URL: server.URL}},
+		Proxies:            []config.Proxy{{ID: "fallback", Type: "socks5", Host: "127.0.0.1", Port: 1080}},
+		ProxyPolicy:        config.ProxyPolicyConfig{FallbackProxyID: "fallback"},
+	}}
+	first, err := RefreshSubscription(context.Background(), store, "sub-a")
+	if err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if first.Added != 1 || first.NodeCount != 1 {
+		t.Fatalf("unexpected first refresh result: %#v", first)
+	}
+	snapshot := store.Snapshot()
+	if len(snapshot.Proxies) != 2 {
+		t.Fatalf("expected imported subscription node, got %#v", snapshot.Proxies)
+	}
+	removedID := ""
+	for _, proxy := range snapshot.Proxies {
+		if proxy.SubscriptionID == "sub-a" {
+			removedID = proxy.ID
+		}
+	}
+	if removedID == "" {
+		t.Fatalf("subscription node was not imported: %#v", snapshot.Proxies)
+	}
+	store.mu.Lock()
+	store.cfg.Accounts = []config.Account{{Email: "user@example.com", ProxyID: removedID, Token: "stale-token"}}
+	store.mu.Unlock()
+
+	version.Store(1)
+	second, err := RefreshSubscription(context.Background(), store, "sub-a")
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+	if second.Added != 1 || second.Removed != 1 || second.Disabled != 0 || len(second.RouteChanges) != 1 {
+		t.Fatalf("unexpected second refresh result: %#v", second)
+	}
+	snapshot = store.Snapshot()
+	if len(snapshot.Proxies) != 2 {
+		t.Fatalf("expected fallback and current nodes, got %#v", snapshot.Proxies)
+	}
+	for _, proxy := range snapshot.Proxies {
+		if proxy.ID == removedID {
+			t.Fatalf("removed subscription node was retained: %#v", snapshot.Proxies)
+		}
+	}
+	account := snapshot.Accounts[0]
+	if account.ProxyID != "fallback" || account.Token != "" {
+		t.Fatalf("removed account route was not migrated safely: %#v", account)
+	}
+}
+
+func TestRefreshSubscriptionSanitizesFetchFailure(t *testing.T) {
+	previous := fetchSubscription
+	secretURL := "https://user:secret@example.com/subscription?token=private-token"
+	fetchSubscription = func(context.Context, string) ([]byte, error) {
+		return nil, errors.New("fetch subscription: " + secretURL)
+	}
+	t.Cleanup(func() { fetchSubscription = previous })
+
+	store := &memoryStore{cfg: config.Config{ProxySubscriptions: []config.ProxySubscription{{
+		ID: "sub-a", Name: "Airport", URL: secretURL,
+	}}}}
+	_, err := RefreshSubscription(context.Background(), store, "sub-a")
+	if err == nil {
+		t.Fatal("expected fetch failure")
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-token") {
+		t.Fatalf("returned error leaked subscription credential: %v", err)
+	}
+	lastError := store.Snapshot().ProxySubscriptions[0].LastError
+	if strings.Contains(lastError, "secret") || strings.Contains(lastError, "private-token") || strings.Contains(lastError, "example.com") {
+		t.Fatalf("persisted error leaked subscription credential: %q", lastError)
+	}
+}
+
+func TestRefreshSubscriptionRejectsStaleURLWithoutOverwritingNewConfig(t *testing.T) {
+	previous := fetchSubscription
+	store := &memoryStore{cfg: config.Config{ProxySubscriptions: []config.ProxySubscription{{
+		ID:   "sub-a",
+		Name: "Airport",
+		URL:  "https://old.example.invalid/subscription",
+	}}}}
+	fetchSubscription = func(context.Context, string) ([]byte, error) {
+		if err := store.Update(func(cfg *config.Config) error {
+			cfg.ProxySubscriptions[0].URL = "https://new.example.invalid/subscription"
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		return []byte("vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none#old"), nil
+	}
+	t.Cleanup(func() { fetchSubscription = previous })
+
+	_, err := RefreshSubscription(context.Background(), store, "sub-a")
+	var staleErr *SubscriptionRefreshStaleError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("expected stale refresh error, got %v", err)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.ProxySubscriptions[0].URL != "https://new.example.invalid/subscription" {
+		t.Fatalf("new subscription URL was overwritten: %#v", snapshot.ProxySubscriptions[0])
+	}
+	if snapshot.ProxySubscriptions[0].LastError != "" || len(snapshot.Proxies) != 0 {
+		t.Fatalf("stale refresh mutated the replacement configuration: %#v", snapshot)
+	}
+}
+
+func TestRefreshSubscriptionRejectsRemovedManualRouteWithoutFallback(t *testing.T) {
+	useTestSubscriptionFetcher(t)
 	var version atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -27,46 +169,28 @@ func TestRefreshSubscriptionImportsUpdatesAndDisablesRemovedAssignedNode(t *test
 	store := &memoryStore{cfg: config.Config{ProxySubscriptions: []config.ProxySubscription{{
 		ID: "sub-a", Name: "Airport", URL: server.URL,
 	}}}}
-	first, err := RefreshSubscription(context.Background(), store, "sub-a")
-	if err != nil {
+	if _, err := RefreshSubscription(context.Background(), store, "sub-a"); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	if first.Added != 1 || first.NodeCount != 1 {
-		t.Fatalf("unexpected first refresh result: %#v", first)
+	removedID := store.Snapshot().Proxies[0].ID
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.Accounts = []config.Account{{Email: "user@example.com", Password: "pwd", ProxyID: removedID}}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed assigned account: %v", err)
+	}
+	version.Store(1)
+	if _, err := RefreshSubscription(context.Background(), store, "sub-a"); err == nil {
+		t.Fatal("expected refresh to reject removal without a fallback")
 	}
 	snapshot := store.Snapshot()
-	if len(snapshot.Proxies) != 1 || snapshot.Proxies[0].SubscriptionID != "sub-a" {
-		t.Fatalf("expected imported subscription node, got %#v", snapshot.Proxies)
-	}
-	removedID := snapshot.Proxies[0].ID
-	store.mu.Lock()
-	store.cfg.Accounts = []config.Account{{Email: "user@example.com", ProxyID: removedID}}
-	store.mu.Unlock()
-
-	version.Store(1)
-	second, err := RefreshSubscription(context.Background(), store, "sub-a")
-	if err != nil {
-		t.Fatalf("second refresh: %v", err)
-	}
-	if second.Added != 1 || second.Disabled != 1 {
-		t.Fatalf("unexpected second refresh result: %#v", second)
-	}
-	snapshot = store.Snapshot()
-	if len(snapshot.Proxies) != 2 {
-		t.Fatalf("expected current and retained assigned nodes, got %#v", snapshot.Proxies)
-	}
-	foundDisabled := false
-	for _, proxy := range snapshot.Proxies {
-		if proxy.ID == removedID {
-			foundDisabled = proxy.Disabled && proxy.DisabledReason == config.ProxyDisabledSubscriptionRemoved
-		}
-	}
-	if !foundDisabled {
-		t.Fatalf("expected removed assigned node to be retained disabled, got %#v", snapshot.Proxies)
+	if len(snapshot.Proxies) != 1 || snapshot.Proxies[0].ID != removedID || snapshot.Accounts[0].ProxyID != removedID {
+		t.Fatalf("failed route migration changed configuration: %#v", snapshot)
 	}
 }
 
 func TestRefreshSubscriptionPreservesSameSubscriptionNodeState(t *testing.T) {
+	useTestSubscriptionFetcher(t)
 	var version atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -110,6 +234,7 @@ func TestRefreshSubscriptionPreservesSameSubscriptionNodeState(t *testing.T) {
 }
 
 func TestRefreshSubscriptionDeduplicatesEquivalentIncomingAliasesForExistingNode(t *testing.T) {
+	useTestSubscriptionFetcher(t)
 	const existingURI = "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls#existing"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -142,6 +267,7 @@ func TestRefreshSubscriptionDeduplicatesEquivalentIncomingAliasesForExistingNode
 }
 
 func TestRefreshSubscriptionSkipsEquivalentExternalNodesWithoutRewritingAssignedProxy(t *testing.T) {
+	useTestSubscriptionFetcher(t)
 	const manualURI = "vless://11111111-1111-1111-1111-111111111111@manual.example.com:443?encryption=none&security=tls&sni=manual.example.com#Manual"
 	const otherSubscriptionURI = "vless://22222222-2222-2222-2222-222222222222@other.example.com:443?encryption=none&security=tls&sni=other.example.com#Other"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -73,7 +73,10 @@ func Global() *Store {
 }
 
 func NewFromEnv() *Store {
-	enabled := true
+	// Packet capture contains raw prompts and upstream responses.  It is a
+	// troubleshooting tool, not a production default; require an explicit
+	// opt-in through DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE=true.
+	enabled := false
 	if raw, ok := os.LookupEnv("DEEPSEEK_WEB_TO_API_DEV_PACKET_CAPTURE"); ok {
 		enabled = parseBool(raw)
 	}
